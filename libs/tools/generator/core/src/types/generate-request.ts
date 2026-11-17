@@ -10,6 +10,9 @@ export type GenerateRequest = RequireExactlyOne<
 > & {
   profile?: GeneratorProfile;
 
+  /** Settings used instead of the profile's stored settings. Policy still applies. */
+  settings?: object;
+
   /** Traces the origin of the generation request. This parameter is
    *  copied to the generated credential.
    *

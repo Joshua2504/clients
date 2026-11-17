@@ -36,6 +36,7 @@ import {
   CredentialType,
   AlgorithmMetadata,
 } from "../metadata";
+import { constrain } from "../policies/constrain";
 import { CredentialGeneratorProviders } from "../providers";
 import { GenerateRequest } from "../types";
 import { isAlgorithmRequest, isTypeRequest } from "../types/metadata-request";
@@ -128,10 +129,24 @@ export class DefaultCredentialGeneratorService implements CredentialGeneratorSer
       ),
     );
 
+    // settings sent with a request replace the stored settings; policy still applies
+    const requestSettings$ = zip(request$, metadata$).pipe(
+      concatMap(([request, metadata]) =>
+        request.settings
+          ? this.policy$(metadata, { account$ }, request.profile).pipe(
+              first(),
+              map((constraints) => constrain(constraints, request.settings!).state),
+            )
+          : of(null),
+      ),
+    );
+
     // generation proper
-    const generate$ = zip([request$, settings$, engine$]).pipe(
+    const generate$ = zip([request$, settings$, engine$, requestSettings$]).pipe(
       tap(([request]) => this.log.debug(request, "generating credential")),
-      concatMap(([request, settings, engine]) => engine.generate(request, settings)),
+      concatMap(([request, settings, engine, requestSettings]) =>
+        engine.generate(request, requestSettings ?? settings),
+      ),
       takeUntil(anyComplete([settings$])),
     );
 

@@ -5,7 +5,10 @@
  * and part of the public API contract.
  */
 
-export { CredentialGeneratorComponent } from "./credential-generator.component";
+export {
+  CredentialGeneratorComponent,
+  SitePasswordSettings,
+} from "./credential-generator.component";
 export { CredentialGeneratorHistoryComponent } from "./credential-generator-history.component";
 export { CredentialGeneratorHistoryDialogComponent } from "./credential-generator-history-dialog.component";
 export { EmptyCredentialHistoryComponent } from "./empty-credential-history.component";

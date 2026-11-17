@@ -82,6 +82,9 @@ function convertPasswordRequest(settings: PasswordGenerationOptions): PasswordGe
     minUppercase: settings.minUppercase!,
     minNumber: settings.minNumber!,
     minSpecial: settings.minSpecial!,
+    customRequiredChars: settings.customRequiredChars,
+    customAllowedChars: settings.customAllowedChars,
+    maxConsecutive: settings.maxConsecutive,
   };
 }
 

@@ -9,6 +9,7 @@ import {
   OnDestroy,
   OnInit,
   Output,
+  signal,
   SimpleChanges,
 } from "@angular/core";
 import { FormBuilder, ReactiveFormsModule } from "@angular/forms";
@@ -43,6 +44,7 @@ import {
   ToastService,
   Option,
   BaseCardDirective,
+  CalloutComponent,
   CardComponent,
   ColorPasswordComponent,
   AriaDisableDirective,
@@ -70,6 +72,8 @@ import {
   AlgorithmMetadata,
   Algorithm,
   AlgorithmsByType,
+  BuiltIn,
+  PasswordGenerationOptions,
   Type,
 } from "@bitwarden/generator-core";
 import { GeneratorHistoryService } from "@bitwarden/generator-history";
@@ -81,6 +85,7 @@ import { NudgeGeneratorSpotlightComponent } from "./nudge-generator-spotlight.co
 import { PassphraseSettingsComponent } from "./passphrase-settings.component";
 import { PasswordSettingsComponent } from "./password-settings.component";
 import { SubaddressSettingsComponent } from "./subaddress-settings.component";
+import { TransientPasswordSettings } from "./transient-password-settings";
 import { UsernameSettingsComponent } from "./username-settings.component";
 import { translate } from "./util";
 
@@ -89,6 +94,13 @@ import { translate } from "./util";
 const IDENTIFIER = "identifier";
 const FORWARDER = "forwarder";
 const NONE_SELECTED = "none";
+
+/** Password settings that match a website's password rules. */
+export type SitePasswordSettings = {
+  /** The domain the rules belong to */
+  website: string;
+  settings: PasswordGenerationOptions;
+};
 
 // FIXME(https://bitwarden.atlassian.net/browse/CL-764): Migrate to OnPush
 // eslint-disable-next-line @angular-eslint/prefer-on-push-component-change-detection
@@ -99,6 +111,7 @@ const NONE_SELECTED = "none";
     ToggleGroupModule,
     NudgeGeneratorSpotlightComponent,
     BaseCardDirective,
+    CalloutComponent,
     CardComponent,
     ColorPasswordComponent,
     AriaDisableDirective,
@@ -185,6 +198,14 @@ export class CredentialGeneratorComponent implements OnInit, OnChanges, OnDestro
   @Input()
   website: string | null = null;
 
+  /** Replaces the password settings until the user resets them. They are never saved. Read on init. */
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-signals
+  @Input()
+  sitePasswordSettings: SitePasswordSettings | null = null;
+
+  protected readonly siteSettings = signal<TransientPasswordSettings | null>(null);
+
   /** Emits credentials created from a generation request. */
   // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
   // eslint-disable-next-line @angular-eslint/prefer-output-emitter-ref
@@ -225,6 +246,20 @@ export class CredentialGeneratorComponent implements OnInit, OnChanges, OnDestro
 
       this.log.info({ userId: account.id }, "account not specified; using active account settings");
       this.account$.next(account);
+    }
+
+    if (this.sitePasswordSettings) {
+      const account$ = this.account$;
+      const storedSettings = this.generatorService.settings(BuiltIn.password, { account$ });
+      const stored = await firstValueFrom(storedSettings);
+      storedSettings.complete();
+      const policy$ = this.generatorService.policy$(BuiltIn.password, { account$ });
+      this.siteSettings.set(
+        new TransientPasswordSettings(
+          { ...stored, ...this.sitePasswordSettings.settings },
+          policy$,
+        ),
+      );
     }
 
     combineLatest([
@@ -687,9 +722,19 @@ export class CredentialGeneratorComponent implements OnInit, OnChanges, OnDestro
     if (this.website) {
       request.website = this.website;
     }
+    const siteSettings = this.siteSettings();
+    if (siteSettings && algorithm.id === Algorithm.password) {
+      request.settings = siteSettings.value;
+    }
 
     this.log.debug(request, "generation requested");
     this.generate$.next(request);
+  }
+
+  /** Goes back to the account's stored settings. */
+  protected async resetSiteSettings() {
+    this.siteSettings.set(null);
+    await this.generate("site settings reset");
   }
 
   private toOptions(algorithms: AlgorithmMetadata[]) {

@@ -134,6 +134,51 @@ describe("DefaultCredentialGeneratorService", () => {
       expect(mockEngine.generate).toHaveBeenCalled();
     });
 
+    it("applies policy to settings sent with the request and generates with them", async () => {
+      const mockEngine = {
+        generate: jest
+          .fn()
+          .mockResolvedValue(
+            new GeneratedCredential("generatedPassword", Type.password, Date.now(), "unit test"),
+          ),
+      };
+      const accountProfile = {};
+      const mockMetadata = {
+        id: Algorithm.password,
+        engine: { create: jest.fn().mockReturnValue(mockEngine) },
+        profiles: { [Profile.account]: accountProfile },
+      } as unknown as GeneratorMetadata<any>;
+      providers.metadata!.metadata = jest.fn().mockReturnValue(mockMetadata);
+      providers.profile!.constraints$ = jest
+        .fn()
+        .mockReturnValue(
+          of({ constraints: {}, adjust: (s: any) => ({ ...s, length: 20 }), fix: (s: any) => s }),
+        );
+      service = createService({
+        settings: () => new BehaviorSubject({ length: 12 }) as any,
+      });
+      const on$ = new Subject<GenerateRequest>();
+      const account$ = new BehaviorSubject(account);
+      const result$ = new BehaviorSubject<GeneratedCredential | null>(null);
+
+      service.generate$({ on$, account$ }).subscribe(result$);
+      on$.next({
+        algorithm: Algorithm.password,
+        settings: { length: 8, customRequiredChars: "-" },
+      });
+      await awaitAsync();
+
+      expect(providers.profile!.constraints$).toHaveBeenCalledWith(
+        accountProfile,
+        expect.anything(),
+      );
+      expect(mockEngine.generate).toHaveBeenCalledWith(expect.anything(), {
+        length: 20,
+        customRequiredChars: "-",
+      });
+      expect(result$.value?.credential).toEqual("generatedPassword");
+    });
+
     it("should determine preferred algorithm from credential type and generate credentials", async () => {
       const mockEngine = {
         generate: jest
