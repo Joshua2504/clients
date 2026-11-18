@@ -5,6 +5,7 @@ import { AuthService } from "../../../auth/abstractions/auth.service";
 import { AuthenticationStatus } from "../../../auth/enums/authentication-status";
 import { DomainSettingsService } from "../../../autofill/services/domain-settings.service";
 import { Utils } from "../../../platform/misc/utils";
+import { UserId } from "../../../types/guid";
 import { VaultSettingsService } from "../../../vault/abstractions/vault-settings/vault-settings.service";
 import { ConfigService } from "../../abstractions/config/config.service";
 import {
@@ -706,6 +707,76 @@ describe("FidoAuthenticatorService", () => {
           }),
           windowReference,
         );
+      });
+
+      it("makes the assertion with the account the user chose a credential of", async () => {
+        const userId = "other-user" as UserId;
+        requestManager.newActiveRequest.mockResolvedValue({
+          type: Fido2ActiveRequestEvents.Continue,
+          credentialId: crypto.randomUUID(),
+          userId,
+        });
+
+        await client.assertCredential(params, windowReference);
+
+        expect(authenticator.getAssertion).toHaveBeenCalledWith(
+          expect.objectContaining({ assumeUserPresence: true, userId }),
+          windowReference,
+        );
+      });
+
+      it("names no account when the request names none", async () => {
+        await client.assertCredential(params, windowReference);
+
+        expect(authenticator.getAssertion.mock.lastCall?.[0]).not.toHaveProperty("userId");
+      });
+
+      it("does not discover credentials while the active account is locked", async () => {
+        authService.activeAccountStatus$ = of(AuthenticationStatus.Locked);
+
+        await client.assertCredential(params, windowReference);
+
+        expect(authenticator.silentCredentialDiscovery).not.toHaveBeenCalled();
+      });
+
+      describe("serving several accounts", () => {
+        let candidateUserIds$: BehaviorSubject<UserId[]>;
+
+        beforeEach(() => {
+          candidateUserIds$ = new BehaviorSubject(["other-user" as UserId]);
+          client = new Fido2ClientService(
+            authenticator,
+            configService,
+            authService,
+            vaultSettingsService,
+            domainSettingsService,
+            taskSchedulerService,
+            requestManager,
+            undefined,
+            candidateUserIds$,
+          );
+          authService.activeAccountStatus$ = of(AuthenticationStatus.Locked);
+          authenticator.silentCredentialDiscovery.mockResolvedValue([]);
+        });
+
+        it("discovers credentials while an account is served, whatever the active account's status", async () => {
+          await client.assertCredential(params, windowReference);
+
+          expect(authenticator.silentCredentialDiscovery).toHaveBeenCalledWith(RpId);
+        });
+
+        it("does not discover credentials while no account is served", async () => {
+          candidateUserIds$.next([]);
+
+          await client.assertCredential(params, windowReference);
+
+          expect(authenticator.silentCredentialDiscovery).not.toHaveBeenCalled();
+          expect(requestManager.newActiveRequest).toHaveBeenCalledWith(
+            undefined,
+            [],
+            expect.anything(),
+          );
+        });
       });
 
       it("restarts the mediated conditional request if a user aborts the request", async () => {

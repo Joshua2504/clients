@@ -267,6 +267,7 @@ describe("FidoAuthenticatorService", () => {
             userHandle: Fido2Utils.arrayToString(params.userEntity.id),
             userVerification,
             rpId: params.rpEntity.id,
+            userIds: [userId],
           } as NewCredentialParams);
         });
       }
@@ -610,6 +611,7 @@ describe("FidoAuthenticatorService", () => {
 
         expect(userInterfaceSession.pickCredential).toHaveBeenCalledWith({
           cipherIds: ciphers.map((c) => c.id),
+          cipherRefs: ciphers.map((c) => ({ userId, cipherId: c.id })),
           userVerification: false,
           masterPasswordRepromptRequired: false,
         });
@@ -627,6 +629,7 @@ describe("FidoAuthenticatorService", () => {
 
         expect(userInterfaceSession.pickCredential).toHaveBeenCalledWith({
           cipherIds: [discoverableCiphers[0].id],
+          cipherRefs: [{ userId, cipherId: discoverableCiphers[0].id }],
           userVerification: false,
           masterPasswordRepromptRequired: false,
         });
@@ -645,6 +648,7 @@ describe("FidoAuthenticatorService", () => {
 
           expect(userInterfaceSession.pickCredential).toHaveBeenCalledWith({
             cipherIds: ciphers.map((c) => c.id),
+            cipherRefs: ciphers.map((c) => ({ userId, cipherId: c.id })),
             userVerification,
             masterPasswordRepromptRequired: false,
           });

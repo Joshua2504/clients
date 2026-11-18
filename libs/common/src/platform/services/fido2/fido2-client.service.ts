@@ -1,11 +1,12 @@
 // FIXME: Update this file to be type safe and remove this and next line
 // @ts-strict-ignore
-import { firstValueFrom, Subscription } from "rxjs";
+import { firstValueFrom, Observable, Subscription } from "rxjs";
 import { parse } from "tldts";
 
 import { AuthService } from "../../../auth/abstractions/auth.service";
 import { AuthenticationStatus } from "../../../auth/enums/authentication-status";
 import { DomainSettingsService } from "../../../autofill/services/domain-settings.service";
+import { UserId } from "../../../types/guid";
 import { VaultSettingsService } from "../../../vault/abstractions/vault-settings/vault-settings.service";
 import { ConfigService } from "../../abstractions/config/config.service";
 import {
@@ -63,6 +64,12 @@ export class Fido2ClientService<
     },
   };
 
+  /**
+   * @param candidateUserIds$ The accounts the authenticator serves, when it serves more than the
+   * active account. Give it the observable the authenticator was given. Credentials for a
+   * conditional request are then discovered whenever one of these accounts is available, rather
+   * than only while the active account is unlocked.
+   */
   constructor(
     private authenticator: Fido2AuthenticatorService<ParentWindowReference>,
     private configService: ConfigService,
@@ -72,6 +79,7 @@ export class Fido2ClientService<
     private taskSchedulerService: TaskSchedulerService,
     private requestManager: Fido2ActiveRequestManager,
     private logService?: LogService,
+    private candidateUserIds$?: Observable<UserId[]>,
   ) {
     this.taskSchedulerService.registerTaskHandler(ScheduledTaskNames.fido2ClientAbortTimeout, () =>
       this.timeoutAbortController?.abort(),
@@ -398,11 +406,9 @@ export class Fido2ClientService<
     let getAssertionResult;
     let assumeUserPresence = false;
     while (!getAssertionResult) {
-      const authStatus = await firstValueFrom(this.authService.activeAccountStatus$);
-      const availableCredentials =
-        authStatus === AuthenticationStatus.Unlocked
-          ? await this.authenticator.silentCredentialDiscovery(params.rpId)
-          : [];
+      const availableCredentials = (await this.canDiscoverCredentials())
+        ? await this.authenticator.silentCredentialDiscovery(params.rpId)
+        : [];
       this.logService?.info(
         `[Fido2Client] started mediated request, available credentials: ${availableCredentials.length}`,
       );
@@ -433,6 +439,7 @@ export class Fido2ClientService<
         params,
         clientDataHash,
         assumeUserPresence,
+        userId: requestResult.userId,
       });
 
       try {
@@ -447,6 +454,16 @@ export class Fido2ClientService<
     }
 
     return this.generateAssertCredentialResult(getAssertionResult, clientDataJSONBytes);
+  }
+
+  /** Whether a vault the authenticator serves can be read without asking the user to unlock. */
+  private async canDiscoverCredentials(): Promise<boolean> {
+    if (this.candidateUserIds$ != undefined) {
+      return (await firstValueFrom(this.candidateUserIds$)).length > 0;
+    }
+
+    const authStatus = await firstValueFrom(this.authService.activeAccountStatus$);
+    return authStatus === AuthenticationStatus.Unlocked;
   }
 
   private generateAssertCredentialResult(
@@ -550,10 +567,12 @@ function mapToGetAssertionParams({
   params,
   clientDataHash,
   assumeUserPresence,
+  userId,
 }: {
   params: AssertCredentialParams;
   clientDataHash: ArrayBuffer;
   assumeUserPresence?: boolean;
+  userId?: UserId;
 }): Fido2AuthenticatorGetAssertionParams {
   const allowCredentialDescriptorList: PublicKeyCredentialDescriptor[] =
     params.allowedCredentials.map((c) => ({
@@ -574,5 +593,6 @@ function mapToGetAssertionParams({
     extensions: {},
     fallbackSupported: params.fallbackSupported,
     assumeUserPresence,
+    ...(userId != undefined ? { userId } : {}),
   };
 }

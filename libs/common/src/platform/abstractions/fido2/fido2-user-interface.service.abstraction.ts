@@ -1,3 +1,6 @@
+import { AccountCipherRef } from "../../../autofill/types/account-cipher";
+import { UserId } from "../../../types/guid";
+
 /**
  * Parameters used to ask the user to confirm the creation of a new credential.
  */
@@ -25,6 +28,13 @@ export interface NewCredentialParams {
    * The relying party ID is usually the URL
    */
   rpId: string;
+
+  /**
+   * The accounts the credential may be saved to, the default first. A user interface that lets
+   * the user choose offers exactly these and returns the choice as `userId`. A user interface
+   * that ignores this saves to the active account.
+   */
+  userIds?: UserId[];
 }
 
 /**
@@ -35,6 +45,13 @@ export interface PickCredentialParams {
    * The IDs of the credentials that the user can pick from.
    */
   cipherIds: string[];
+
+  /**
+   * The same credentials as {@link cipherIds}, in the same order, each with the account whose
+   * vault holds it. A cipher id alone does not identify the account: an item shared through an
+   * organization has the same id in every member's vault.
+   */
+  cipherRefs?: AccountCipherRef[];
 
   /**
    * Whether or not the user must be verified before completing the operation.
@@ -81,21 +98,28 @@ export abstract class Fido2UserInterfaceSession {
    * @param params The parameters to use when asking the user to pick a credential.
    * @param abortController An abort controller that can be used to cancel/close the session.
    * @returns The ID of the cipher that contains the credentials the user picked. If not cipher was picked, return cipherId = undefined to to let the authenticator throw the error.
+   * `userId` is the account of the picked cipher, as named in {@link PickCredentialParams.cipherRefs}.
+   * It is required when the credentials offered belong to more than one account; the authenticator
+   * rejects an answer that does not name one of the offered credentials. `userVerified` must be
+   * the result of verifying the user of that account.
    */
   abstract pickCredential(
     params: PickCredentialParams,
-  ): Promise<{ cipherId: string | undefined; userVerified: boolean }>;
+  ): Promise<{ cipherId: string | undefined; userVerified: boolean; userId?: UserId }>;
 
   /**
    * Ask the user to confirm the creation of a new credential.
    *
    * @param params The parameters to use when asking the user to confirm the creation of a new credential.
    * @param abortController An abort controller that can be used to cancel/close the session.
-   * @returns The ID of the cipher where the new credential should be saved.
+   * @returns The ID of the cipher where the new credential should be saved. `userId` is the
+   * account whose vault holds that cipher, one of {@link NewCredentialParams.userIds}; when it is
+   * left out, the cipher is looked up in the active account. `userVerified` must be the result
+   * of verifying the user of that account.
    */
   abstract confirmNewCredential(
     params: NewCredentialParams,
-  ): Promise<{ cipherId?: string; userVerified: boolean }>;
+  ): Promise<{ cipherId?: string; userVerified: boolean; userId?: UserId }>;
 
   /**
    * Make sure that the vault is unlocked.
@@ -107,8 +131,13 @@ export abstract class Fido2UserInterfaceSession {
    * Inform the user that the operation was cancelled because their vault contains excluded credentials.
    *
    * @param existingCipherIds The IDs of the excluded credentials.
+   * @param existingCipherRefs The same credentials, in the same order, each with the account
+   * whose vault holds it.
    */
-  abstract informExcludedCredential(existingCipherIds: string[]): Promise<void>;
+  abstract informExcludedCredential(
+    existingCipherIds: string[],
+    existingCipherRefs?: AccountCipherRef[],
+  ): Promise<void>;
 
   /**
    * Inform the user that the operation was cancelled because their vault does not contain any useable credentials.

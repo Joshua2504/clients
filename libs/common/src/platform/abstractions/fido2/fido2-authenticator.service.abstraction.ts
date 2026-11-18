@@ -1,3 +1,4 @@
+import { UserId } from "../../../types/guid";
 import { Fido2CredentialView } from "../../../vault/models/view/fido2-credential.view";
 
 /**
@@ -36,7 +37,8 @@ export abstract class Fido2AuthenticatorService<ParentWindowReference> {
   ): Promise<Fido2AuthenticatorGetAssertionResult>;
 
   /**
-   * Discover credentials for a given Relying Party
+   * Discover credentials for a given Relying Party, in every account the authenticator serves.
+   * A credential held by more than one of those accounts is returned once per account.
    *
    * @param rpId The Relying Party's ID
    * @returns A promise that resolves with an array of discoverable credentials
@@ -149,6 +151,13 @@ export interface Fido2AuthenticatorGetAssertionParams {
 
   // Bypass the UI and assume that the user has already interacted with the authenticator
   assumeUserPresence?: boolean;
+
+  /**
+   * Only credentials of this account are considered. Set it when the user has already chosen a
+   * credential of a particular account. Without it, every account the authenticator serves is
+   * searched.
+   */
+  userId?: UserId;
 }
 
 export interface Fido2AuthenticatorGetAssertionResult {

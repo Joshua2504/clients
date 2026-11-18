@@ -1,5 +1,6 @@
 import { Observable, Subject } from "rxjs";
 
+import { UserId } from "../../../types/guid";
 import { Fido2CredentialView } from "../../../vault/models/view/fido2-credential.view";
 
 export const Fido2ActiveRequestEvents = {
@@ -13,7 +14,15 @@ type Fido2ActiveRequestEvent = typeof Fido2ActiveRequestEvents;
 export type RequestResult =
   | { type: Fido2ActiveRequestEvent["Refresh"] }
   | { type: Fido2ActiveRequestEvent["Abort"] }
-  | { type: Fido2ActiveRequestEvent["Continue"]; credentialId: string };
+  | {
+      type: Fido2ActiveRequestEvent["Continue"];
+      credentialId: string;
+      /**
+       * The account whose credential the user chose. The assertion is then made with that
+       * account's credential only. Without it, every account the authenticator serves is searched.
+       */
+      userId?: UserId;
+    };
 
 export interface ActiveRequest {
   credentials: Fido2CredentialView[];
