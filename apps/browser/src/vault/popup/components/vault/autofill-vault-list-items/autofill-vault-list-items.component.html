@@ -16,3 +16,18 @@
     }
   </app-vault-list-items-container>
 }
+
+@for (account of otherAccountCiphers(); track account.userId) {
+  <app-vault-list-items-container
+    [ciphers]="account.ciphers"
+    [title]="
+      'suggestionsForAccount'
+        | i18n
+          : (((currentURIIsBlocked$ | async) ? 'itemSuggestions' : 'autofillSuggestions') | i18n)
+          : account.email
+    "
+    [groupByType]="groupByType()"
+    [accountUserId]="account.userId"
+    isAutofillList
+  ></app-vault-list-items-container>
+}

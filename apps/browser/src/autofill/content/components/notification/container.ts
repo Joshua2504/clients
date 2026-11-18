@@ -9,7 +9,7 @@ import {
   NotificationType,
 } from "../../../notification/abstractions/notification-bar";
 import { NotificationCipherData } from "../cipher/types";
-import { CollectionView, FolderView, I18n, OrgView } from "../common-types";
+import { AccountView, CollectionView, FolderView, I18n, OrgView } from "../common-types";
 import { themes, spacing } from "../constants/styles";
 
 import { NotificationBody, componentClassPrefix as notificationBodyClassPrefix } from "./body";
@@ -24,6 +24,8 @@ export type NotificationContainerProps = NotificationBarIframeInitData & {
   handleSaveAction: (e: Event) => void;
   handleEditOrUpdateAction: (e: Event) => void;
 } & {
+  accounts?: AccountView[];
+  handleAccountSelection?: (userId: string) => void;
   ciphers?: NotificationCipherData[];
   collections?: CollectionView[];
   folders?: FolderView[];
@@ -37,6 +39,8 @@ export type NotificationContainerProps = NotificationBarIframeInitData & {
 };
 
 export function NotificationContainer({
+  accounts,
+  handleAccountSelection,
   handleCloseNotification,
   handleEditOrUpdateAction,
   handleSaveAction,
@@ -74,6 +78,8 @@ export function NotificationContainer({
           : nothing
       }
       ${NotificationFooter({
+        accounts,
+        handleAccountSelection,
         handleSaveAction,
         collections,
         folders,

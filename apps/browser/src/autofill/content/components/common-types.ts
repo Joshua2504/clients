@@ -37,3 +37,13 @@ export type CollectionView = {
   name: string;
   organizationId: string;
 };
+
+/** An account the save prompt can save to. */
+export type AccountView = {
+  id: string;
+  email: string;
+  /** The account the save currently goes to. */
+  selected: boolean;
+  /** Whether a policy keeps this account from saving to its individual vault. */
+  removeIndividualVault: boolean;
+};

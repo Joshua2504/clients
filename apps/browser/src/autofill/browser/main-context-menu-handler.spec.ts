@@ -15,6 +15,7 @@ import {
   NOOP_COMMAND_SUFFIX,
   SEPARATOR_ID,
 } from "@bitwarden/common/autofill/constants";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { AutofillSettingsServiceAbstraction } from "@bitwarden/common/autofill/services/autofill-settings.service";
 import { BillingAccountProfileStateService } from "@bitwarden/common/billing/abstractions/account/billing-account-profile-state.service";
 import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
@@ -89,6 +90,12 @@ describe("context-menu", () => {
   let configService: MockProxy<ConfigService>;
   let restricted$: BehaviorSubject<RestrictedCipherType[]>;
   let restrictedItemTypesService: RestrictedItemTypesService;
+  // What each account restricts; an account not listed follows `restricted$`.
+  let restrictedByUser: Map<UserId, RestrictedCipherType[]>;
+  // The accounts autofill serves: the unlocked active account, nobody opted in.
+  let autofillUserIds$: BehaviorSubject<UserId[]>;
+  const userId = "userId" as UserId;
+  const otherUserId = "otherUserId" as UserId;
 
   let removeAllSpy: jest.SpyInstance<void, [callback?: () => void]>;
   let createSpy: jest.SpyInstance<
@@ -107,9 +114,13 @@ describe("context-menu", () => {
     accountService = mock();
     configService = mock();
     restricted$ = new BehaviorSubject<RestrictedCipherType[]>([]);
+    restrictedByUser = new Map();
     restrictedItemTypesService = {
       restricted$,
+      restrictedFor$: (id: UserId) =>
+        restrictedByUser.has(id) ? of(restrictedByUser.get(id)!) : restricted$,
     } as Partial<RestrictedItemTypesService> as RestrictedItemTypesService;
+    autofillUserIds$ = new BehaviorSubject<UserId[]>([userId]);
 
     removeAllSpy = jest
       .spyOn(chrome.contextMenus, "removeAll")
@@ -136,13 +147,14 @@ describe("context-menu", () => {
       accountService,
       restrictedItemTypesService,
       configService,
+      { autofillUserIds$ } as unknown as AutofillAccountsService,
     );
 
     jest.spyOn(MainContextMenuHandler, "remove");
 
     autofillSettingsService.enableContextMenu$ = of(true);
     accountService.activeAccount$ = of({
-      id: "userId" as UserId,
+      id: userId,
       ...mockAccountInfoWith({
         email: "",
         name: undefined,
@@ -196,6 +208,78 @@ describe("context-menu", () => {
       const createdMenu = await sut.init();
       expect(createdMenu).toBeTruthy();
       expect(createSpy).toHaveBeenCalledTimes(9);
+    });
+
+    describe("with two accounts serving autofill", () => {
+      const cardRestriction = [{ cipherType: CipherType.Card, allowViewOrgIds: [] as string[] }];
+
+      beforeEach(() => {
+        autofillUserIds$.next([userId, otherUserId]);
+        billingAccountProfileStateService.hasPremiumFromAnySource$.mockImplementation((id) =>
+          of(id === otherUserId),
+        );
+      });
+
+      it("adds the verification code item when either account has premium", async () => {
+        await sut.init();
+
+        expect(createSpy).toHaveBeenCalledTimes(11);
+        expect(createSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ id: COPY_VERIFICATION_CODE_ID }),
+          expect.any(Function),
+        );
+      });
+
+      it("keeps the card item while one account may use cards", async () => {
+        restrictedByUser.set(otherUserId, cardRestriction);
+
+        await sut.init();
+
+        expect(createSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ id: AUTOFILL_CARD_ID }),
+          expect.any(Function),
+        );
+      });
+
+      it("removes the card item when every account restricts cards", async () => {
+        restrictedByUser.set(userId, cardRestriction);
+        restrictedByUser.set(otherUserId, cardRestriction);
+
+        await sut.init();
+
+        expect(createSpy).not.toHaveBeenCalledWith(
+          expect.objectContaining({ id: AUTOFILL_CARD_ID }),
+          expect.any(Function),
+        );
+      });
+
+      it("follows the remaining account once the premium account has locked", async () => {
+        autofillUserIds$.next([userId]);
+
+        await sut.init();
+
+        expect(createSpy).toHaveBeenCalledTimes(10);
+      });
+
+      it("offers the verification code of the same shared item only for the account with premium", async () => {
+        const shared = createCipher({ id: "shared" });
+
+        await sut.loadOptions("TEST_TITLE", `${userId}:shared`, shared, userId);
+        await sut.loadOptions("TEST_TITLE", `${otherUserId}:shared`, shared, otherUserId);
+
+        expect(MainContextMenuHandler["existingMenuItems"]).toContain(
+          `${COPY_VERIFICATION_CODE_ID}_${otherUserId}:shared`,
+        );
+        expect(MainContextMenuHandler["existingMenuItems"]).not.toContain(
+          `${COPY_VERIFICATION_CODE_ID}_${userId}:shared`,
+        );
+        expect(MainContextMenuHandler["existingMenuItems"]).toContain(
+          `${AUTOFILL_ID}_${userId}:shared`,
+        );
+        expect(MainContextMenuHandler["existingMenuItems"]).toContain(
+          `${AUTOFILL_ID}_${otherUserId}:shared`,
+        );
+      });
     });
 
     it("adds triage separator and menu item when the fillAssistDevTools dev flag is enabled", async () => {

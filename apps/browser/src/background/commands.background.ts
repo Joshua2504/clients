@@ -3,10 +3,9 @@
 import { filter, firstValueFrom, Observable } from "rxjs";
 
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
-import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
-import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
 import { getUserId } from "@bitwarden/common/auth/services/account.service";
 import { ExtensionCommand, ExtensionCommandType } from "@bitwarden/common/autofill/constants";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
 import {
   IntraprocessMessageSender,
@@ -36,7 +35,7 @@ export default class CommandsBackground {
   constructor(
     private main: MainBackground,
     private platformUtilsService: PlatformUtilsService,
-    private authService: AuthService,
+    private autofillAccountsService: AutofillAccountsService,
     private generatePasswordToClipboard: () => Observable<string>,
     private accountService: AccountService,
     private lockService: LockService,
@@ -134,7 +133,10 @@ export default class CommandsBackground {
       return;
     }
 
-    if ((await this.authService.getAuthStatus()) < AuthenticationStatus.Unlocked) {
+    // A fill shortcut acts when autofill serves an account. With none, the active account is
+    // asked to unlock and the command is retried.
+    const autofillUserIds = await firstValueFrom(this.autofillAccountsService.autofillUserIds$);
+    if (autofillUserIds.length === 0) {
       await openUnlockPopout(tab, () =>
         this.intraprocessMessageSender.send(ADD_TO_LOCKED_VAULT_PENDING_NOTIFICATIONS, {
           data: {

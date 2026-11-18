@@ -1,7 +1,5 @@
 import { concatMap, debounceTime, distinctUntilChanged, EMPTY, map, switchMap } from "rxjs";
 
-import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
-
 import MainBackground from "../../background/main.background";
 
 import { OverlayBackground } from "./abstractions/overlay.background";
@@ -30,28 +28,23 @@ export default class TabsBackground {
   }
 
   /**
-   * Rebuilds the context menu and the inline menu ciphers when the active user's fill ciphers
-   * change. This is the only refresh for cipher changes; it also fills both menus after an unlock
-   * and an account switch.
+   * Rebuilds the context menu and the inline menu ciphers when the fill ciphers of the accounts
+   * autofill serves change, and when those accounts change while there is still one to serve.
+   * This is the only refresh for cipher changes; it also fills both menus after an unlock and an
+   * account switch, and rebuilds them when one of several serving accounts locks.
    */
   private refreshOnFillCiphersChanged() {
-    this.main.accountService.activeAccount$
+    this.main.autofillAccountsService.autofillUserIds$
       .pipe(
-        switchMap((account) =>
-          account == null
-            ? EMPTY
-            : this.main.authService.authStatusFor$(account.id).pipe(
-                map((status) => status === AuthenticationStatus.Unlocked),
-                distinctUntilChanged(),
-                switchMap((unlocked) =>
-                  unlocked
-                    ? this.main.fillCipherPolicy.changed$(account.id).pipe(
-                        // Merges the emissions of one tick, such as the replays on subscribe.
-                        debounceTime(0),
-                      )
-                    : EMPTY,
-                ),
-              ),
+        map((userIds) => userIds.length > 0),
+        distinctUntilChanged(),
+        switchMap((servesAutofill) =>
+          servesAutofill
+            ? this.main.multiAccountFillCipherPolicy.changed$.pipe(
+                // Merges the emissions of one tick, such as the replays on subscribe.
+                debounceTime(0),
+              )
+            : EMPTY,
         ),
         concatMap(async () => {
           try {

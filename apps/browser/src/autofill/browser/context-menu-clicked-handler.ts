@@ -1,9 +1,7 @@
 import { firstValueFrom } from "rxjs";
 
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
-import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
 import { UserVerificationService } from "@bitwarden/common/auth/abstractions/user-verification/user-verification.service.abstraction";
-import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
 import { getOptionalUserId } from "@bitwarden/common/auth/services/account.service";
 import {
   AUTOFILL_CARD_ID,
@@ -21,8 +19,11 @@ import {
   GENERATE_PASSWORD_ID,
   NOOP_COMMAND_SUFFIX,
 } from "@bitwarden/common/autofill/constants";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
+import { AccountCipher, AccountCipherRef } from "@bitwarden/common/autofill/types/account-cipher";
 import { EventCollectionService, EventType } from "@bitwarden/common/dirt/event-logs";
 import { IntraprocessMessageSender } from "@bitwarden/common/platform/messaging";
+import { UserId } from "@bitwarden/common/types/guid";
 import { TotpService } from "@bitwarden/common/vault/abstractions/totp.service";
 import { CipherType } from "@bitwarden/common/vault/enums";
 import { CipherRepromptType } from "@bitwarden/common/vault/enums/cipher-reprompt-type";
@@ -45,7 +46,8 @@ import {
   RETRY_SENDER,
 } from "../background/abstractions/notification.background";
 import { AutofillTriageService } from "../services/abstractions/autofill-triage.service";
-import { CipherUse, FillCipherPolicy } from "../services/abstractions/fill-cipher-policy";
+import { CipherUse } from "../services/abstractions/fill-cipher-policy";
+import { MultiAccountFillCipherPolicy } from "../services/abstractions/multi-account-fill-cipher-policy";
 import { WebmapperDraftService } from "../services/webmapper-draft.service";
 import { AutofillCipherTypeId } from "../types";
 import {
@@ -69,7 +71,12 @@ import { ParsedUrl, parseUrl } from "../webmapper/url";
 
 export type CopyToClipboardOptions = { text: string; tab: chrome.tabs.Tab };
 export type CopyToClipboardAction = (options: CopyToClipboardOptions) => void;
-export type AutofillAction = (tab: chrome.tabs.Tab, cipher: CipherView) => Promise<void>;
+/** Fills `cipher`, read from the vault of `userId`, into `tab`. */
+export type AutofillAction = (
+  tab: chrome.tabs.Tab,
+  cipher: CipherView,
+  userId: UserId,
+) => Promise<void>;
 
 export type GeneratePasswordToClipboardAction = (tab: chrome.tabs.Tab) => Promise<void>;
 
@@ -81,6 +88,18 @@ export type CollectAutofillTriageAction = (
   tabId: number,
   frameId?: number,
 ) => Promise<AutofillTriageResponse | undefined>;
+
+/**
+ * The reference a cipher menu item id carries, written by `accountCipherKey`. `undefined` when
+ * the id does not name an account and a cipher.
+ */
+function parseAccountCipherKey(key: string | undefined): AccountCipherRef | undefined {
+  const [userId, cipherId, ...rest] = (key ?? "").split(":");
+  if (!userId || !cipherId || rest.length > 0) {
+    return undefined;
+  }
+  return { userId: userId as UserId, cipherId };
+}
 
 export class ContextMenuClickedHandler {
   private _triageResult: AutofillTriagePageResult | undefined;
@@ -109,7 +128,7 @@ export class ContextMenuClickedHandler {
     private generatePasswordToClipboard: GeneratePasswordToClipboardAction,
     private autofillAction: AutofillAction,
     private collectAutofillTriage: CollectAutofillTriageAction,
-    private authService: AuthService,
+    private autofillAccountsService: AutofillAccountsService,
     private totpService: TotpService,
     private eventCollectionService: EventCollectionService,
     private userVerificationService: UserVerificationService,
@@ -117,7 +136,9 @@ export class ContextMenuClickedHandler {
     private triageService: AutofillTriageService,
     private webmapperDrafts: WebmapperDraftService,
     private intraprocessMessageSender: IntraprocessMessageSender,
-    private fillCipherPolicy: FillCipherPolicy,
+    private fillCipherPolicy: MultiAccountFillCipherPolicy,
+    /** Makes an account the active one, so the reprompt popout shows and verifies its vault. */
+    private switchAccount: (userId: UserId) => Promise<void>,
   ) {}
 
   async run(info: chrome.contextMenus.OnClickData, tab: chrome.tabs.Tab) {
@@ -155,7 +176,9 @@ export class ContextMenuClickedHandler {
       return;
     }
 
-    if ((await this.authService.getAuthStatus()) < AuthenticationStatus.Unlocked) {
+    // With no account for autofill to serve, the active account is asked to unlock.
+    const autofillUserIds = await firstValueFrom(this.autofillAccountsService.autofillUserIds$);
+    if (autofillUserIds.length === 0) {
       await openUnlockPopout(tab, () =>
         this.intraprocessMessageSender.send(ADD_TO_LOCKED_VAULT_PENDING_NOTIFICATIONS, {
           data: {
@@ -173,7 +196,7 @@ export class ContextMenuClickedHandler {
     // NOTE: We don't actually use the first part of this ID, we further switch based on the parentMenuItemId
     // I would really love to not add it but that is a departure from how it currently works.
     const menuItemId = (info.menuItemId as string).split("_")[1]; // We create all the ids, we can guarantee they are strings
-    let cipher: CipherView | undefined;
+    let selection: AccountCipher | undefined;
     const isCreateCipherAction = [CREATE_LOGIN_ID, CREATE_IDENTITY_ID, CREATE_CARD_ID].includes(
       menuItemId as string,
     );
@@ -181,12 +204,12 @@ export class ContextMenuClickedHandler {
     const activeUserId = await firstValueFrom(
       this.accountService.activeAccount$.pipe(getOptionalUserId),
     );
-    if (activeUserId == null) {
-      return;
-    }
 
     if (isCreateCipherAction) {
-      // pass; defer to logic below
+      // A new item is created in the vault the popup shows, which is the active account's.
+      if (activeUserId == null) {
+        return;
+      }
     } else if (menuItemId === NOOP_COMMAND_SUFFIX) {
       if (!tab.url) {
         return;
@@ -202,27 +225,32 @@ export class ContextMenuClickedHandler {
       // This NOOP item has come through which is generally only for no access state but since we got here
       // we are actually unlocked we will do our best to find a good match of an item to autofill this is useful
       // in scenarios like unlock on autofill
-      const ciphers = await this.fillCipherPolicy.ciphersForUrl(
-        tab.url,
-        activeUserId,
-        CipherUse.UserFill,
-        { includeOtherTypes: additionalCiphersToGet },
-      );
+      const ciphers = await this.fillCipherPolicy.ciphersForUrl(tab.url, CipherUse.UserFill, {
+        includeOtherTypes: additionalCiphersToGet,
+      });
 
-      cipher = ciphers[0];
+      selection = ciphers[0];
     } else {
-      [cipher] = await this.fillCipherPolicy.ciphersForIds(
-        activeUserId,
-        [menuItemId],
-        CipherUse.UserFill,
-      );
+      // The item names its cipher and the account that owns it. A reference that no longer
+      // resolves within the accounts autofill serves is refused.
+      const ref = parseAccountCipherKey(menuItemId);
+      if (ref == null) {
+        return;
+      }
+      [selection] = await this.fillCipherPolicy.ciphersForRefs([ref], CipherUse.UserFill);
     }
 
-    if (!cipher && !isCreateCipherAction) {
+    if (!selection && !isCreateCipherAction) {
       return;
     }
 
-    await this.accountService.setAccountActivity(activeUserId, new Date());
+    const cipher = selection?.cipher;
+    // Every effect of the cipher runs for the account that owns it.
+    const userId = selection?.userId;
+    const activityUserId = userId ?? activeUserId;
+    if (activityUserId != null) {
+      await this.accountService.setAccountActivity(activityUserId, new Date());
+    }
     switch (info.parentMenuItemId) {
       case AUTOFILL_ID:
       case AUTOFILL_IDENTITY_ID:
@@ -234,18 +262,15 @@ export class ContextMenuClickedHandler {
           break;
         }
 
-        if (!cipher) {
+        if (!cipher || !userId) {
           break;
         }
 
-        if (await this.isPasswordRepromptRequired(cipher)) {
-          await openVaultItemPasswordRepromptPopout(tab, {
-            cipherId: cipher.id,
-            // The action here is passed on to the single-use reprompt window and doesn't change based on cipher type
-            action: AUTOFILL_ID,
-          });
+        if (await this.isPasswordRepromptRequired(cipher, userId)) {
+          // The action here is passed on to the single-use reprompt window and doesn't change based on cipher type
+          await this.openPasswordReprompt(tab, cipher, userId, activeUserId, AUTOFILL_ID);
         } else {
-          await this.autofillAction(tab, cipher);
+          await this.autofillAction(tab, cipher, userId);
         }
 
         break;
@@ -268,21 +293,21 @@ export class ContextMenuClickedHandler {
           break;
         }
 
-        if (!cipher || !cipher.login?.password) {
+        if (!cipher || !userId || !cipher.login?.password) {
           break;
         }
 
-        if (await this.isPasswordRepromptRequired(cipher)) {
-          await openVaultItemPasswordRepromptPopout(tab, {
-            cipherId: cipher.id,
-            action: COPY_PASSWORD_ID,
-          });
+        if (await this.isPasswordRepromptRequired(cipher, userId)) {
+          await this.openPasswordReprompt(tab, cipher, userId, activeUserId, COPY_PASSWORD_ID);
         } else {
           this.copyToClipboard({ text: cipher.login.password, tab: tab });
 
           void this.eventCollectionService.collect(
             EventType.Cipher_ClientCopiedPassword,
             cipher.id,
+            false,
+            undefined,
+            userId,
           );
         }
 
@@ -293,15 +318,18 @@ export class ContextMenuClickedHandler {
           break;
         }
 
-        if (!cipher || !cipher.login?.totp) {
+        if (!cipher || !userId || !cipher.login?.totp) {
           break;
         }
 
-        if (await this.isPasswordRepromptRequired(cipher)) {
-          await openVaultItemPasswordRepromptPopout(tab, {
-            cipherId: cipher.id,
-            action: COPY_VERIFICATION_CODE_ID,
-          });
+        if (await this.isPasswordRepromptRequired(cipher, userId)) {
+          await this.openPasswordReprompt(
+            tab,
+            cipher,
+            userId,
+            activeUserId,
+            COPY_VERIFICATION_CODE_ID,
+          );
         } else {
           const totpResponse = await firstValueFrom(this.totpService.getCode$(cipher.login.totp));
           this.copyToClipboard({
@@ -569,11 +597,42 @@ export class ContextMenuClickedHandler {
     await BrowserApi.sendMessage("webmapperCaptureFeedback", { tabId, type, message });
   }
 
-  private async isPasswordRepromptRequired(cipher: CipherView): Promise<boolean> {
+  /** Whether `cipher` must be re-prompted for, judged for the account that owns it. */
+  private async isPasswordRepromptRequired(cipher: CipherView, userId: UserId): Promise<boolean> {
     return (
       cipher.reprompt === CipherRepromptType.Password &&
-      (await this.userVerificationService.hasMasterPassword())
+      (await this.userVerificationService.hasMasterPassword(userId))
     );
+  }
+
+  /**
+   * Opens the reprompt popout for a cipher. The popout shows and verifies the vault of the active
+   * account, so a cipher of another account makes its account the active one first; the popout
+   * then verifies that account's master password and acts on its vault. When the account cannot
+   * become active the cipher is refused: verifying the active account's master password must not
+   * release it.
+   */
+  private async openPasswordReprompt(
+    tab: chrome.tabs.Tab,
+    cipher: CipherView,
+    userId: UserId,
+    activeUserId: UserId | null,
+    action: string,
+  ) {
+    if (userId !== activeUserId) {
+      const autofillUserIds = await firstValueFrom(this.autofillAccountsService.autofillUserIds$);
+      if (!autofillUserIds.includes(userId)) {
+        return;
+      }
+      await this.switchAccount(userId);
+      const switchedUserId = await firstValueFrom(
+        this.accountService.activeAccount$.pipe(getOptionalUserId),
+      );
+      if (switchedUserId !== userId) {
+        return;
+      }
+    }
+    await openVaultItemPasswordRepromptPopout(tab, { cipherId: cipher.id, action });
   }
 
   /**

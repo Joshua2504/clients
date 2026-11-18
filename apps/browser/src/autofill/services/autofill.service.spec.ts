@@ -1,5 +1,5 @@
 import { mock, MockProxy, mockReset } from "jest-mock-extended";
-import { BehaviorSubject, of, Subject } from "rxjs";
+import { BehaviorSubject, firstValueFrom, of, Subject } from "rxjs";
 
 import { PolicyService } from "@bitwarden/common/admin-console/abstractions/policy/policy.service.abstraction";
 import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
@@ -10,6 +10,7 @@ import {
   AutofillTargetingRuleTypes,
   FormPurposeCategories,
 } from "@bitwarden/common/autofill/constants";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { AutofillSettingsServiceAbstraction } from "@bitwarden/common/autofill/services/autofill-settings.service";
 import {
   DefaultDomainSettingsService,
@@ -44,6 +45,7 @@ import {
 import { UserId } from "@bitwarden/common/types/guid";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
 import { FieldType, LinkedIdType, LoginLinkedId, CipherType } from "@bitwarden/common/vault/enums";
+import { CipherRepromptType } from "@bitwarden/common/vault/enums/cipher-reprompt-type";
 import { CardView } from "@bitwarden/common/vault/models/view/card.view";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 import { FieldView } from "@bitwarden/common/vault/models/view/field.view";
@@ -107,7 +109,8 @@ describe("AutofillService", () => {
   const userVerificationService = mock<UserVerificationService>();
   const billingAccountProfileStateService = mock<BillingAccountProfileStateService>();
   const platformUtilsService = mock<PlatformUtilsService>();
-  let activeAccountStatusMock$: BehaviorSubject<AuthenticationStatus>;
+  let autofillUserIdsMock$: BehaviorSubject<UserId[]>;
+  let autofillAccountsService: MockProxy<AutofillAccountsService>;
   let authService: MockProxy<AuthService>;
   let configService: MockProxy<ConfigService>;
   let enableRoutingAnimationMock$: BehaviorSubject<boolean>;
@@ -149,6 +152,7 @@ describe("AutofillService", () => {
       authService,
     );
     domainSettingsService.equivalentDomains$ = of(mockEquivalentDomains);
+    domainSettingsService.equivalentDomainsFor$ = () => of(mockEquivalentDomains);
 
     scriptInjectorService = new BrowserScriptInjectorService(
       domainSettingsService,
@@ -162,10 +166,10 @@ describe("AutofillService", () => {
     autofillSettingsService.inlineMenuVisibility$ = inlineMenuVisibilityMock$;
     autofillSettingsService.showInlineMenuCards$ = showInlineMenuCardsMock$;
     autofillSettingsService.showInlineMenuIdentities$ = showInlineMenuIdentitiesMock$;
-    autofillSettingsService.autofillOnPageLoad$ = of(true);
-    activeAccountStatusMock$ = new BehaviorSubject(AuthenticationStatus.Unlocked);
-    authService = mock<AuthService>();
-    authService.activeAccountStatus$ = activeAccountStatusMock$;
+    autofillSettingsService.autofillOnPageLoadFor$.mockReturnValue(of(true));
+    autofillUserIdsMock$ = new BehaviorSubject([mockUserId]);
+    autofillAccountsService = mock<AutofillAccountsService>();
+    (autofillAccountsService as any).autofillUserIds$ = autofillUserIdsMock$;
     messageListener = mock<MessageListener>();
     enableRoutingAnimationMock$ = new BehaviorSubject(true);
     enableAutofillAnimationMock$ = new BehaviorSubject(true);
@@ -192,7 +196,7 @@ describe("AutofillService", () => {
       billingAccountProfileStateService,
       scriptInjectorService,
       accountService,
-      authService,
+      autofillAccountsService,
       userNotificationsSettings,
       messageListener,
       animationControlService,
@@ -524,7 +528,7 @@ describe("AutofillService", () => {
     });
 
     it("skips injecting the autofiller script when the user's account is not unlocked", async () => {
-      activeAccountStatusMock$.next(AuthenticationStatus.Locked);
+      autofillUserIdsMock$.next([]);
 
       await autofillService.injectAutofillScripts(sender.tab, sender.frameId, true);
 
@@ -532,6 +536,52 @@ describe("AutofillService", () => {
         file: "content/autofiller.js",
         frameId: sender.frameId,
         ...defaultExecuteScriptOptions,
+      });
+    });
+
+    describe("with two accounts serving autofill", () => {
+      const otherUserId = Utils.newGuid() as UserId;
+      const autofillerScript = {
+        file: "content/autofiller.js",
+        frameId: 1,
+        ...defaultExecuteScriptOptions,
+      };
+
+      beforeEach(() => {
+        jest.spyOn(autofillService, "getAutofillOnPageLoad").mockRestore();
+        autofillUserIdsMock$.next([mockUserId, otherUserId]);
+      });
+
+      it("injects the autofiller when both have autofill on page load on", async () => {
+        await autofillService.injectAutofillScripts(sender.tab, sender.frameId, true);
+
+        expect(autofillSettingsService.autofillOnPageLoadFor$).toHaveBeenCalledWith(mockUserId);
+        expect(autofillSettingsService.autofillOnPageLoadFor$).toHaveBeenCalledWith(otherUserId);
+        expect(BrowserApi.executeScriptInTab).toHaveBeenCalledWith(tabMock.id, autofillerScript);
+      });
+
+      it("skips the autofiller when either has autofill on page load off", async () => {
+        autofillSettingsService.autofillOnPageLoadFor$.mockImplementation((userId) =>
+          of(userId === mockUserId),
+        );
+
+        await autofillService.injectAutofillScripts(sender.tab, sender.frameId, true);
+
+        expect(BrowserApi.executeScriptInTab).not.toHaveBeenCalledWith(
+          tabMock.id,
+          autofillerScript,
+        );
+      });
+
+      it("follows the remaining account once the other locks", async () => {
+        autofillSettingsService.autofillOnPageLoadFor$.mockImplementation((userId) =>
+          of(userId === mockUserId),
+        );
+        autofillUserIdsMock$.next([mockUserId]);
+
+        await autofillService.injectAutofillScripts(sender.tab, sender.frameId, true);
+
+        expect(BrowserApi.executeScriptInTab).toHaveBeenCalledWith(tabMock.id, autofillerScript);
       });
     });
 
@@ -781,6 +831,7 @@ describe("AutofillService", () => {
           },
         ],
         tab: createChromeTabMock(),
+        userId: mockUserId,
       };
       autofillOptions.cipher.fields = [mock<FieldView>({ name: "username" })];
       autofillOptions.cipher.login.matchesUri = jest.fn().mockReturnValue(true);
@@ -879,6 +930,7 @@ describe("AutofillService", () => {
           allowTotpAutofill: autofillOptions.allowTotpAutofill || false,
           autoSubmitLogin: autofillOptions.allowTotpAutofill || false,
           cipher: autofillOptions.cipher,
+          userId: mockUserId,
           canAccessTotp: true,
           tabUrl: autofillOptions.tab.url,
           defaultUriMatch: 0,
@@ -922,6 +974,9 @@ describe("AutofillService", () => {
       expect(eventCollectionService.collect).toHaveBeenCalledWith(
         EventType.Cipher_ClientAutofilled,
         autofillOptions.cipher.id,
+        false,
+        undefined,
+        mockUserId,
       );
       expect(autofillResult).toEqual({ outcome: AutofillOutcome.Filled });
     });
@@ -966,6 +1021,9 @@ describe("AutofillService", () => {
       expect(eventCollectionService.collect).toHaveBeenCalledWith(
         EventType.Cipher_ClientAutofilled,
         autofillOptions.cipher.id,
+        false,
+        undefined,
+        mockUserId,
       );
     });
 
@@ -994,6 +1052,9 @@ describe("AutofillService", () => {
       expect(eventCollectionService.collect).toHaveBeenCalledWith(
         EventType.Cipher_ClientAutofilled,
         autofillOptions.cipher.id,
+        false,
+        undefined,
+        mockUserId,
       );
     });
 
@@ -1021,6 +1082,9 @@ describe("AutofillService", () => {
       expect(eventCollectionService.collect).toHaveBeenCalledWith(
         EventType.Cipher_ClientAutofilled,
         autofillOptions.cipher.id,
+        false,
+        undefined,
+        mockUserId,
       );
     });
 
@@ -1264,6 +1328,204 @@ describe("AutofillService", () => {
         totp: "123456",
         canAutoCopyTotp: true,
       });
+    });
+    describe("with a cipher of an account that is not the active account", () => {
+      const otherUserId = Utils.newGuid() as UserId;
+
+      beforeEach(() => {
+        autofillOptions.userId = otherUserId;
+        billingAccountProfileStateService.hasPremiumFromAnySource$.mockImplementation((userId) =>
+          of(userId === otherUserId),
+        );
+        autofillSettingsService.autoCopyTotpFor$.mockImplementation((userId) =>
+          of(userId === otherUserId),
+        );
+        totpService.getCode$.mockReturnValue(of({ code: "123456", period: 30 }));
+      });
+
+      it("runs every effect of the fill for the account that owns the cipher", async () => {
+        autofillOptions.cipher.login.totp = "totp";
+        jest.spyOn(autofillService, "getDefaultUriMatchStrategy");
+
+        const autofillResult = await autofillService.doAutoFill(autofillOptions);
+
+        expect(billingAccountProfileStateService.hasPremiumFromAnySource$).toHaveBeenCalledWith(
+          otherUserId,
+        );
+        expect(billingAccountProfileStateService.hasPremiumFromAnySource$).not.toHaveBeenCalledWith(
+          mockUserId,
+        );
+        expect(autofillService.getDefaultUriMatchStrategy).toHaveBeenCalledWith(otherUserId);
+        expect(cipherService.updateLastUsedDate).toHaveBeenCalledWith(
+          autofillOptions.cipher.id,
+          otherUserId,
+        );
+        expect(eventCollectionService.collect).toHaveBeenCalledWith(
+          EventType.Cipher_ClientAutofilled,
+          autofillOptions.cipher.id,
+          false,
+          undefined,
+          otherUserId,
+        );
+        expect(autofillSettingsService.autoCopyTotpFor$).toHaveBeenCalledWith(otherUserId);
+        expect(autofillResult).toEqual({
+          outcome: AutofillOutcome.Filled,
+          totp: "123456",
+          canAutoCopyTotp: true,
+        });
+      });
+
+      it("fills the same shared item for each account under that account's entitlement", async () => {
+        // The item has one id in both vaults; only `otherUserId` has premium.
+        autofillOptions.cipher.login.totp = "totp";
+        autofillOptions.cipher.organizationUseTotp = false;
+
+        const forOtherAccount = await autofillService.doAutoFill(autofillOptions);
+        const forActiveAccount = await autofillService.doAutoFill({
+          ...autofillOptions,
+          userId: mockUserId,
+        });
+
+        expect(forOtherAccount).toEqual({
+          outcome: AutofillOutcome.Filled,
+          totp: "123456",
+          canAutoCopyTotp: true,
+        });
+        expect(forActiveAccount).toEqual({ outcome: AutofillOutcome.Filled });
+        expect(cipherService.updateLastUsedDate).toHaveBeenCalledWith(
+          autofillOptions.cipher.id,
+          mockUserId,
+        );
+      });
+    });
+
+    it("denies a fill that names no account", async () => {
+      autofillOptions.userId = undefined as unknown as UserId;
+
+      expect(await autofillService.doAutoFill(autofillOptions)).toEqual({
+        outcome: AutofillOutcome.Denied,
+      });
+      expect(cipherService.updateLastUsedDate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("isPasswordRepromptRequired", () => {
+    const otherUserId = Utils.newGuid() as UserId;
+    const tab = createChromeTabMock();
+    let openPopout: jest.Mock;
+    let cipher: CipherView;
+
+    beforeEach(() => {
+      openPopout = jest.fn();
+      autofillService["openVaultItemPasswordRepromptPopout"] = openPopout;
+      cipher = mock<CipherView>({ id: "cipherId", reprompt: CipherRepromptType.Password });
+      userVerificationService.hasMasterPassword.mockResolvedValue(true);
+    });
+
+    it("opens the reprompt popout for a protected cipher of the active account", async () => {
+      expect(await autofillService.isPasswordRepromptRequired(cipher, tab, mockUserId)).toBe(true);
+
+      expect(userVerificationService.hasMasterPassword).toHaveBeenCalledWith(mockUserId);
+      expect(openPopout).toHaveBeenCalledWith(tab, { cipherId: "cipherId", action: "autofill" });
+    });
+
+    it("judges the reprompt by the master password of the account that owns the cipher", async () => {
+      userVerificationService.hasMasterPassword.mockImplementation(
+        async (userId) => userId === mockUserId,
+      );
+
+      expect(await autofillService.isPasswordRepromptRequired(cipher, tab, otherUserId)).toBe(
+        false,
+      );
+      expect(userVerificationService.hasMasterPassword).toHaveBeenCalledWith(otherUserId);
+      expect(openPopout).not.toHaveBeenCalled();
+    });
+
+    it("refuses a protected cipher of another account without a way to switch to it", async () => {
+      // The popout verifies the active account, which holds the same shared item under this id.
+      expect(await autofillService.isPasswordRepromptRequired(cipher, tab, otherUserId)).toBe(true);
+
+      expect(openPopout).not.toHaveBeenCalled();
+    });
+
+    describe("with a way to switch accounts", () => {
+      let switchAccount: jest.Mock;
+      let activeAtPopout: (UserId | undefined)[];
+
+      beforeEach(async () => {
+        switchAccount = jest.fn((userId: UserId) => accountService.switchAccount(userId));
+        autofillService["switchAccount"] = switchAccount;
+        autofillAccountsService.isAutofillUser$.mockReturnValue(of(true));
+        await accountService.addAccount(otherUserId, {
+          email: "other@example.com",
+          emailVerified: true,
+          name: "Other",
+        } as any);
+        await accountService.switchAccount(mockUserId);
+        activeAtPopout = [];
+        openPopout.mockImplementation(async () => {
+          activeAtPopout.push((await firstValueFrom(accountService.activeAccount$))?.id);
+        });
+      });
+
+      afterEach(async () => {
+        await accountService.switchAccount(mockUserId);
+      });
+
+      it("makes the cipher's account the active one before the popout opens", async () => {
+        expect(
+          await autofillService.isPasswordRepromptRequired(cipher, tab, otherUserId, "action"),
+        ).toBe(true);
+
+        expect(switchAccount).toHaveBeenCalledWith(otherUserId);
+        expect(openPopout).toHaveBeenCalledWith(tab, { cipherId: "cipherId", action: "action" });
+        expect(activeAtPopout).toEqual([otherUserId]);
+      });
+
+      it("does not switch for a cipher of the active account", async () => {
+        await autofillService.isPasswordRepromptRequired(cipher, tab, mockUserId);
+
+        expect(switchAccount).not.toHaveBeenCalled();
+        expect(activeAtPopout).toEqual([mockUserId]);
+      });
+
+      it("refuses without switching when the account no longer serves autofill", async () => {
+        autofillAccountsService.isAutofillUser$.mockReturnValue(of(false));
+
+        expect(await autofillService.isPasswordRepromptRequired(cipher, tab, otherUserId)).toBe(
+          true,
+        );
+
+        expect(switchAccount).not.toHaveBeenCalled();
+        expect(openPopout).not.toHaveBeenCalled();
+      });
+
+      it("refuses without a popout when the switch fails", async () => {
+        switchAccount.mockRejectedValue(new Error("no switch"));
+
+        expect(await autofillService.isPasswordRepromptRequired(cipher, tab, otherUserId)).toBe(
+          true,
+        );
+
+        expect(openPopout).not.toHaveBeenCalled();
+      });
+
+      it("refuses without a popout when the switch does not take effect", async () => {
+        switchAccount.mockResolvedValue(undefined);
+
+        expect(await autofillService.isPasswordRepromptRequired(cipher, tab, otherUserId)).toBe(
+          true,
+        );
+
+        expect(openPopout).not.toHaveBeenCalled();
+      });
+    });
+
+    it("requires no reprompt for a cipher without one", async () => {
+      cipher.reprompt = CipherRepromptType.None;
+
+      expect(await autofillService.isPasswordRepromptRequired(cipher, tab, mockUserId)).toBe(false);
+      expect(openPopout).not.toHaveBeenCalled();
     });
   });
 

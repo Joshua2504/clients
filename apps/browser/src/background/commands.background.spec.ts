@@ -1,10 +1,9 @@
 import { mock, MockProxy } from "jest-mock-extended";
-import { of, Subject } from "rxjs";
+import { BehaviorSubject, of, Subject } from "rxjs";
 
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
-import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
-import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
 import { ExtensionCommand, ExtensionCommandType } from "@bitwarden/common/autofill/constants";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
 import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
 import {
@@ -12,9 +11,13 @@ import {
   Message,
   MessageListener,
 } from "@bitwarden/common/platform/messaging";
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherType } from "@bitwarden/common/vault/enums";
 import { LockService } from "@bitwarden/unlock";
 
+// FIXME (PM-22628): Popup imports are forbidden in background
+// eslint-disable-next-line no-restricted-imports
+import { openUnlockPopout } from "../auth/popup/utils/auth-popout-window";
 import { AutofillOrchestrator } from "../autofill/background/abstractions/autofill-orchestrator";
 import {
   LockedVaultPendingNotificationsData,
@@ -28,12 +31,17 @@ import { BrowserApi } from "../platform/browser/browser-api";
 import CommandsBackground from "./commands.background";
 import MainBackground from "./main.background";
 
+jest.mock("../auth/popup/utils/auth-popout-window", () => ({
+  openUnlockPopout: jest.fn().mockResolvedValue(undefined),
+}));
+
 describe("CommandsBackground", () => {
   const senderTab = createChromeTabMock({ id: 4, windowId: 2 });
 
   let main: MockProxy<MainBackground>;
   let autofillOrchestrator: MockProxy<AutofillOrchestrator>;
-  let authService: MockProxy<AuthService>;
+  // The accounts autofill serves: the unlocked active account, nobody opted in.
+  let autofillUserIds$: BehaviorSubject<UserId[]>;
   let logService: MockProxy<LogService>;
   // A real channel rather than a mock: what is under test is that the class reads the
   // channel's own messages, which no mocked listener would demonstrate.
@@ -67,15 +75,14 @@ describe("CommandsBackground", () => {
       value: autofillOrchestrator,
       configurable: true,
     });
-    authService = mock<AuthService>();
-    authService.getAuthStatus.mockResolvedValue(AuthenticationStatus.Unlocked);
+    autofillUserIds$ = new BehaviorSubject<UserId[]>(["user-1" as UserId]);
     intraprocessMessageSender = new IntraprocessMessageSender();
     externalMessages = new Subject<Message<Record<string, unknown>>>();
 
     commandsBackground = new CommandsBackground(
       main,
       mock<PlatformUtilsService>(),
-      authService,
+      { autofillUserIds$ } as unknown as AutofillAccountsService,
       () => of("generated-password"),
       mock<AccountService>(),
       mock<LockService>(),
@@ -94,6 +101,42 @@ describe("CommandsBackground", () => {
   afterEach(() => {
     getTabFromCurrentWindowIdSpy.mockRestore();
     jest.clearAllMocks();
+  });
+
+  describe("fill shortcuts and the accounts autofill serves", () => {
+    const pressShortcut = async (command: string) => {
+      const listener = (chrome.commands.onCommand.addListener as jest.Mock).mock.calls[0][0];
+      await listener(command);
+      await flushPromises();
+    };
+
+    it("fills when another unlocked account serves autofill beside the active one", async () => {
+      autofillUserIds$.next(["user-1" as UserId, "user-2" as UserId]);
+
+      await pressShortcut(ExtensionCommand.AutofillLogin);
+
+      expect(autofillOrchestrator.autofillActiveTabFromCommand).toHaveBeenCalledTimes(1);
+      expect(openUnlockPopout).not.toHaveBeenCalled();
+    });
+
+    it("still fills after one of two serving accounts has locked", async () => {
+      autofillUserIds$.next(["user-1" as UserId, "user-2" as UserId]);
+      autofillUserIds$.next(["user-2" as UserId]);
+
+      await pressShortcut(ExtensionCommand.AutofillLogin);
+
+      expect(autofillOrchestrator.autofillActiveTabFromCommand).toHaveBeenCalledTimes(1);
+      expect(openUnlockPopout).not.toHaveBeenCalled();
+    });
+
+    it("asks to unlock instead of filling when autofill serves no account", async () => {
+      autofillUserIds$.next([]);
+
+      await pressShortcut(ExtensionCommand.AutofillLogin);
+
+      expect(openUnlockPopout).toHaveBeenCalledTimes(1);
+      expect(autofillOrchestrator.autofillActiveTabFromCommand).not.toHaveBeenCalled();
+    });
   });
 
   describe("unlockCompleted", () => {

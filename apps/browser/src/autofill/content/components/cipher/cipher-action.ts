@@ -5,6 +5,7 @@ import { EditButton } from "../../../content/components/buttons/edit-button";
 import { NotificationTypes } from "../../../notification/abstractions/notification-bar";
 import { I18n } from "../common-types";
 import { selectedCipher as selectedCipherSignal } from "../signals/selected-cipher";
+import { selectedCipherAccount as selectedCipherAccountSignal } from "../signals/selected-cipher-account";
 
 export type CipherActionProps = {
   cipherId: string;
@@ -13,6 +14,8 @@ export type CipherActionProps = {
   itemName: string;
   notificationType: typeof NotificationTypes.Change | typeof NotificationTypes.Add;
   theme: Theme;
+  /** The account that owns the cipher, sent along with its id when it is picked. */
+  userId?: string;
   username?: string;
 };
 
@@ -25,14 +28,17 @@ export function CipherAction({
   itemName,
   notificationType,
   theme,
+  userId,
   username,
 }: CipherActionProps) {
   const selectCipherHandleAction = (e: Event) => {
     selectedCipherSignal.set(cipherId);
+    selectedCipherAccountSignal.set(userId ?? null);
     try {
       handleAction(e);
     } finally {
       selectedCipherSignal.set(null);
+      selectedCipherAccountSignal.set(null);
     }
   };
   return notificationType === NotificationTypes.Change

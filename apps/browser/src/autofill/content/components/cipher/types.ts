@@ -54,4 +54,8 @@ export type NotificationCipherData = BaseCipherData<typeof CipherTypes.Login> & 
     username: string;
   };
   organizationCategories?: OrganizationCategory[];
+  /** The account that owns the cipher. Opaque to the notification bar, which sends it back. */
+  userId?: string;
+  /** The owning account's email. Set only while more than one account serves autofill. */
+  accountLabel?: string;
 };

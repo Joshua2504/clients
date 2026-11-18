@@ -2,6 +2,7 @@ import { Observable } from "rxjs";
 
 import { UriMatchStrategySetting } from "@bitwarden/common/models/domain/domain-service";
 import { CommandDefinition } from "@bitwarden/common/platform/messaging";
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 
 import { AutofillMessageCommand } from "../../enums/autofill-message.enums";
@@ -19,6 +20,12 @@ export interface PageDetail {
 
 export interface AutoFillOptions {
   cipher: CipherView;
+  /**
+   * The account whose vault `cipher` was read from. Every effect of the fill runs for it: the
+   * premium check, the TOTP auto-copy setting, URI matching, the last-used update and event
+   * collection. See `multi-account.design.md`, "Attributing a cipher to its account".
+   */
+  userId: UserId;
   pageDetails: PageDetail[];
   doc?: typeof self.document;
   tab: chrome.tabs.Tab;
@@ -57,6 +64,8 @@ export interface GenerateFillScriptOptions {
   allowTotpAutofill: boolean;
   autoSubmitLogin: boolean;
   cipher: CipherView;
+  /** The account that owns `cipher`. Its equivalent domains apply to URI matching. */
+  userId: UserId;
   /**
    * Whether the account is entitled to TOTP for this cipher. Gates filling the value only,
    * `allowTotpAutofill` gates whether TOTP fields are identified.
@@ -106,10 +115,16 @@ export abstract class AutofillService {
   doAutoFill!: (options: AutoFillOptions) => Promise<FillResult>;
   /** Non-null asserted. */
   setAutoFillOnPageLoadOrgPolicy!: () => Promise<void>;
-  /** Non-null asserted. */
+  /**
+   * Whether `cipher` must be re-prompted for before it is used, judged for the account that owns
+   * it. Opens the reprompt popout when it must.
+   *
+   * @param userId The account whose vault `cipher` was read from.
+   */
   isPasswordRepromptRequired!: (
     cipher: CipherView,
     tab: chrome.tabs.Tab,
+    userId: UserId,
     action?: string,
   ) => Promise<boolean>;
 }

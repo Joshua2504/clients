@@ -11,15 +11,14 @@ import {
 import { map, pairwise, share, takeUntil } from "rxjs/operators";
 
 import { AccountInfo, AccountService } from "@bitwarden/common/auth/abstractions/account.service";
-import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
 import { UserVerificationService } from "@bitwarden/common/auth/abstractions/user-verification/user-verification.service.abstraction";
-import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
 import {
   AutofillOverlayVisibility,
   AutofillTargetingRuleTypes,
   CardExpiryDateDelimiters,
   FormPurposeCategories,
 } from "@bitwarden/common/autofill/constants";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { AutofillSettingsServiceAbstraction } from "@bitwarden/common/autofill/services/autofill-settings.service";
 import { DomainSettingsService } from "@bitwarden/common/autofill/services/domain-settings.service";
 import { UserNotificationSettingsServiceAbstraction } from "@bitwarden/common/autofill/services/user-notification-settings.service";
@@ -114,11 +113,16 @@ export default class AutofillService implements AutofillServiceInterface {
     private billingAccountProfileStateService: BillingAccountProfileStateService,
     private scriptInjectorService: ScriptInjectorService,
     private accountService: AccountService,
-    private authService: AuthService,
+    private autofillAccountsService: AutofillAccountsService,
     private userNotificationSettingsService: UserNotificationSettingsServiceAbstraction,
     private messageListener: MessageListener,
     private animationControlService: AnimationControlService,
     private autofillLifecycleService: AutofillLifecycleService,
+    /**
+     * Makes an account the active one. Given in the background only; without it a reprompt for
+     * a cipher of an account that is not active is refused.
+     */
+    private switchAccount?: (userId: UserId) => Promise<void>,
   ) {
     this.enableInlineMenuAnimation$ = this.animationControlService.enableInlineMenuAnimation$;
     this.enableNotificationAnimation$ = this.animationControlService.enableNotificationAnimation$;
@@ -264,15 +268,13 @@ export default class AutofillService implements AutofillServiceInterface {
     // Autofill user settings loaded from state can await the active account state indefinitely
     // if not guarded by an active account check (e.g. the user is logged in)
     const activeAccount = await firstValueFrom(this.accountService.activeAccount$);
-    const authStatus = await firstValueFrom(this.authService.activeAccountStatus$);
-    const accountIsUnlocked = authStatus === AuthenticationStatus.Unlocked;
-    let autoFillOnPageLoadIsEnabled = false;
+    // The accounts autofill serves are unlocked, so their settings can be read.
+    const autofillUserIds = await firstValueFrom(this.autofillAccountsService.autofillUserIds$);
 
     const injectedScripts = [await this.getBootstrapAutofillContentScript(activeAccount)];
 
-    if (activeAccount && accountIsUnlocked) {
-      autoFillOnPageLoadIsEnabled = await this.getAutofillOnPageLoad();
-    }
+    const autoFillOnPageLoadIsEnabled =
+      autofillUserIds.length > 0 && (await this.getAutofillOnPageLoad(autofillUserIds));
 
     if (triggeringOnPageLoad && autoFillOnPageLoadIsEnabled) {
       injectedScripts.push("autofiller.js");
@@ -426,24 +428,42 @@ export default class AutofillService implements AutofillServiceInterface {
   }
 
   /**
-   * Gets the setting for automatically copying TOTP upon autofill from the autofill settings service.
+   * Gets an account's setting for automatically copying TOTP upon autofill.
+   *
+   * @param userId The account that owns the filled cipher.
    */
-  async getShouldAutoCopyTotp(): Promise<boolean> {
-    return await firstValueFrom(this.autofillSettingsService.autoCopyTotp$);
+  async getShouldAutoCopyTotp(userId: UserId): Promise<boolean> {
+    return await firstValueFrom(this.autofillSettingsService.autoCopyTotpFor$(userId));
   }
 
   /**
-   * Gets the autofill on page load setting from the autofill settings service.
+   * Whether the autofiller is injected for page-load fills. One injection serves every account,
+   * so the stricter setting wins: it is off when any of the accounts has autofill on page load
+   * off, and when there are none. See `multi-account.design.md`, "When accounts disagree".
+   *
+   * @param userIds The accounts autofill serves.
    */
-  async getAutofillOnPageLoad(): Promise<boolean> {
-    return await firstValueFrom(this.autofillSettingsService.autofillOnPageLoad$);
+  async getAutofillOnPageLoad(userIds: UserId[]): Promise<boolean> {
+    if (userIds.length === 0) {
+      return false;
+    }
+    const settings = await Promise.all(
+      userIds.map((userId) =>
+        firstValueFrom(this.autofillSettingsService.autofillOnPageLoadFor$(userId)),
+      ),
+    );
+    return settings.every((enabled) => enabled);
   }
 
   /**
-   * Gets the default URI match strategy setting from the domain settings service.
+   * Gets an account's default URI match strategy from the domain settings service.
+   *
+   * @param userId The account that owns the cipher being matched.
    */
-  async getDefaultUriMatchStrategy(): Promise<UriMatchStrategySetting> {
-    return await firstValueFrom(this.domainSettingsService.resolvedDefaultUriMatchStrategy$);
+  async getDefaultUriMatchStrategy(userId: UserId): Promise<UriMatchStrategySetting> {
+    return await firstValueFrom(
+      this.domainSettingsService.resolvedDefaultUriMatchStrategyFor$(userId),
+    );
   }
 
   /**
@@ -454,23 +474,26 @@ export default class AutofillService implements AutofillServiceInterface {
    *
    * @param outcome How the attempt concluded.
    * @param cipher The cipher whose code is under consideration.
+   * @param userId The account that owns the cipher; its auto-copy preference applies.
    */
   private async fillOutcomeWithTotp(
     outcome: typeof AutofillOutcome.Filled | typeof AutofillOutcome.Absent,
     cipher: CipherView,
+    userId: UserId,
   ): Promise<FillOccurred> {
     if (cipher.type !== CipherType.Login || !cipher.login?.totp) {
       return Object.freeze({ outcome });
     }
 
-    const canAutoCopyTotp = await this.getShouldAutoCopyTotp();
+    const canAutoCopyTotp = await this.getShouldAutoCopyTotp(userId);
     const totp = (await firstValueFrom(this.totpService.getCode$(cipher.login.totp))).code;
 
     return Object.freeze({ outcome, totp: totp ?? undefined, canAutoCopyTotp });
   }
 
   /**
-   * Autofill a given tab with a given login item.
+   * Autofill a given tab with a given login item. Every per-account input and effect is taken
+   * from `options.userId`, the account that owns the cipher; none reads the active account.
    *
    * @param options Instructions about the autofill operation, including tab and login item
    * @returns A refused frame reports `denied` and terminates the request. A fill that placed
@@ -481,18 +504,21 @@ export default class AutofillService implements AutofillServiceInterface {
   async doAutoFill(options: AutoFillOptions): Promise<FillResult> {
     const tab = options.tab;
     const tabUrl = tab?.url;
-    if (!tabUrl || !options.cipher || !options.pageDetails || !options.pageDetails.length) {
+    const userId = options.userId;
+    if (
+      !tabUrl ||
+      !options.cipher ||
+      !userId ||
+      !options.pageDetails ||
+      !options.pageDetails.length
+    ) {
       return AUTOFILL_DENIED;
     }
 
-    const activeAccount = await firstValueFrom(this.accountService.activeAccount$);
-    let canAccessPremium = false;
-    if (activeAccount?.id) {
-      canAccessPremium = await firstValueFrom(
-        this.billingAccountProfileStateService.hasPremiumFromAnySource$(activeAccount.id),
-      );
-    }
-    const defaultUriMatch = await this.getDefaultUriMatchStrategy();
+    const canAccessPremium = await firstValueFrom(
+      this.billingAccountProfileStateService.hasPremiumFromAnySource$(userId),
+    );
+    const defaultUriMatch = await this.getDefaultUriMatchStrategy(userId);
 
     // check for premium subscription entitlement or organizational policy
     const canUseTotp = canAccessPremium || options.cipher.organizationUseTotp;
@@ -523,6 +549,7 @@ export default class AutofillService implements AutofillServiceInterface {
           allowTotpAutofill: options.allowTotpAutofill || false,
           autoSubmitLogin: options.autoSubmitLogin || false,
           cipher: options.cipher,
+          userId,
           canAccessTotp: canUseTotp,
           tabUrl,
           defaultUriMatch: defaultUriMatch,
@@ -546,8 +573,8 @@ export default class AutofillService implements AutofillServiceInterface {
         // Add a small delay between operations
         fillScript.properties.delay_between_operations = 20;
 
-        if (!options.skipLastUsed && activeAccount?.id) {
-          await this.cipherService.updateLastUsedDate(options.cipher.id, activeAccount.id);
+        if (!options.skipLastUsed) {
+          await this.cipherService.updateLastUsedDate(options.cipher.id, userId);
         }
 
         const showAnimations =
@@ -588,11 +615,14 @@ export default class AutofillService implements AutofillServiceInterface {
       await this.eventCollectionService.collect(
         EventType.Cipher_ClientAutofilled,
         options.cipher.id,
+        false,
+        undefined,
+        userId,
       );
     }
 
     if (canUseTotp) {
-      return await this.fillOutcomeWithTotp(outcome, options.cipher);
+      return await this.fillOutcomeWithTotp(outcome, options.cipher, userId);
     }
 
     return Object.freeze({ outcome });
@@ -601,18 +631,27 @@ export default class AutofillService implements AutofillServiceInterface {
   /**
    * Checks if the cipher requires password reprompt and opens the password reprompt popout if necessary.
    *
+   * The requirement is judged for the account that owns the cipher. The popout shows and verifies
+   * the vault of the active account, so a cipher of another account makes its account the active
+   * one first: the popout then verifies that account's master password and fills from its vault.
+   * When the account cannot become active (it stopped serving autofill, or the switch failed), the
+   * cipher is refused without a popout: verifying the active account's master password must not
+   * release another account's cipher.
+   *
    * @param cipher - The cipher to autofill
    * @param tab - The tab to autofill
+   * @param userId - The account whose vault the cipher was read from
    * @param action - override for default action once reprompt is completed successfully
    */
   async isPasswordRepromptRequired(
     cipher: CipherView,
     tab: chrome.tabs.Tab,
+    userId: UserId,
     action?: string,
   ): Promise<boolean> {
-    const userHasMasterPassword = await this.userVerificationService.hasMasterPassword();
+    const userHasMasterPassword = await this.userVerificationService.hasMasterPassword(userId);
     if (cipher.reprompt === CipherRepromptType.Password && userHasMasterPassword) {
-      if (!this.isDebouncingPasswordRepromptPopout()) {
+      if (!this.isDebouncingPasswordRepromptPopout() && (await this.activateAccount(userId))) {
         await this.openVaultItemPasswordRepromptPopout(tab, {
           cipherId: cipher.id,
           action: action ?? "autofill",
@@ -623,6 +662,32 @@ export default class AutofillService implements AutofillServiceInterface {
     }
 
     return false;
+  }
+
+  /**
+   * Makes `userId` the active account, so the reprompt popout shows and verifies its vault.
+   *
+   * @returns false when the account is not active and cannot become so; no popout may open.
+   */
+  private async activateAccount(userId: UserId): Promise<boolean> {
+    const activeAccount = await firstValueFrom(this.accountService.activeAccount$);
+    if (activeAccount?.id === userId) {
+      return true;
+    }
+    if (
+      this.switchAccount == null ||
+      !(await firstValueFrom(this.autofillAccountsService.isAutofillUser$(userId)))
+    ) {
+      return false;
+    }
+    try {
+      await this.switchAccount(userId);
+    } catch (error) {
+      this.logService.error(error);
+      return false;
+    }
+    const switchedAccount = await firstValueFrom(this.accountService.activeAccount$);
+    return switchedAccount?.id === userId;
   }
 
   /**
@@ -1594,7 +1659,7 @@ export default class AutofillService implements AutofillServiceInterface {
     // Remember: if we are in this function, the tabUrl already matches a saved URI for the login.
     // We need to verify the pageUrl also matches.
     const equivalentDomains = await firstValueFrom(
-      this.domainSettingsService.getUrlEquivalentDomains(pageUrl),
+      this.domainSettingsService.getUrlEquivalentDomains(pageUrl, options.userId),
     );
     const matchesUri = options.cipher.login.matchesUri(
       pageUrl,
@@ -1639,7 +1704,7 @@ export default class AutofillService implements AutofillServiceInterface {
     const securePageUrl = new URL(parsedPageUrl.href);
     securePageUrl.protocol = "https:";
     const equivalentDomains = await firstValueFrom(
-      this.domainSettingsService.getUrlEquivalentDomains(securePageUrl.href),
+      this.domainSettingsService.getUrlEquivalentDomains(securePageUrl.href, options.userId),
     );
 
     return secureUris.some(

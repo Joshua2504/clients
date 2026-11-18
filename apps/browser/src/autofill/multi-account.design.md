@@ -12,10 +12,10 @@
 > [Conversion checklist](#conversion-checklist)), read that as "the account that owns the cipher",
 > under the rules below.
 
-> [!WARNING]
-> Only the foundation exists: the services and types under [API contract](#api-contract) are
-> implemented and registered, and nothing calls them yet. Every surface still serves the active
-> account only.
+> [!NOTE]
+> Every surface under [Conversion checklist](#conversion-checklist) is converted. What still
+> follows the active account is listed there per surface and collected under
+> [Known limits](#known-limits).
 
 The browser extension holds several accounts, and switching between them does not lock the one
 left behind. Autofill nevertheless serves only the active account. Multi-account autofill lets
@@ -165,8 +165,14 @@ every account. `FillCipherPolicy` and `DefaultFillCipherPolicy` are unchanged.
 
 With several accounts the multi-account policy does not call the wrapped policy's
 `nextCipherForUrl`, `nextCardCipher`, `nextIdentityCipher`, `lastUsedForUrl` or
-`lastLaunchedForUrl`. `CipherService` keeps those rotations per URL, not per account, so asking it
-for two accounts in turn would return one account's ciphers for the other.
+`lastLaunchedForUrl`. Each of those answers for one account: `CipherService` keeps a rotation per
+user and URL, so a wrapped policy can only walk the ciphers of the account it is asked for. A
+shortcut pressed repeatedly must instead walk the ciphers of every autofill account in one order,
+and a page-load fill must prefer the most recently used login whichever account holds it. No
+sequence of per-account answers gives that order, so the multi-account policy merges the accounts'
+ciphers and keeps the merged rotation itself. `advanceRotation` advances that merged rotation; it
+reaches the wrapped policy only while a single account is served, where it advances that account's
+own rotation.
 
 ## Attributing a cipher to its account
 
@@ -212,8 +218,13 @@ Settings and policies are per account, and the accounts being served can differ.
   basic-auth setting, and organization policies such as page-load activation.
 - **Where one behaviour must cover the whole experience, the stricter wins.** If any autofill
   account disables or forbids it, it is off; a delay or timeout takes the shortest value. Examples:
-  whether the autofiller is injected for page-load fill, whether a blocked domain suppresses
-  injected UI, whether the notification bar offers to save, clipboard clearing.
+  whether the autofiller is injected for page-load fill, whether the toolbar badge counts,
+  whether a blocked domain suppresses injected UI, clipboard clearing. (The last two still read
+  the active account, see [Known limits](#known-limits).)
+- **An offer to save is not such a behaviour: it has one target account.** The notification bar
+  offers to save when at least one autofill account may save the login (`canOfferSave`), and it
+  offers only the accounts that may. An account whose policy forbids the save is left out of the
+  choice; it does not switch the offer off for the others.
 - **A save has one target account.** It defaults to the active account and is subject to that
   account's policies (for example, a policy that removes the personal vault). An update goes to the
   account that owns the cipher being updated. Nothing is copied between accounts.
@@ -233,75 +244,139 @@ surface's spec.
 
 Prerequisites in shared code, each needed before the first surface that depends on it ships:
 
-- [ ] `CipherService.filterCiphersForUrl` reads equivalent domains and the default URI match of
+- [x] `CipherService.filterCiphersForUrl` reads equivalent domains and the default URI match of
       the active account (`DomainSettingsService`). Make both per account, so
       `getAllDecryptedForUrl(url, userId)` matches with `userId`'s settings.
-- [ ] `EventCollectionService.collect` records for the active account. Give it the account.
-- [ ] `UserVerificationService.hasMasterPassword()` in `AutofillService.isPasswordRepromptRequired`
+- [x] `EventCollectionService.collect` records for the active account. Give it the account.
+- [x] `UserVerificationService.hasMasterPassword()` in `AutofillService.isPasswordRepromptRequired`
       reads the active account. Pass the cipher's account, and verify the reprompt popout against
-      that account.
-- [ ] Sync: `fullSync` and the sync notifications in `default-server-notifications.service.ts`
-      serve the active account only. Sync every unlocked account, so a non-active autofill
-      account's vault is current.
-- [ ] `AutofillSettingsService` and `DomainSettingsService` expose most settings for the active
+      that account. The popout shows and verifies the active account's vault
+      (`vault/popup/utils/vault-popout-window.ts`, `ViewComponent`), so a protected cipher of
+      another autofill account makes its account the active one first ("switch, then reprompt"):
+      `AutofillService.isPasswordRepromptRequired` and the context menu take a `switchAccount`
+      callback, as the notification bar does. The popout then verifies that account's master
+      password and fills from its vault. The cipher is refused without a popout when its account
+      no longer serves autofill or the switch does not take effect. The switch is visible: the
+      popup shows the cipher's account afterwards, and the account left behind keeps serving
+      autofill only if it has opted in.
+- [x] Sync: `MainBackground.fullSync` syncs the active account and then every other unlocked
+      account; an account unlocked while not active syncs then
+      (`syncAccountsUnlockedWhileNotActive`), and `default-server-notifications.service.ts`
+      processes the vault sync notifications (`UnlockedMultiUserSyncNotificationTypes`) and the
+      sync on connect for a non-active unlocked account. Remaining: send notifications, policy
+      (`SyncPolicy`), organization status and collection-setting notifications are processed for
+      the active account only; a non-active account gets those changes with its next full sync.
+      A logout found by a non-active account's sync logs out that account alone and leaves the
+      active account where it is.
+- [x] `AutofillSettingsService` and `DomainSettingsService` expose most settings for the active
       account only. Add per-account readers as surfaces need them, following
       `autofillOnPageLoadDefaultFor$`.
 
 Surfaces:
 
-- [ ] **`background/autofill-orchestrator.ts`** — `selectFill`, `selectLogin`,
+- [x] **`background/autofill-orchestrator.ts`** — `selectFill`, `selectLogin`,
       `selectCipherTypeCipher`, `autoSubmitLoginOnTab` select through the multi-account policy;
       `PlannedFill` and `AutoFillOptions` carry the cipher's `userId`. `commit` denies when the
       account is no longer an autofill account. `recordActiveAccountActivity` records activity for
       the cipher's account. A request with no autofill account is abandoned as it is today with no
-      active account.
-- [ ] **`services/autofill.service.ts`** — `doAutoFill` takes the account from its options: premium
+      active account. A page-load fill offers only the logins of accounts that have autofill on
+      page load on.
+- [x] **`services/autofill.service.ts`** — `doAutoFill` takes the account from its options: premium
       (`hasPremiumFromAnySource$`), `updateLastUsedDate`, event collection, TOTP, reprompt. Script
       injection (`injectAutofillScripts`) is on when any autofill account is unlocked, with
       page-load injection under the stricter-wins rule.
-- [ ] **`background/overlay.background.ts`** — `inlineMenuCiphers` holds `AccountCipher`; the list
+- [x] **`background/overlay.background.ts`** — `inlineMenuCiphers` holds `AccountCipher`; the list
       sent to the inline menu carries an account label for display, and fill, view and
       passkey messages name the cipher by `AccountCipherRef`. Cards, identities and the
       show-cards/identities settings apply per account. Add-login data goes through
       `canOfferSave` for the target account. A lock of any autofill account rebuilds the list.
-- [ ] **`services/autofill-badge-updater.service.ts`** — count `ciphersForUrl(url, Badge)` across
+      "View item" is offered only for the active account's ciphers, because the vault item view
+      shows the active account's vault.
+- [x] **`services/autofill-badge-updater.service.ts`** — count `ciphersForUrl(url, Badge)` across
       accounts; recompute on `MultiAccountFillCipherPolicy.changed$` instead of the active
-      account's `changed$`. The badge setting follows the stricter-wins rule.
-- [ ] **`browser/cipher-context-menu-handler.ts`, `browser/context-menu-clicked-handler.ts`,
+      account's `changed$`. The badge setting follows the stricter-wins rule: the counter shows
+      only while the active account and every autofill account have it on
+      (`BadgeSettingsService.enableBadgeCounterFor$`).
+- [x] **`browser/cipher-context-menu-handler.ts`, `browser/context-menu-clicked-handler.ts`,
       `browser/main-context-menu-handler.ts`** — menu item ids encode `accountCipherKey`; titles
       show the account when more than one serves; a click resolves through `ciphersForRefs`. The
       "unlock" and "no match" entries depend on the autofill accounts, not the active account.
-- [ ] **`background/web-request.background.ts`** (HTTP basic auth) — an automatic fill: candidates
+- [x] **`background/web-request.background.ts`** (HTTP basic auth) — an automatic fill: candidates
       from all accounts, each under its own `enableBasicAuthResponse` setting and feature
       availability; with candidates from more than one account, do not answer.
-- [ ] **`background/auto-submit-login.background.ts`** — the approved-host policy is read per
+- [x] **`background/auto-submit-login.background.ts`** — the approved-host policy is read per
       account; a host approved by one account's organization submits only that account's ciphers.
-- [ ] **`background/commands.background.ts`, `background/runtime.background.ts`,
+- [x] **`background/commands.background.ts`, `background/runtime.background.ts`,
       `background/tabs.background.ts`** — shortcuts act when any autofill account is unlocked;
       by-id fills (`ciphersForRefs`) take a reference; tab refreshes subscribe to
       `MultiAccountFillCipherPolicy.changed$`.
-- [ ] **`rx/account-events.ts` and the lifecycle** — monitoring starts and stops on the autofill
+- [x] **`rx/account-events.ts` and the lifecycle** — monitoring starts and stops on the autofill
       accounts becoming non-empty or empty, not on the active account alone; an opportunity is
       attributed to the autofill accounts at the time it is received and retired per the rule
       under [Attributing a cipher to its account](#attributing-a-cipher-to-its-account). Update
       [autofill.design.md](./autofill.design.md) ("the transition's account must be the active
       account") and [lifecycle.design.md](./lifecycle.design.md) in the same change.
-- [ ] **`background/notification.background.ts`, `background/overlay-notifications.background.ts`**
+- [x] **`background/notification.background.ts`, `background/overlay-notifications.background.ts`**
       — queue messages carry the target `userId`. "Save" targets the active account by default,
       with a choice among autofill accounts; "update" targets the account that owns the matched
       cipher; a match in more than one account asks. `canOfferSave`, folders, collections,
       organizations and policies are read for the target account. At-risk password tasks
-      (`SecurityTask`) are per account.
-- [ ] **Passkeys: `fido2/background/fido2.background.ts`,
+      (`SecurityTask`) are per account. "View", "edit" and a reprompt make the cipher's account
+      the active one first, and are dropped when that account no longer serves autofill. The
+      "login saved" confirmation of the inline menu's "Save and fill" carries the account the
+      popout saved to, so its "View" follows the same rule. Remaining: the at-risk bar does not
+      show which account the task belongs to; never-save domains and favicons are read from the
+      active account; with no active account (or a logged-out one) no bar is raised even when
+      another account serves autofill.
+- [x] **Passkeys: `fido2/background/fido2.background.ts`,
       `fido2/services/browser-fido2-user-interface.service.ts`, `popup/fido2/fido2.component.ts`,
       `libs/common/src/platform/services/fido2/fido2-authenticator.service.ts`** — assertion
       searches all autofill accounts and the picker returns an `AccountCipherRef`; registration
       chooses a target account, default active; excluded-credential checks cover all autofill
-      accounts; user verification runs against the cipher's account.
-- [ ] **Popup suggestions tab: `vault/popup/services/vault-popup-items.service.ts`,
+      accounts; user verification runs against the cipher's account. Remaining: the unlock
+      prompt (`ensureUnlockedVault`) and the injection of the passkey scripts follow the active
+      account's status; creating a new login to hold a passkey is offered only while the target
+      is the active account; never domains and blocked domains are read from the active account.
+- [x] **Popup suggestions tab: `vault/popup/services/vault-popup-items.service.ts`,
       `vault/popup/services/vault-popup-autofill.service.ts`** — a section per further autofill
       account; filling uses the cipher's account; opening an item of another account switches the
-      active account first.
-- [ ] **Opt-in control: `auth/popup/account-switching/`** — a per-account toggle bound to
+      active account first. Remaining: a cipher of another account offers "fill" and "switch
+      account and view item" only (no copy, edit or fill-and-save actions); a reprompt-protected
+      one is opened in its account instead of filled; the list table behind the
+      `VFO1Foundation` flag is not converted.
+- [x] **Opt-in control: `auth/popup/account-switching/`** — a per-account toggle bound to
       `enabled$` / `setEnabled`, offered for unlocked accounts, with the risk explained where the
       choice is made.
+
+## Known limits
+
+What still follows the active account, or is otherwise short of the rules above.
+
+- **View, edit and copy act on the active account's vault.** For a cipher of another autofill
+  account they either make its account the active one first (popup suggestions "switch account and
+  view item", the notification bar's "view" and "edit", every master password reprompt) or are not
+  offered (inline menu "view item", the popup's copy and more-options actions).
+- **The popup's list table (`VFO1Foundation` flag) is not converted.** It shows the active
+  account's suggestions only.
+- **Not every server notification is processed for a non-active account.** Vault sync
+  notifications are. Send, policy, organization status and collection-setting notifications are
+  not; those changes arrive with the account's next full sync.
+- **Settings still read from the active account:** inline menu visibility, never-save domains,
+  blocked domains, favicons, the password generator and its history, fill assist (targeting
+  rules), the clipboard clearing delay, the page-load organization policy
+  (`activateAutofillOnPageLoadFromPolicy$`). TOTP premium is not among them: the inline menu
+  opens on TOTP fields when any autofill account has premium (`getUserPremiumStatus`), and it
+  computes and shows a code only for a cipher whose own account has premium or whose organization
+  grants TOTP, the rule the fill applies.
+- **The at-risk password bar shows no account.** The task and its change-password link are the
+  right account's, but the bar does not say which.
+- **The passkey unlock prompt targets the active account.** A locked non-active account is never
+  prompted for; it is simply not served.
+- **No active account, no notification bar.** While the active account is missing or logged out,
+  the notification bar is not raised and the overlay is not initialized at startup, even if
+  another account serves autofill.
+- **A transition is attributed to a single account id** (`transition-buffer/types.ts`): the first
+  of the autofill accounts when it was reported. It is replayed only while that account is active
+  or serves autofill, even if other accounts that were serving then still do.
+- **A logout of a non-active account is silent in the popup.** The account leaves the account
+  switcher and stops serving autofill; no toast names it.

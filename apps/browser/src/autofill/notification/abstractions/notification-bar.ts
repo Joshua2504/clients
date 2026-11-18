@@ -2,6 +2,7 @@ import { Theme } from "@bitwarden/common/platform/enums";
 
 import { NotificationCipherData } from "../../../autofill/content/components/cipher/types";
 import {
+  AccountView,
   FolderView,
   OrgView,
   CollectionView,
@@ -38,6 +39,11 @@ type NotificationTaskInfo = {
 // FIXME: Use type guards to specialize this type into subtypes keyed on `type`; once
 // all patterns are known, replace type guards with a discriminated union.
 type NotificationBarIframeInitData = {
+  /**
+   * The accounts a new login can be saved to, fetched by the bar itself. Empty unless more than
+   * one account can save it.
+   */
+  accounts?: AccountView[];
   ciphers?: NotificationCipherData[];
   folders?: FolderView[];
   collections?: CollectionView[];

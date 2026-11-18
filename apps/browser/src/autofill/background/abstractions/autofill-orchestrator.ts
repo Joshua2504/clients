@@ -1,3 +1,4 @@
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherType } from "@bitwarden/common/vault/enums";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 
@@ -10,6 +11,10 @@ import { FillResult } from "../../types/fill-result";
  * keyboard command, card / identity, caller-supplied cipher, and auto-submit — to one concrete
  * instruction for the autofill service, serializes execution per `(tab, frame)`, and upholds the
  * fill invariants (correct origin, foreground/active tab). See `orchestrator.design.md`.
+ *
+ * A cipher is always passed with the account whose vault it was read from. A fill is denied when
+ * that account is no longer one autofill serves as the credential is placed. See
+ * `multi-account.design.md`, "Attributing a cipher to its account".
  *
  * The default implementation is `DefaultAutofillOrchestrator`.
  */
@@ -61,6 +66,8 @@ export abstract class AutofillOrchestrator {
    *
    * Reports whether a fill ran and the TOTP to copy; a tab that is not the foreground/active tab
    * runs no fill (use {@link unsafeAutofillTabWithCipher} to bypass that check).
+   *
+   * `options.userId` is the account that owns `options.cipher`.
    */
   abstract fillCipher(options: AutoFillOptions): Promise<FillResult>;
 
@@ -69,10 +76,13 @@ export abstract class AutofillOrchestrator {
    *
    * Reports whether a fill ran and the TOTP to copy; a tab with no page details to fill reports no
    * fill.
+   *
+   * @param userId The account whose vault `cipher` was read from
    */
   abstract autofillTabWithCipher(
     tab: chrome.tabs.Tab,
     cipher: CipherView,
+    userId: UserId,
     options?: Partial<AutoFillOptions>,
   ): Promise<FillResult>;
 
@@ -86,10 +96,13 @@ export abstract class AutofillOrchestrator {
    *
    * Reports whether a fill ran and the TOTP to copy; a tab with no page details to fill reports no
    * fill.
+   *
+   * @param userId The account whose vault `cipher` was read from
    */
   abstract unsafeAutofillTabWithCipher(
     tab: chrome.tabs.Tab,
     cipher: CipherView,
+    userId: UserId,
     options?: Partial<AutoFillOptions>,
   ): Promise<FillResult>;
 }

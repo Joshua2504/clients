@@ -447,6 +447,8 @@ const buildProviders = (args: StoryArgs) => {
         // The folder chip's options come from the unsearched list, not the rendered rows.
         activeCiphers$: of(allItems),
         autoFillCiphers$: of(populated ? AUTOFILL_CIPHERS : []),
+        // No further account has opted in to autofill.
+        otherAccountAutoFillCiphers$: of([]),
         cipherCount$: of(allItems.length),
         searchText$: of(""),
         searchText: signal(""),

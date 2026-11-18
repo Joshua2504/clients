@@ -1,4 +1,5 @@
 import {
+  combineLatest,
   concatMap,
   debounceTime,
   filter,
@@ -6,16 +7,20 @@ import {
   groupBy,
   map,
   mergeMap,
+  Observable,
+  of,
   retry,
   Subject,
+  switchMap,
   take,
   takeUntil,
   withLatestFrom,
 } from "rxjs";
 
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
-import { getOptionalUserId } from "@bitwarden/common/auth/services/account.service";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { AutofillSettingsServiceAbstraction } from "@bitwarden/common/autofill/services/autofill-settings.service";
+import { AccountCipher } from "@bitwarden/common/autofill/types/account-cipher";
 import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
 import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
 import { withLatestReady } from "@bitwarden/common/tools/rx";
@@ -35,7 +40,8 @@ import {
   AutofillService,
   PageDetail,
 } from "../services/abstractions/autofill.service";
-import { FillCipherPolicy } from "../services/abstractions/fill-cipher-policy";
+import { CipherUse } from "../services/abstractions/fill-cipher-policy";
+import { MultiAccountFillCipherPolicy } from "../services/abstractions/multi-account-fill-cipher-policy";
 import { AutofillTriageResponse } from "../types/autofill-triage";
 import {
   AUTOFILL_ABSENT,
@@ -108,12 +114,14 @@ const FillReason = Object.freeze({
 type FillReason = (typeof FillReason)[keyof typeof FillReason];
 
 /**
- * A concrete fill boiled down from a request: the chosen cipher, the rotation key its fillable
- * cipher cycles under (the tab URL for logins, the cipher-type cache key for card/identity), and
- * the {@link AutoFillOptions} flags the service fill needs.
+ * A concrete fill boiled down from a request: the chosen cipher and the account whose vault it
+ * was read from, the rotation key its fillable cipher cycles under (the tab URL for logins, the
+ * cipher-type cache key for card/identity), and the {@link AutoFillOptions} flags the service
+ * fill needs.
  */
 interface PlannedFill {
   cipher: CipherView;
+  userId: UserId;
   cycleKey: string;
   options: Partial<AutoFillOptions>;
 }
@@ -151,6 +159,13 @@ export class DefaultAutofillOrchestrator implements AutofillOrchestrator {
   /** Serialized-core input; public methods and the page-load subscription feed it. */
   private readonly fillRequest$ = new Subject<FillRequest>();
 
+  /**
+   * The autofill accounts that have autofill on page load enabled, in precedence order. A
+   * page-load fill offers a cipher of these accounts only: a cipher is governed by the setting of
+   * its own account.
+   */
+  private readonly pageLoadUserIds$: Observable<UserId[]>;
+
   constructor(
     private lifecycleService: AutofillLifecycleService,
     private autofillService: AutofillService,
@@ -159,10 +174,21 @@ export class DefaultAutofillOrchestrator implements AutofillOrchestrator {
     private platformUtilsService: PlatformUtilsService,
     private updateOverlayCiphers: () => Promise<void>,
     private logService: LogService,
-    private fillCipherPolicy: FillCipherPolicy,
+    private fillCipherPolicy: MultiAccountFillCipherPolicy,
+    private autofillAccountsService: AutofillAccountsService,
     /** Injected wall-clock source (epoch ms), overridable so time-dependent selection is testable. */
     private now: () => number = () => Date.now(),
-  ) {}
+  ) {
+    this.pageLoadUserIds$ = this.autofillAccountsService.autofillUserIds$.pipe(
+      switchMap((userIds) =>
+        userIds.length === 0
+          ? of([] as UserId[])
+          : combineLatest(
+              userIds.map((userId) => this.autofillSettingsService.autofillOnPageLoadFor$(userId)),
+            ).pipe(map((enabled) => userIds.filter((_, index) => enabled[index]))),
+      ),
+    );
+  }
 
   init() {
     // sequence and dispatch fill requests through a common pipe to prevent dispatch
@@ -196,11 +222,12 @@ export class DefaultAutofillOrchestrator implements AutofillOrchestrator {
       });
 
     // Page-load opportunities feed the same serialized stream, gated reactively on
-    // the current autofill-on-page-load setting.
+    // the current autofill-on-page-load setting of the accounts autofill serves: an
+    // opportunity is abandoned when none of them has it enabled, or when there are none.
     this.lifecycleService.pageTransitionResolved$
       .pipe(
-        withLatestFrom(this.autofillSettingsService.autofillOnPageLoad$),
-        filter(([, autofillOnPageLoad]) => autofillOnPageLoad),
+        withLatestFrom(this.pageLoadUserIds$),
+        filter(([, pageLoadUserIds]) => pageLoadUserIds.length > 0),
         map(([opportunity]) => opportunity),
       )
       .subscribe(({ tab, tabId, frameId, frameUrl }) =>
@@ -212,8 +239,8 @@ export class DefaultAutofillOrchestrator implements AutofillOrchestrator {
     this.lifecycleService.automatedLoginStepReady$
       .pipe(filter((signal) => signal.workflow === AutomationWorkflow.autoSubmitLogin))
       .subscribe((signal) => {
-        void this.autoSubmitLoginOnTab(signal.tab, signal.frameId).catch((error: unknown) =>
-          this.logService.error(error),
+        void this.autoSubmitLoginOnTab(signal.tab, signal.userIds, signal.frameId).catch(
+          (error: unknown) => this.logService.error(error),
         );
       });
   }
@@ -262,19 +289,22 @@ export class DefaultAutofillOrchestrator implements AutofillOrchestrator {
   async autofillTabWithCipher(
     tab: chrome.tabs.Tab,
     cipher: CipherView,
+    userId: UserId,
     options?: Partial<AutoFillOptions>,
   ): Promise<FillResult> {
     const pageDetails = await this.collectPageDetails(tab);
     if (pageDetails.length === 0) {
       return AUTOFILL_ABSENT;
     }
-    const fill = { tab, cipher, pageDetails, ...CALLER_FILL_DEFAULTS, ...options };
+    // The cipher and its account come last, so the options cannot separate the pair.
+    const fill = { tab, pageDetails, ...CALLER_FILL_DEFAULTS, ...options, cipher, userId };
     return this.fillCipher(fill);
   }
 
   async unsafeAutofillTabWithCipher(
     tab: chrome.tabs.Tab,
     cipher: CipherView,
+    userId: UserId,
     options?: Partial<AutoFillOptions>,
   ): Promise<FillResult> {
     const pageDetails = await this.collectPageDetails(tab);
@@ -284,7 +314,8 @@ export class DefaultAutofillOrchestrator implements AutofillOrchestrator {
 
     // FIXME (PM-39579): gate these on the target tab's lifecycle state once that gate lands. Only "warm"
     // tabs should allow unsafe fills.
-    const fill = { tab, cipher, pageDetails, ...CALLER_FILL_DEFAULTS, ...options };
+    // The cipher and its account come last, so the options cannot separate the pair.
+    const fill = { tab, pageDetails, ...CALLER_FILL_DEFAULTS, ...options, cipher, userId };
     return this.commit(fill, { [requireActiveTab]: false });
   }
 
@@ -294,26 +325,40 @@ export class DefaultAutofillOrchestrator implements AutofillOrchestrator {
    * A step is one `collect → fill → submit`. The content script drives the *cadence* across a
    * multi-step form, re-invoking this once each step's DOM has settled.
    *
+   * Only a cipher of an account whose policy approved the workflow is submitted: a host approved
+   * by one account's organization never submits another account's cipher.
+   *
    * @param tab The tab whose frame is running the auto-submit workflow
+   * @param approvingUserIds The accounts whose policy approved the workflow
    * @param frameId The frame that reported the auto-submit opportunity
    */
-  private async autoSubmitLoginOnTab(tab: chrome.tabs.Tab, frameId?: number): Promise<void> {
-    const activeUserId = await this.activeUserId();
-    if (activeUserId == null || !tab.url) {
+  private async autoSubmitLoginOnTab(
+    tab: chrome.tabs.Tab,
+    approvingUserIds: readonly UserId[],
+    frameId?: number,
+  ): Promise<void> {
+    if (!tab.url) {
+      return;
+    }
+    const userIds = (await this.autofillUserIds()).filter((userId) =>
+      approvingUserIds.includes(userId),
+    );
+    if (userIds.length === 0) {
       return;
     }
     const pageDetails = await this.read(tab, frameId);
     if (pageDetails.length === 0) {
       return;
     }
-    const cipher = await this.selectLogin(tab.url, activeUserId, FillReason.policyCommand);
-    if (cipher == null || (await this.resolveReprompt(cipher, tab, true, tab.url))) {
+    const selection = await this.selectLogin(tab.url, FillReason.policyCommand, userIds);
+    if (selection == null || (await this.resolveReprompt(selection, tab, true, tab.url))) {
       return;
     }
 
     await this.commit({
       tab,
-      cipher,
+      cipher: selection.cipher,
+      userId: selection.userId,
       pageDetails,
       fillNewPassword: true,
       allowUntrustedIframe: true,
@@ -369,13 +414,14 @@ export class DefaultAutofillOrchestrator implements AutofillOrchestrator {
         return;
       }
       const fromCommand = request.kind !== "pageLoad";
-      if (await this.resolveReprompt(plan.cipher, target, fromCommand, plan.cycleKey)) {
+      if (await this.resolveReprompt(plan, target, fromCommand, plan.cycleKey)) {
         return;
       }
 
       const result = await this.commit({
         tab: target,
         cipher: plan.cipher,
+        userId: plan.userId,
         pageDetails,
         ...plan.options,
       });
@@ -442,25 +488,27 @@ export class DefaultAutofillOrchestrator implements AutofillOrchestrator {
   /**
    * The select operation: boils a request down to a concrete {@link PlannedFill}, or `undefined`
    * when no cipher applies. Login selection (page load, command, and the defensive cipher-type=login
-   * case) reads by URL; card/identity selection reads the next cipher of that type.
+   * case) reads by URL; card/identity selection reads the next cipher of that type. Selection
+   * runs over every account autofill serves; with none, the request is abandoned.
    */
   private async selectFill(
     request: FillRequest,
     target: chrome.tabs.Tab,
   ): Promise<PlannedFill | undefined> {
-    const activeUserId = await this.activeUserId();
-    if (activeUserId == null || !target.url) {
+    const userIds = await this.autofillUserIds();
+    if (userIds.length === 0 || !target.url) {
       return undefined;
     }
     const fromCommand = request.kind !== "pageLoad";
 
     if (request.kind === "cipherType" && request.cipherType !== CipherType.Login) {
-      const selection = await this.selectCipherTypeCipher(activeUserId, request.cipherType);
+      const selection = await this.selectCipherTypeCipher(request.cipherType);
       if (selection == null) {
         return undefined;
       }
       return {
         cipher: selection.cipher,
+        userId: selection.userId,
         cycleKey: selection.cacheKey,
         options: {
           skipLastUsed: false,
@@ -473,13 +521,21 @@ export class DefaultAutofillOrchestrator implements AutofillOrchestrator {
       };
     }
 
-    const reason = request.kind === "pageLoad" ? FillReason.automatic : FillReason.userCommand;
-    const cipher = await this.selectLogin(target.url, activeUserId, reason);
-    if (cipher == null) {
+    // A page-load fill offers only the ciphers of accounts that have autofill on page load on.
+    const selection =
+      request.kind === "pageLoad"
+        ? await this.selectLogin(
+            target.url,
+            FillReason.automatic,
+            await firstValueFrom(this.pageLoadUserIds$),
+          )
+        : await this.selectLogin(target.url, FillReason.userCommand, userIds);
+    if (selection == null) {
       return undefined;
     }
     return {
-      cipher,
+      cipher: selection.cipher,
+      userId: selection.userId,
       cycleKey: target.url,
       options: {
         skipLastUsed: !fromCommand,
@@ -497,22 +553,25 @@ export class DefaultAutofillOrchestrator implements AutofillOrchestrator {
    * `policyCommand` and `automatic` prefer a cipher launched within the last
    * {@link LOGIN_LAST_LAUNCHED_WINDOW_MS}, else the last one used for the URL. Only `automatic`
    * applies the per-item autofill-on-page-load filter.
+   *
+   * @param userIds The accounts whose ciphers `policyCommand` and `automatic` may select. The
+   * rotation of `userCommand` always walks every account autofill serves.
    */
   private async selectLogin(
     tabUrl: string,
-    activeUserId: UserId,
     reason: FillReason,
-  ): Promise<CipherView | undefined> {
+    userIds: readonly UserId[],
+  ): Promise<AccountCipher | undefined> {
     if (reason === FillReason.userCommand) {
-      return this.fillCipherPolicy.nextCipherForUrl(tabUrl, activeUserId);
+      return this.fillCipherPolicy.nextCipherForUrl(tabUrl);
+    }
+    if (userIds.length === 0) {
+      return undefined;
     }
     const isAutomatic = reason === FillReason.automatic;
-    const lastLaunchedCipher = await this.fillCipherPolicy.lastLaunchedForUrl(
-      tabUrl,
-      activeUserId,
-      isAutomatic,
-    );
-    const lastLaunched = lastLaunchedCipher?.localData?.lastLaunched;
+    const select = await this.automaticLoginSelection(tabUrl, isAutomatic, userIds);
+    const lastLaunchedCipher = await select.lastLaunched();
+    const lastLaunched = lastLaunchedCipher?.cipher.localData?.lastLaunched;
     if (
       lastLaunchedCipher &&
       lastLaunched &&
@@ -520,30 +579,99 @@ export class DefaultAutofillOrchestrator implements AutofillOrchestrator {
     ) {
       return lastLaunchedCipher;
     }
-    return this.fillCipherPolicy.lastUsedForUrl(tabUrl, activeUserId, isAutomatic);
+    return select.lastUsed();
+  }
+
+  /**
+   * How an automatic fill finds its last-launched and last-used login among the ciphers of
+   * `userIds`. When those are all the accounts autofill serves, the policy chooses, which for a
+   * single account is that account's own selection, unchanged. When some serving account is
+   * left out, the policy's choice could be a cipher of that account, so the choice is made here
+   * from the logins of `userIds` alone, by the rules the policy applies across accounts.
+   */
+  private async automaticLoginSelection(
+    tabUrl: string,
+    isAutomatic: boolean,
+    userIds: readonly UserId[],
+  ): Promise<{
+    lastLaunched: () => Promise<AccountCipher | undefined>;
+    lastUsed: () => Promise<AccountCipher | undefined>;
+  }> {
+    const serving = await this.autofillUserIds();
+    if (serving.every((userId) => userIds.includes(userId))) {
+      return {
+        lastLaunched: () => this.fillCipherPolicy.lastLaunchedForUrl(tabUrl, isAutomatic),
+        lastUsed: () => this.fillCipherPolicy.lastUsedForUrl(tabUrl, isAutomatic),
+      };
+    }
+
+    const logins = await this.automaticLoginsOf(tabUrl, isAutomatic, userIds);
+    return {
+      lastLaunched: async () =>
+        logins
+          .filter(({ cipher }) => cipher.localData?.lastLaunched)
+          .sort(
+            (a, b) =>
+              (b.cipher.localData?.lastLaunched ?? 0) - (a.cipher.localData?.lastLaunched ?? 0),
+          )[0],
+      lastUsed: async () =>
+        [...logins].sort(
+          (a, b) =>
+            (b.cipher.localData?.lastUsedDate || 0) - (a.cipher.localData?.lastUsedDate || 0),
+        )[0],
+    };
+  }
+
+  /**
+   * The logins of `userIds` an automatic fill may choose from. For a page-load fill, a login
+   * qualifies by its own page-load setting, or by its own account's default when it has none.
+   */
+  private async automaticLoginsOf(
+    tabUrl: string,
+    isAutomatic: boolean,
+    userIds: readonly UserId[],
+  ): Promise<AccountCipher[]> {
+    const logins = (
+      await this.fillCipherPolicy.ciphersForUrl(tabUrl, CipherUse.AutomaticFill)
+    ).filter(({ userId }) => userIds.includes(userId));
+    if (!isAutomatic) {
+      return logins;
+    }
+
+    const defaults = new Map<UserId, boolean>();
+    for (const userId of userIds) {
+      defaults.set(
+        userId,
+        await firstValueFrom(this.autofillSettingsService.autofillOnPageLoadDefaultFor$(userId)),
+      );
+    }
+    return logins.filter(({ userId, cipher }) => {
+      const setting = cipher.login?.autofillOnPageLoad;
+      return setting || (setting == null && defaults.get(userId) !== false);
+    });
   }
 
   /** Selects the next card or identity cipher and the cache key its rotation index advances under. */
   private async selectCipherTypeCipher(
-    activeUserId: UserId,
     cipherType: CipherType,
-  ): Promise<{ cipher: CipherView; cacheKey: string } | undefined> {
+  ): Promise<(AccountCipher & { cacheKey: string }) | undefined> {
     const cacheKey = cipherType === CipherType.Card ? "cardCiphers" : "identityCiphers";
-    const cipher =
+    const selection =
       cipherType === CipherType.Card
-        ? await this.fillCipherPolicy.nextCardCipher(activeUserId)
-        : await this.fillCipherPolicy.nextIdentityCipher(activeUserId);
-    return cipher ? { cipher, cacheKey } : undefined;
+        ? await this.fillCipherPolicy.nextCardCipher()
+        : await this.fillCipherPolicy.nextIdentityCipher();
+    return selection ? { ...selection, cacheKey } : undefined;
   }
 
   /**
    * Resolves password reprompt for a selected cipher. Returns `true` to abandon the fill: a
    * page-load fill never surfaces a reprompt popout (a reprompt-protected cipher is simply not
    * filled); a command-strength fill surfaces the master-password popout and abandons this fill,
-   * cycling past the reprompt-protected cipher so the next command offers the next one.
+   * cycling past the reprompt-protected cipher so the next command offers the next one. The
+   * reprompt is judged for the account that owns the cipher.
    */
   private async resolveReprompt(
-    cipher: CipherView,
+    { cipher, userId }: AccountCipher,
     target: chrome.tabs.Tab,
     fromCommand: boolean,
     cycleKey: string,
@@ -551,7 +679,7 @@ export class DefaultAutofillOrchestrator implements AutofillOrchestrator {
     if (cipher.reprompt === CipherRepromptType.Password && !fromCommand) {
       return true;
     }
-    if (await this.autofillService.isPasswordRepromptRequired(cipher, target)) {
+    if (await this.autofillService.isPasswordRepromptRequired(cipher, target, userId)) {
       if (fromCommand) {
         this.cycleFillableCipher(cycleKey);
       }
@@ -563,8 +691,10 @@ export class DefaultAutofillOrchestrator implements AutofillOrchestrator {
   /**
    * The commit operation: the single point where a concrete fill is sent to the service. It confirms
    * the target still shows the URL the fill was aimed at and optionally that it is the foreground tab.
+   * It also confirms that the cipher's account is still one autofill serves: a lock, a logout, or a
+   * switch that ends its service between selection and here denies the fill.
    *
-   * A successful commit counts as active account activity.
+   * A successful commit counts as activity of the cipher's account.
    */
   private async commit(
     options: AutoFillOptions,
@@ -583,9 +713,17 @@ export class DefaultAutofillOrchestrator implements AutofillOrchestrator {
       return AUTOFILL_DENIED;
     }
 
+    // Checked last, as the credential is placed. A held cipher never falls back to another account.
+    const servesAutofill =
+      options.userId != null &&
+      (await firstValueFrom(this.autofillAccountsService.isAutofillUser$(options.userId)));
+    if (!servesAutofill) {
+      return AUTOFILL_DENIED;
+    }
+
     const result = await this.autofillService.doAutoFill(options);
     if (result.outcome === AutofillOutcome.Filled) {
-      await this.recordActiveAccountActivity();
+      await this.recordAccountActivity(options.userId);
     }
     return result;
   }
@@ -619,8 +757,9 @@ export class DefaultAutofillOrchestrator implements AutofillOrchestrator {
     this.fillCipherPolicy.advanceRotation(key);
   }
 
-  private activeUserId(): Promise<UserId | null> {
-    return firstValueFrom(this.accountService.activeAccount$.pipe(getOptionalUserId));
+  /** The accounts autofill serves at this moment, in precedence order. */
+  private autofillUserIds(): Promise<UserId[]> {
+    return firstValueFrom(this.autofillAccountsService.autofillUserIds$);
   }
 
   /**
@@ -647,15 +786,8 @@ export class DefaultAutofillOrchestrator implements AutofillOrchestrator {
     return liveFrameUrl === request.frameUrl ? liveTab : undefined;
   }
 
-  private async recordActiveAccountActivity() {
-    const activeUserId = await firstValueFrom(
-      this.accountService.activeAccount$.pipe(map((account) => account?.id)),
-    );
-    // Page-load and keyboard fills only reach here while logged in, so an absent
-    // active account is defensive; skip the bump rather than record against none.
-    if (activeUserId == null) {
-      return;
-    }
-    await this.accountService.setAccountActivity(activeUserId, new Date(this.now()));
+  /** Records a placed credential as activity of the account that owns the cipher. */
+  private async recordAccountActivity(userId: UserId) {
+    await this.accountService.setAccountActivity(userId, new Date(this.now()));
   }
 }

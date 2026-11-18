@@ -1,10 +1,12 @@
+import { AccountCipherRef } from "@bitwarden/common/autofill/types/account-cipher";
 import { NeverDomains } from "@bitwarden/common/models/domain/domain-service";
 import { ServerConfig } from "@bitwarden/common/platform/abstractions/config/server-config";
 import { CommandDefinition } from "@bitwarden/common/platform/messaging";
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 import { FolderView } from "@bitwarden/common/vault/models/view/folder.view";
 
-import { CollectionView } from "../../content/components/common-types";
+import { AccountView, CollectionView, OrgView } from "../../content/components/common-types";
 import { NotificationType } from "../../enums/notification-type.enum";
 import AutofillPageDetails from "../../models/autofill-page-details";
 
@@ -18,6 +20,17 @@ export interface NotificationQueueMessage<T, D> {
   launchTimestamp: number;
   expires: Date;
   wasVaultLocked: boolean;
+  /**
+   * The account the notification acts for, fixed when it is queued: the account a new login is
+   * saved to, the account that owns the cipher to update, the account that owns the at-risk
+   * task, or the locked account an unlock prompt is for. Everything a queued notification reads
+   * or writes belongs to this account, never to whichever account is active when the user acts.
+   *
+   * A save prompt may move it to another account the user picks. A change prompt with ciphers of
+   * several accounts acts for the account of the picked cipher (see
+   * {@link ChangePasswordNotificationData.cipherRefs}).
+   */
+  userId: UserId;
   type: T;
   data: D;
 }
@@ -31,6 +44,11 @@ export type AddLoginNotificationData = {
 
 export type ChangePasswordNotificationData = {
   cipherIds: CipherView["id"][];
+  /**
+   * The ciphers of `cipherIds`, each with the account that owns it. A cipher id alone does not
+   * name an account: a shared item has the same id in every member's vault.
+   */
+  cipherRefs: AccountCipherRef[];
   newPassword: string;
 };
 
@@ -155,6 +173,8 @@ export type NotificationBackgroundExtensionMessage = {
   notificationType?: string;
   organizationId?: string;
   fadeOutNotification?: boolean;
+  /** The account a message names: the owner of `cipherId`, or the account to save to. */
+  userId?: string;
 };
 
 type BackgroundMessageParam = { message: NotificationBackgroundExtensionMessage };
@@ -163,7 +183,10 @@ type BackgroundOnMessageHandlerParams = BackgroundMessageParam & BackgroundSende
 
 export type NotificationBackgroundExtensionMessageHandlers = {
   [key: string]: CallableFunction;
+  bgGetAccountData: ({ sender }: BackgroundSenderParam) => Promise<AccountView[]>;
+  bgSelectAccount: ({ message, sender }: BackgroundOnMessageHandlerParams) => Promise<boolean>;
   bgGetFolderData: ({ message, sender }: BackgroundOnMessageHandlerParams) => Promise<FolderView[]>;
+  bgGetOrgData: ({ sender }: BackgroundSenderParam) => Promise<OrgView[]>;
   bgGetCollectionData: ({
     message,
     sender,

@@ -196,8 +196,10 @@ export default class RuntimeBackground {
       }
       case "fillCipherForPopup": {
         // The popup keeps the reprompt and TOTP copy in the foreground but dispatches the fill here.
-        // The cipher is referenced by id and re-fetched below so decrypted vault data never crosses
-        // the message channel.
+        // The cipher is referenced by the account that owns it and its id (`AccountCipherRef`:
+        // `msg.userId`, `msg.cipherId`) and re-fetched below so decrypted vault data never crosses
+        // the message channel. A reference that names no account is refused: a cipher id alone
+        // does not identify a vault, and the active account is never assumed.
         if (!BrowserApi.senderIsInternal(sender, this.logService)) {
           return AUTOFILL_DENIED;
         }
@@ -206,25 +208,26 @@ export default class RuntimeBackground {
         if (targetTab == null || targetTab.url !== msg.tabUrl) {
           return AUTOFILL_DENIED;
         }
-        const activeUserId = await firstValueFrom(
-          this.accountService.activeAccount$.pipe(map((account) => account?.id)),
-        );
-        if (activeUserId == null) {
+        if (typeof msg.userId !== "string" || typeof msg.cipherId !== "string") {
           return AUTOFILL_DENIED;
         }
-        const [cipher] = await this.main.fillCipherPolicy.ciphersForIds(
-          activeUserId,
-          [msg.cipherId],
+        // Resolves only within the accounts autofill serves; no result is a refusal.
+        const [accountCipher] = await this.main.multiAccountFillCipherPolicy.ciphersForRefs(
+          [{ userId: msg.userId, cipherId: msg.cipherId }],
           CipherUse.UserFill,
         );
-        if (cipher == null) {
+        if (accountCipher == null) {
           return AUTOFILL_DENIED;
         }
         // The only sender of `fillCipherForPopup` is an extension page, as confirmed by the
         // `BrowserApi.senderIsInternal(sender)` guard above, so this is never reachable from a
         // content-script-placed message.
         // eslint-disable-next-line no-restricted-syntax
-        return await this.autofillOrchestrator.unsafeAutofillTabWithCipher(targetTab, cipher);
+        return await this.autofillOrchestrator.unsafeAutofillTabWithCipher(
+          targetTab,
+          accountCipher.cipher,
+          accountCipher.userId,
+        );
       }
       case AutofillMessageCommand.collectPageDetailsResponse: {
         // FIXME (PM-44218): remove this case once `browser-interactions-testing` triggers autofill
@@ -282,13 +285,30 @@ export default class RuntimeBackground {
         return await this.main.biometricsService.canEnableBiometricUnlock();
       }
       case "getUserPremiumStatus": {
-        const activeUserId = await firstValueFrom(
-          this.accountService.activeAccount$.pipe(map((a) => a?.id)),
+        // Decides whether the inline menu opens on TOTP fields. It does when any account autofill
+        // serves has premium; which codes are shown is decided per cipher account by the overlay.
+        // With no account served, the active account answers, as before.
+        const autofillUserIds = await firstValueFrom(
+          this.main.autofillAccountsService.autofillUserIds$,
         );
-        const result = await firstValueFrom(
-          this.billingAccountProfileStateService.hasPremiumFromAnySource$(activeUserId),
-        );
-        return result;
+        if (autofillUserIds.length === 0) {
+          const activeUserId = await firstValueFrom(
+            this.accountService.activeAccount$.pipe(map((a) => a?.id)),
+          );
+          return await firstValueFrom(
+            this.billingAccountProfileStateService.hasPremiumFromAnySource$(activeUserId),
+          );
+        }
+        for (const userId of autofillUserIds) {
+          if (
+            await firstValueFrom(
+              this.billingAccountProfileStateService.hasPremiumFromAnySource$(userId),
+            )
+          ) {
+            return true;
+          }
+        }
+        return false;
       }
       case "getUrlAutofillTargetingRules": {
         // Rules are matched against the sender frame's URL rather than the tab's to minimize

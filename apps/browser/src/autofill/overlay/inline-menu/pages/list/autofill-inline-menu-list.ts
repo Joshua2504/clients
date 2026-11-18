@@ -708,6 +708,7 @@ export class AutofillInlineMenuList extends AutofillInlineMenuPageElement {
         fillCredentialsForText: this.getTranslation("fillCredentialsFor"),
         logInWithPasskeyAriaLabel: this.getTranslation("logInWithPasskeyAriaLabel"),
         usernameText: this.getTranslation("username"),
+        accountText: this.getTranslation("autofillSuggestionAccount"),
         cardNumberEndsWithText: this.getTranslation("cardNumberEndsWith"),
         fillVerificationCodeText: this.getTranslation("fillVerificationCode"),
         totpCodeAria: this.getTranslation("totpCodeAria"),
@@ -1169,11 +1170,15 @@ export class AutofillInlineMenuList extends AutofillInlineMenuPageElement {
     this.buildPasskeysHeadingElements(cipher);
 
     const fillCipherElement = this.buildFillCipherElement(cipher);
-    const viewCipherElement = this.buildViewCipherElement(cipher);
 
     const cipherContainerElement = globalThis.document.createElement("div");
     cipherContainerElement.classList.add("cipher-container");
-    cipherContainerElement.append(fillCipherElement, viewCipherElement);
+    cipherContainerElement.append(fillCipherElement);
+    // The vault item view shows the active account only, so a cipher of another account gets no
+    // view button.
+    if (cipher.canView !== false) {
+      cipherContainerElement.append(this.buildViewCipherElement(cipher));
+    }
 
     const inlineMenuListActionsItem = globalThis.document.createElement("li");
     inlineMenuListActionsItem.setAttribute("role", "listitem");
@@ -1226,6 +1231,10 @@ export class AutofillInlineMenuList extends AutofillInlineMenuPageElement {
   private buildFillCipherElement(cipher: InlineMenuCipherData) {
     const cipherIcon = this.buildCipherIconElement(cipher);
     const cipherDetailsElement = this.buildCipherDetailsElement(cipher);
+    const cipherAccountElement = this.buildCipherAccountElement(cipher);
+    if (cipherDetailsElement && cipherAccountElement) {
+      cipherDetailsElement.appendChild(cipherAccountElement);
+    }
 
     const fillCipherElement = globalThis.document.createElement("button");
     fillCipherElement.tabIndex = -1;
@@ -1236,7 +1245,7 @@ export class AutofillInlineMenuList extends AutofillInlineMenuPageElement {
         cipher.login?.passkey
           ? this.getTranslation("logInWithPasskeyAriaLabel")
           : this.getTranslation("fillCredentialsFor")
-      } ${cipher.name}`,
+      } ${cipher.name}${this.getAccountAriaSuffix(cipher)}`,
     );
 
     this.addFillCipherElementAriaDescription(fillCipherElement, cipher);
@@ -1245,6 +1254,39 @@ export class AutofillInlineMenuList extends AutofillInlineMenuPageElement {
     fillCipherElement.addEventListener(EVENTS.KEYUP, this.handleFillCipherKeyUpEvent);
 
     return fillCipherElement;
+  }
+
+  /**
+   * Builds the element that shows which account a cipher belongs to. The background sends the
+   * label only while more than one account serves autofill.
+   *
+   * @param cipher - The cipher to build the account element for.
+   */
+  private buildCipherAccountElement(cipher: InlineMenuCipherData): HTMLSpanElement | null {
+    if (!cipher.accountLabel) {
+      return null;
+    }
+
+    const cipherAccountElement = globalThis.document.createElement("span");
+    cipherAccountElement.classList.add("cipher-subtitle", "cipher-account");
+    cipherAccountElement.textContent = cipher.accountLabel;
+    cipherAccountElement.setAttribute("title", cipher.accountLabel);
+
+    return cipherAccountElement;
+  }
+
+  /**
+   * The part of a cipher button's accessible name that says which account the cipher belongs
+   * to. Empty when the cipher carries no account label.
+   *
+   * @param cipher - The cipher the button acts on.
+   */
+  private getAccountAriaSuffix(cipher: InlineMenuCipherData): string {
+    if (!cipher.accountLabel) {
+      return "";
+    }
+
+    return `, ${this.getTranslation("autofillSuggestionAccount")?.toLowerCase()}: ${cipher.accountLabel}`;
   }
 
   /**
@@ -2037,10 +2079,13 @@ export class AutofillInlineMenuList extends AutofillInlineMenuPageElement {
    */
   private focusViewCipherButton(currentListItem: HTMLElement, currentButtonElement: HTMLElement) {
     const cipherContainer = currentListItem.querySelector(".cipher-container") as HTMLElement;
-    cipherContainer.classList.add("remove-outline");
-
     const nextSibling = currentButtonElement.nextElementSibling as HTMLElement;
-    nextSibling?.focus();
+    if (!nextSibling) {
+      return;
+    }
+
+    cipherContainer.classList.add("remove-outline");
+    nextSibling.focus();
   }
 
   /**

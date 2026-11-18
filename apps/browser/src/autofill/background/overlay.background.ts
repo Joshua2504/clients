@@ -27,10 +27,13 @@ import {
   AutofillTargetingRuleTypes,
   SHOW_AUTOFILL_BUTTON,
 } from "@bitwarden/common/autofill/constants";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { AutofillSettingsServiceAbstraction } from "@bitwarden/common/autofill/services/autofill-settings.service";
 import { DomainSettingsService } from "@bitwarden/common/autofill/services/domain-settings.service";
 import { InlineMenuVisibilitySetting } from "@bitwarden/common/autofill/types";
+import { AccountCipher, accountCipherRef } from "@bitwarden/common/autofill/types/account-cipher";
 import { parseYearMonthExpiry } from "@bitwarden/common/autofill/utils";
+import { BillingAccountProfileStateService } from "@bitwarden/common/billing/abstractions/account/billing-account-profile-state.service";
 import { FeatureFlag } from "@bitwarden/common/enums/feature-flag.enum";
 import { NeverDomains } from "@bitwarden/common/models/domain/domain-service";
 import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
@@ -87,8 +90,9 @@ import {
 } from "../enums/autofill-overlay.enum";
 import AutofillField from "../models/autofill-field";
 import { AutofillService, PageDetail } from "../services/abstractions/autofill.service";
-import { CipherUse, FillCipherPolicy } from "../services/abstractions/fill-cipher-policy";
+import { CipherUse } from "../services/abstractions/fill-cipher-policy";
 import { InlineMenuFieldQualificationService } from "../services/abstractions/inline-menu-field-qualifications.service";
+import { MultiAccountFillCipherPolicy } from "../services/abstractions/multi-account-fill-cipher-policy";
 import { didFillOccur, shouldAutoCopyTotp } from "../types/fill-result";
 import {
   areKeyValuesNull,
@@ -114,6 +118,7 @@ import {
   CloseInlineMenuMessage,
   CurrentAddNewItemData,
   FocusedFieldData,
+  InlineMenuAccountDisplay,
   InlineMenuButtonPortMessageHandlers,
   InlineMenuCipherData,
   InlineMenuListPortMessageHandlers,
@@ -170,11 +175,16 @@ export class OverlayBackground implements OverlayBackgroundInterface {
   private inlineMenuButtonMessageConnectorPort: chrome.runtime.Port | null = null;
   private inlineMenuListPort: chrome.runtime.Port | null = null;
   private inlineMenuListMessageConnectorPort: chrome.runtime.Port | null = null;
-  private inlineMenuCiphers: Map<string, CipherView> = new Map();
+  /**
+   * The ciphers the inline menu offers, each with the account that owns it, by the opaque key the
+   * inline menu names it with. The key says nothing about the cipher or its account, so an item
+   * shared with two accounts is two entries.
+   */
+  private inlineMenuCiphers: Map<string, AccountCipher> = new Map();
   private inlineMenuFido2Credentials: Set<string> = new Set();
   private inlineMenuPageTranslations: Record<string, string> | null = null;
   private inlineMenuPosition: InlineMenuPosition = {};
-  private cardAndIdentityCiphers: Set<CipherView> | null = null;
+  private cardAndIdentityCiphers: Set<AccountCipher> | null = null;
   private currentInlineMenuCiphersCount: number = 0;
   private currentAddNewItemData: CurrentAddNewItemData | null = null;
   private focusedFieldData: FocusedFieldData | null = null;
@@ -286,7 +296,9 @@ export class OverlayBackground implements OverlayBackgroundInterface {
     /** Publishes the retry queued for after the unlock. */
     private intraprocessMessageSender: IntraprocessMessageSender,
     private messageListener: MessageListener,
-    private fillCipherPolicy: FillCipherPolicy,
+    private multiAccountFillCipherPolicy: MultiAccountFillCipherPolicy,
+    private autofillAccountsService: AutofillAccountsService,
+    private billingAccountProfileStateService: BillingAccountProfileStateService,
   ) {
     this.initOverlayEventObservables();
   }
@@ -371,6 +383,15 @@ export class OverlayBackground implements OverlayBackgroundInterface {
           this.buildCipherAndOpenAddEditVaultItemPopout(addNewItemData),
         ),
       )
+      .subscribe();
+
+    // An account that starts or stops serving autofill, or whose ciphers change, changes what
+    // the inline menu may offer. Both sources emit their current value on subscription.
+    merge(
+      this.multiAccountFillCipherPolicy.changed$.pipe(skip(1)),
+      this.autofillAccountsService.autofillUserIds$.pipe(skip(1)),
+    )
+      .pipe(switchMap(() => this.handleAutofillAccountsChange()))
       .subscribe();
 
     // Delayed close of the inline menu
@@ -476,11 +497,36 @@ export class OverlayBackground implements OverlayBackgroundInterface {
    * @param refocusField - Identifies whether the most recently focused field should be refocused
    */
   async updateOverlayCiphers(updateAllCipherTypes = true, refocusField = false) {
-    const authStatus = await firstValueFrom(this.authService.activeAccountStatus$);
+    const authStatus = await this.getAuthStatus();
     if (authStatus === AuthenticationStatus.Unlocked) {
       this.inlineMenuCiphers = new Map();
       this.updateOverlayCiphers$.next({ updateAllCipherTypes, refocusField });
     }
+  }
+
+  /**
+   * Rebuilds the inline menu ciphers after the accounts that serve autofill, or their ciphers,
+   * changed. Drops the held ciphers when no account serves autofill any more.
+   */
+  private async handleAutofillAccountsChange() {
+    try {
+      if ((await this.getAutofillUserIds()).length === 0) {
+        this.inlineMenuCiphers = new Map();
+        this.cardAndIdentityCiphers = null;
+        return;
+      }
+
+      await this.updateOverlayCiphers();
+    } catch (error) {
+      this.logService.error(error);
+    }
+  }
+
+  /**
+   * The accounts whose vaults the inline menu may read at this moment.
+   */
+  private async getAutofillUserIds(): Promise<UserId[]> {
+    return await firstValueFrom(this.autofillAccountsService.autofillUserIds$);
   }
 
   /**
@@ -529,9 +575,9 @@ export class OverlayBackground implements OverlayBackgroundInterface {
       this.storeInlineMenuFido2Credentials$.next(tabId);
     }
 
-    const ciphersViews = await this.getCipherViews(currentTab, updateAllCipherTypes);
-    for (let cipherIndex = 0; cipherIndex < ciphersViews.length; cipherIndex++) {
-      this.inlineMenuCiphers.set(`inline-menu-cipher-${cipherIndex}`, ciphersViews[cipherIndex]);
+    const accountCiphers = await this.getCipherViews(currentTab, updateAllCipherTypes);
+    for (let cipherIndex = 0; cipherIndex < accountCiphers.length; cipherIndex++) {
+      this.inlineMenuCiphers.set(`inline-menu-cipher-${cipherIndex}`, accountCiphers[cipherIndex]);
     }
 
     await this.updateInlineMenuListCiphers(currentTab);
@@ -558,7 +604,8 @@ export class OverlayBackground implements OverlayBackgroundInterface {
   }
 
   /**
-   * Gets the decrypted ciphers within a user's vault based on the current tab's URL.
+   * Gets the decrypted ciphers of every account that serves autofill, based on the current tab's
+   * URL. Each cipher comes with the account that owns it.
    *
    * @param currentTab - The current tab
    * @param updateAllCipherTypes - Identifies credit card and identity cipher types should also be updated
@@ -566,63 +613,68 @@ export class OverlayBackground implements OverlayBackgroundInterface {
   private async getCipherViews(
     currentTab: chrome.tabs.Tab,
     updateAllCipherTypes: boolean,
-  ): Promise<CipherView[]> {
-    const activeUserId = await firstValueFrom(
-      this.accountService.activeAccount$.pipe(getOptionalUserId),
-    );
-    if (!activeUserId) {
-      return [];
-    }
-
+  ): Promise<AccountCipher[]> {
     if (updateAllCipherTypes || !this.cardAndIdentityCiphers) {
-      return this.getAllCipherTypeViews(currentTab, activeUserId);
+      return this.getAllCipherTypeViews(currentTab);
     }
 
-    const cipherViews = (
-      await this.fillCipherPolicy.ciphersForUrl(
+    const accountCiphers = (
+      await this.multiAccountFillCipherPolicy.ciphersForUrl(
         currentTab.url || "",
-        activeUserId,
         CipherUse.UserFill,
       )
-    ).sort((a, b) => this.cipherService.sortCiphersByLastUsedThenName(a, b));
+    ).sort((a, b) => this.cipherService.sortCiphersByLastUsedThenName(a.cipher, b.cipher));
 
-    return this.cardAndIdentityCiphers
-      ? cipherViews.concat(...this.cardAndIdentityCiphers)
-      : cipherViews;
+    if (!this.cardAndIdentityCiphers) {
+      return accountCiphers;
+    }
+
+    // The cached ciphers were read earlier. An account that stopped serving autofill since then
+    // contributes nothing.
+    const autofillUserIds = new Set(await this.getAutofillUserIds());
+    for (const accountCipher of this.cardAndIdentityCiphers) {
+      if (!autofillUserIds.has(accountCipher.userId)) {
+        this.cardAndIdentityCiphers.delete(accountCipher);
+      }
+    }
+
+    return accountCiphers.concat(...this.cardAndIdentityCiphers);
   }
 
   /**
-   * Queries all cipher types from the user's vault returns them sorted by last used.
+   * Queries all cipher types from the vaults of the accounts that serve autofill and returns them
+   * sorted by last used. A card, identity or SSH key is left out when its own account does not
+   * show that type in the inline menu.
    *
    * @param currentTab - The current tab
-   * @param userId - The active user id
    */
-  private async getAllCipherTypeViews(
-    currentTab: chrome.tabs.Tab,
-    userId: UserId,
-  ): Promise<CipherView[]> {
+  private async getAllCipherTypeViews(currentTab: chrome.tabs.Tab): Promise<AccountCipher[]> {
     if (!this.cardAndIdentityCiphers) {
       this.cardAndIdentityCiphers = new Set([]);
     }
 
     this.cardAndIdentityCiphers.clear();
-    const cipherViews = (
-      await this.fillCipherPolicy.ciphersForUrl(currentTab.url || "", userId, CipherUse.UserFill, {
-        includeOtherTypes: [CipherType.Card, CipherType.Identity, CipherType.SshKey],
-      })
-    ).sort((a, b) => this.cipherService.sortCiphersByLastUsedThenName(a, b));
+    const accountCiphers = (
+      await this.filterByAccountInlineMenuSettings(
+        await this.multiAccountFillCipherPolicy.ciphersForUrl(
+          currentTab.url || "",
+          CipherUse.UserFill,
+          { includeOtherTypes: [CipherType.Card, CipherType.Identity, CipherType.SshKey] },
+        ),
+      )
+    ).sort((a, b) => this.cipherService.sortCiphersByLastUsedThenName(a.cipher, b.cipher));
 
     if (!this.cardAndIdentityCiphers) {
-      return cipherViews;
+      return accountCiphers;
     }
 
-    for (let cipherIndex = 0; cipherIndex < cipherViews.length; cipherIndex++) {
-      const cipherView = cipherViews[cipherIndex];
+    for (let cipherIndex = 0; cipherIndex < accountCiphers.length; cipherIndex++) {
+      const accountCipher = accountCiphers[cipherIndex];
       if (
-        !this.cardAndIdentityCiphers.has(cipherView) &&
-        nonLoginInlineCipherType.includes(cipherView.type)
+        !this.cardAndIdentityCiphers.has(accountCipher) &&
+        nonLoginInlineCipherType.includes(accountCipher.cipher.type)
       ) {
-        this.cardAndIdentityCiphers.add(cipherView);
+        this.cardAndIdentityCiphers.add(accountCipher);
       }
     }
 
@@ -630,7 +682,64 @@ export class OverlayBackground implements OverlayBackgroundInterface {
       this.cardAndIdentityCiphers = null;
     }
 
-    return cipherViews;
+    return accountCiphers;
+  }
+
+  /**
+   * Leaves out the cards, identities and SSH keys of an account that does not show that type in
+   * the inline menu. Each cipher is governed by the settings of its own account.
+   *
+   * @param accountCiphers - The ciphers to filter
+   */
+  private async filterByAccountInlineMenuSettings(
+    accountCiphers: AccountCipher[],
+  ): Promise<AccountCipher[]> {
+    const shownByAccount = new Map<string, boolean>();
+    const isShown = async ({ userId, cipher }: AccountCipher): Promise<boolean> => {
+      const setting$ = this.inlineMenuSettingFor$(cipher.type, userId);
+      if (!setting$) {
+        return true;
+      }
+
+      const settingKey = `${userId}:${cipher.type}`;
+      let shown = shownByAccount.get(settingKey);
+      if (shown === undefined) {
+        shown = await firstValueFrom(setting$);
+        shownByAccount.set(settingKey, shown);
+      }
+      return shown;
+    };
+
+    const shownAccountCiphers: AccountCipher[] = [];
+    for (const accountCipher of accountCiphers) {
+      if (await isShown(accountCipher)) {
+        shownAccountCiphers.push(accountCipher);
+      }
+    }
+    return shownAccountCiphers;
+  }
+
+  /**
+   * The setting of `userId` that shows ciphers of `cipherType` in the inline menu. Undefined for
+   * a type no setting hides.
+   *
+   * @param cipherType - The type of the cipher
+   * @param userId - The account that owns the cipher
+   */
+  private inlineMenuSettingFor$(
+    cipherType: CipherType,
+    userId: UserId,
+  ): Observable<boolean> | undefined {
+    switch (cipherType) {
+      case CipherType.Card:
+        return this.autofillSettingsService.showInlineMenuCardsFor$(userId);
+      case CipherType.Identity:
+        return this.autofillSettingsService.showInlineMenuIdentitiesFor$(userId);
+      case CipherType.SshKey:
+        return this.autofillSettingsService.showInlineMenuSshKeysFor$(userId);
+      default:
+        return undefined;
+    }
   }
 
   /**
@@ -644,6 +753,7 @@ export class OverlayBackground implements OverlayBackgroundInterface {
     ]);
     const iconsServerUrl: string | null = env.getIconsUrl() ?? null;
     const inlineMenuCiphersArray = Array.from(this.inlineMenuCiphers);
+    const accountDisplay = await this.getInlineMenuAccountDisplay();
     let inlineMenuCipherData: InlineMenuCipherData[];
     this.showPasskeysLabelsWithinInlineMenu = false;
 
@@ -652,12 +762,14 @@ export class OverlayBackground implements OverlayBackgroundInterface {
         inlineMenuCiphersArray,
         true,
         iconsServerUrl,
+        accountDisplay,
       );
     } else {
       inlineMenuCipherData = await this.buildInlineMenuCiphers(
         inlineMenuCiphersArray,
         showFavicons,
         iconsServerUrl,
+        accountDisplay,
       );
     }
 
@@ -666,27 +778,56 @@ export class OverlayBackground implements OverlayBackgroundInterface {
   }
 
   /**
+   * What the inline menu needs to attribute its ciphers to their accounts: the active account,
+   * and a label per account when more than one account serves autofill. With a single account
+   * there is nothing to tell apart and no label is sent.
+   */
+  private async getInlineMenuAccountDisplay(): Promise<InlineMenuAccountDisplay> {
+    const [activeUserId, autofillUserIds] = await Promise.all([
+      firstValueFrom(this.accountService.activeAccount$.pipe(getOptionalUserId)),
+      this.getAutofillUserIds(),
+    ]);
+    const labels = new Map<UserId, string>();
+    if (autofillUserIds.length > 1) {
+      const accounts = await firstValueFrom(this.accountService.accounts$);
+      for (const userId of autofillUserIds) {
+        const email = accounts[userId]?.email;
+        if (email) {
+          labels.set(userId, email);
+        }
+      }
+    }
+
+    return { activeUserId: activeUserId ?? null, labels };
+  }
+
+  /**
    * Builds the inline menu ciphers for a form field that is meant for account creation.
    *
    * @param inlineMenuCiphersArray - Array of inline menu ciphers
    * @param showFavicons - Identifies whether favicons should be shown
+   * @param iconsServerUrl - The URL of the icons server
+   * @param accountDisplay - Attributes the ciphers to their accounts
    */
   private async buildInlineMenuAccountCreationCiphers(
-    inlineMenuCiphersArray: [string, CipherView][],
+    inlineMenuCiphersArray: [string, AccountCipher][],
     showFavicons: boolean,
     iconsServerUrl: string | null,
+    accountDisplay: InlineMenuAccountDisplay,
   ) {
     const inlineMenuCipherData: InlineMenuCipherData[] = [];
     const accountCreationLoginCiphers: InlineMenuCipherData[] = [];
 
     for (let cipherIndex = 0; cipherIndex < inlineMenuCiphersArray.length; cipherIndex++) {
-      const [inlineMenuCipherId, cipher] = inlineMenuCiphersArray[cipherIndex];
+      const [inlineMenuCipherId, { userId, cipher }] = inlineMenuCiphersArray[cipherIndex];
 
       if (cipher.type === CipherType.Login) {
         accountCreationLoginCiphers.push(
           await this.buildCipherData({
             inlineMenuCipherId,
             cipher,
+            userId,
+            accountDisplay,
             iconsServerUrl,
             showFavicons,
             showInlineMenuAccountCreation: true,
@@ -708,6 +849,8 @@ export class OverlayBackground implements OverlayBackgroundInterface {
         await this.buildCipherData({
           inlineMenuCipherId,
           cipher,
+          userId,
+          accountDisplay,
           iconsServerUrl,
           showFavicons,
           showInlineMenuAccountCreation: true,
@@ -728,11 +871,14 @@ export class OverlayBackground implements OverlayBackgroundInterface {
    *
    * @param inlineMenuCiphersArray - Array of inline menu ciphers
    * @param showFavicons - Identifies whether favicons should be shown
+   * @param iconsServerUrl - The URL of the icons server
+   * @param accountDisplay - Attributes the ciphers to their accounts
    */
   private async buildInlineMenuCiphers(
-    inlineMenuCiphersArray: [string, CipherView][],
+    inlineMenuCiphersArray: [string, AccountCipher][],
     showFavicons: boolean,
     iconsServerUrl: string | null,
+    accountDisplay: InlineMenuAccountDisplay,
   ) {
     const inlineMenuCipherData: InlineMenuCipherData[] = [];
     const passkeyCipherData: InlineMenuCipherData[] = [];
@@ -744,7 +890,15 @@ export class OverlayBackground implements OverlayBackgroundInterface {
     const passkeysEnabled = await firstValueFrom(this.vaultSettingsService.enablePasskeys$);
 
     for (let cipherIndex = 0; cipherIndex < inlineMenuCiphersArray.length; cipherIndex++) {
-      const [inlineMenuCipherId, cipher] = inlineMenuCiphersArray[cipherIndex];
+      const [inlineMenuCipherId, { userId, cipher }] = inlineMenuCiphersArray[cipherIndex];
+      const cipherDataParams = {
+        inlineMenuCipherId,
+        cipher,
+        userId,
+        accountDisplay,
+        iconsServerUrl,
+        showFavicons,
+      };
 
       switch (cipher.type) {
         case CipherType.Card:
@@ -778,26 +932,14 @@ export class OverlayBackground implements OverlayBackgroundInterface {
       }
 
       if (!passkeysEnabled || !(await this.showCipherAsPasskey(cipher, domainExclusionsSet))) {
-        inlineMenuCipherData.push(
-          await this.buildCipherData({ inlineMenuCipherId, cipher, iconsServerUrl, showFavicons }),
-        );
+        inlineMenuCipherData.push(await this.buildCipherData(cipherDataParams));
         continue;
       }
 
-      passkeyCipherData.push(
-        await this.buildCipherData({
-          inlineMenuCipherId,
-          cipher,
-          iconsServerUrl,
-          showFavicons,
-          hasPasskey: true,
-        }),
-      );
+      passkeyCipherData.push(await this.buildCipherData({ ...cipherDataParams, hasPasskey: true }));
 
       if (cipher.login?.password && cipher.login.username) {
-        inlineMenuCipherData.push(
-          await this.buildCipherData({ inlineMenuCipherId, cipher, iconsServerUrl, showFavicons }),
-        );
+        inlineMenuCipherData.push(await this.buildCipherData(cipherDataParams));
       }
     }
 
@@ -869,10 +1011,23 @@ export class OverlayBackground implements OverlayBackgroundInterface {
   }
 
   /**
+   * Whether `userId` may use the TOTP of its `cipher`: premium entitlement of that account or the
+   * organization's TOTP grant on the cipher. The same rule as the fill (`AutofillService.doAutoFill`).
+   */
+  private async canUseTotp(cipher: CipherView, userId: UserId): Promise<boolean> {
+    const canAccessPremium = await firstValueFrom(
+      this.billingAccountProfileStateService.hasPremiumFromAnySource$(userId),
+    );
+    return canAccessPremium || !!cipher.organizationUseTotp;
+  }
+
+  /**
    * Builds the cipher data for the inline menu list.
    *
    * @param inlineMenuCipherId - The ID of the inline menu cipher
    * @param cipher - The cipher to build data for
+   * @param userId - The account that owns the cipher
+   * @param accountDisplay - Attributes the ciphers to their accounts
    * @param showFavicons - Identifies whether favicons should be shown
    * @param showInlineMenuAccountCreation - Identifies whether the inline menu is for account creation
    * @param hasPasskey - Identifies whether the cipher has a FIDO2 credential
@@ -881,6 +1036,8 @@ export class OverlayBackground implements OverlayBackgroundInterface {
   private async buildCipherData({
     inlineMenuCipherId,
     cipher,
+    userId,
+    accountDisplay,
     iconsServerUrl,
     showFavicons,
     showInlineMenuAccountCreation,
@@ -897,10 +1054,22 @@ export class OverlayBackground implements OverlayBackgroundInterface {
       accountCreationFieldType: this.focusedFieldData?.accountCreationFieldType,
     };
 
+    const accountLabel = accountDisplay.labels.get(userId);
+    if (accountLabel) {
+      inlineMenuData.accountLabel = accountLabel;
+    }
+    // The vault item view shows the active account's vault.
+    if (userId !== accountDisplay.activeUserId) {
+      inlineMenuData.canView = false;
+    }
+
     if (cipher.type === CipherType.Login) {
-      const totpResponse = cipher.login?.totp
-        ? await firstValueFrom(this.totpService.getCode$(cipher.login.totp))
-        : undefined;
+      // A code is computed and sent only for a cipher whose own account may use TOTP, so a
+      // premium account never reveals the codes of an account without premium.
+      const totpResponse =
+        cipher.login?.totp && (await this.canUseTotp(cipher, userId))
+          ? await firstValueFrom(this.totpService.getCode$(cipher.login.totp))
+          : undefined;
 
       const fido2Cred = cipher.login.fido2Credentials?.[0];
       const rpName = typeof fido2Cred?.rpName === "string" ? fido2Cred.rpName : undefined;
@@ -1468,16 +1637,19 @@ export class OverlayBackground implements OverlayBackgroundInterface {
     if (!inlineMenuCipherId || !pageDetailsForTab?.size) {
       return;
     }
-    const cipher = this.inlineMenuCiphers.get(inlineMenuCipherId);
-    if (!cipher) {
+    const accountCipher = await this.resolveInlineMenuCipher(inlineMenuCipherId);
+    if (!accountCipher) {
       return;
     }
+    const { userId, cipher } = accountCipher;
     if (usePasskey && cipher.login?.hasFido2Credentials) {
+      // A shared item has the same credential id in every account that holds it, so the passkey
+      // request is answered with the account the chosen entry belongs to.
       const credentialId = cipher.login.fido2Credentials[0]?.credentialId;
       if (credentialId) {
-        await this.authenticatePasskeyCredential(sender, credentialId);
+        await this.authenticatePasskeyCredential(sender, credentialId, userId);
       }
-      this.updateLastUsedInlineMenuCipher(inlineMenuCipherId, cipher);
+      this.updateLastUsedInlineMenuCipher(inlineMenuCipherId, accountCipher);
 
       if (cipher.login?.totp) {
         const totpResponse = await firstValueFrom(this.totpService.getCode$(cipher.login.totp));
@@ -1491,7 +1663,7 @@ export class OverlayBackground implements OverlayBackgroundInterface {
       return;
     }
 
-    if (await this.autofillService.isPasswordRepromptRequired(cipher, tab)) {
+    if (await this.autofillService.isPasswordRepromptRequired(cipher, tab, userId)) {
       return;
     }
 
@@ -1506,6 +1678,7 @@ export class OverlayBackground implements OverlayBackgroundInterface {
     const result = await this.autofillOrchestrator.fillCipher({
       tab,
       cipher,
+      userId,
       pageDetails,
       fillNewPassword: true,
       allowTotpAutofill: true,
@@ -1529,7 +1702,30 @@ export class OverlayBackground implements OverlayBackgroundInterface {
       return;
     }
 
-    this.updateLastUsedInlineMenuCipher(inlineMenuCipherId, cipher);
+    this.updateLastUsedInlineMenuCipher(inlineMenuCipherId, accountCipher);
+  }
+
+  /**
+   * Turns the key the inline menu names a cipher with back into the cipher, as its account holds
+   * it now. Undefined is a refusal: the key is unknown, the cipher no longer exists, or its
+   * account stopped serving autofill since the list was built. A key comes from an injected
+   * frame and is untrusted input.
+   *
+   * @param inlineMenuCipherId - Cipher ID corresponding to the inlineMenuCiphers map. Does not correspond to the actual cipher's ID.
+   */
+  private async resolveInlineMenuCipher(
+    inlineMenuCipherId: string,
+  ): Promise<AccountCipher | undefined> {
+    const held = this.inlineMenuCiphers.get(inlineMenuCipherId);
+    if (!held) {
+      return undefined;
+    }
+
+    const [accountCipher] = await this.multiAccountFillCipherPolicy.ciphersForRefs(
+      [accountCipherRef(held)],
+      CipherUse.UserFill,
+    );
+    return accountCipher;
   }
 
   /**
@@ -1561,8 +1757,13 @@ export class OverlayBackground implements OverlayBackgroundInterface {
    *
    * @param sender - The sender of the port message
    * @param credentialId - The credential ID to authenticate
+   * @param userId - The account whose credential the user chose
    */
-  async authenticatePasskeyCredential(sender: chrome.runtime.MessageSender, credentialId: string) {
+  async authenticatePasskeyCredential(
+    sender: chrome.runtime.MessageSender,
+    credentialId: string,
+    userId: UserId,
+  ) {
     if (!this.senderHasValidTab(sender)) {
       return;
     }
@@ -1582,7 +1783,7 @@ export class OverlayBackground implements OverlayBackgroundInterface {
         urls: generateDomainMatchPatterns(tabUrl),
       });
     }
-    request.subject.next({ type: Fido2ActiveRequestEvents.Continue, credentialId });
+    request.subject.next({ type: Fido2ActiveRequestEvents.Continue, credentialId, userId });
   }
 
   /**
@@ -1617,10 +1818,13 @@ export class OverlayBackground implements OverlayBackgroundInterface {
    * Sets the most recently used cipher at the top of the list of ciphers.
    *
    * @param inlineMenuCipherId - The ID of the inline menu cipher
-   * @param cipher - The cipher to set as the most recently used
+   * @param accountCipher - The cipher to set as the most recently used, with its account
    */
-  private updateLastUsedInlineMenuCipher(inlineMenuCipherId: string, cipher: CipherView) {
-    this.inlineMenuCiphers = new Map([[inlineMenuCipherId, cipher], ...this.inlineMenuCiphers]);
+  private updateLastUsedInlineMenuCipher(inlineMenuCipherId: string, accountCipher: AccountCipher) {
+    this.inlineMenuCiphers = new Map([
+      [inlineMenuCipherId, accountCipher],
+      ...this.inlineMenuCiphers,
+    ]);
   }
 
   /**
@@ -2325,9 +2529,18 @@ export class OverlayBackground implements OverlayBackgroundInterface {
         uri: "",
       });
 
+      // The password was generated for the active account, so the fill is that account's.
+      const activeUserId = await firstValueFrom(
+        this.accountService.activeAccount$.pipe(getOptionalUserId),
+      );
+      if (!activeUserId) {
+        return;
+      }
+
       const generatedPasswordFill = await this.autofillOrchestrator.fillCipher({
         tab: senderTab,
         cipher,
+        userId: activeUserId,
         pageDetails,
         fillNewPassword: true,
         allowTotpAutofill: false,
@@ -2539,27 +2752,68 @@ export class OverlayBackground implements OverlayBackgroundInterface {
    * Gets the inline menu's visibility setting for Cards from the settings service.
    */
   private async getInlineMenuCardsVisibility(): Promise<boolean> {
-    return await firstValueFrom(this.autofillSettingsService.showInlineMenuCards$);
+    return await this.anyAutofillAccountShows(
+      (userId) => this.autofillSettingsService.showInlineMenuCardsFor$(userId),
+      this.autofillSettingsService.showInlineMenuCards$,
+    );
   }
 
   /**
    * Gets the inline menu's visibility setting for Identities from the settings service.
    */
   private async getInlineMenuIdentitiesVisibility(): Promise<boolean> {
-    return await firstValueFrom(this.autofillSettingsService.showInlineMenuIdentities$);
+    return await this.anyAutofillAccountShows(
+      (userId) => this.autofillSettingsService.showInlineMenuIdentitiesFor$(userId),
+      this.autofillSettingsService.showInlineMenuIdentities$,
+    );
   }
 
   /**
    * Gets the inline menu's visibility setting for SSH keys from the settings service.
    */
   private async getInlineMenuSshKeysVisibility(): Promise<boolean> {
-    return await firstValueFrom(this.autofillSettingsService.showInlineMenuSshKeys$);
+    return await this.anyAutofillAccountShows(
+      (userId) => this.autofillSettingsService.showInlineMenuSshKeysFor$(userId),
+      this.autofillSettingsService.showInlineMenuSshKeys$,
+    );
   }
 
   /**
-   * Gets the user's authentication status from the auth service.
+   * Whether the page sets up the inline menu on fields of a cipher type. On when any account
+   * that serves autofill shows the type: the list then leaves out the ciphers of an account that
+   * does not (see {@link filterByAccountInlineMenuSettings}). With no account serving autofill
+   * it is the active account's setting, as the page is set up before an unlock.
+   *
+   * @param settingFor$ - Reads the setting of one account
+   * @param activeAccountSetting$ - The setting of the active account
+   */
+  private async anyAutofillAccountShows(
+    settingFor$: (userId: UserId) => Observable<boolean>,
+    activeAccountSetting$: Observable<boolean>,
+  ): Promise<boolean> {
+    const autofillUserIds = await this.getAutofillUserIds();
+    if (autofillUserIds.length === 0) {
+      return await firstValueFrom(activeAccountSetting$);
+    }
+
+    for (const userId of autofillUserIds) {
+      if (await firstValueFrom(settingFor$(userId))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Gets the authentication status the inline menu presents. It is unlocked while any account
+   * serves autofill, and otherwise the status of the active account, which is the account an
+   * unlock prompt is raised for.
    */
   private async getAuthStatus() {
+    if ((await this.getAutofillUserIds()).length > 0) {
+      return AuthenticationStatus.Unlocked;
+    }
+
     return await firstValueFrom(this.authService.activeAccountStatus$);
   }
 
@@ -2636,8 +2890,20 @@ export class OverlayBackground implements OverlayBackgroundInterface {
     ) {
       return;
     }
-    const cipher = this.inlineMenuCiphers.get(inlineMenuCipherId);
-    if (!cipher || !sender?.tab) {
+    if (!sender?.tab) {
+      return;
+    }
+    const accountCipher = await this.resolveInlineMenuCipher(inlineMenuCipherId);
+    if (!accountCipher) {
+      return;
+    }
+    const { userId, cipher } = accountCipher;
+    // The vault item view shows the active account's vault. A cipher of any other account is
+    // refused instead of opening the active account's item with the same id.
+    const activeUserId = await firstValueFrom(
+      this.accountService.activeAccount$.pipe(getOptionalUserId),
+    );
+    if (userId !== activeUserId) {
       return;
     }
 
@@ -2692,6 +2958,7 @@ export class OverlayBackground implements OverlayBackgroundInterface {
         "addNewLoginItemAria",
         "addNewVaultItem",
         "authenticating",
+        "autofillSuggestionAccount",
         "cardNumberEndsWith",
         "fillCredentialsFor",
         "fillGeneratedPassword",
@@ -2999,7 +3266,7 @@ export class OverlayBackground implements OverlayBackgroundInterface {
       if (
         login &&
         cipherView.type === CipherType.Login &&
-        !(await this.fillCipherPolicy.canOfferSave(
+        !(await this.multiAccountFillCipherPolicy.canOfferSave(
           {
             uri: login.uri || sender.tab?.url || "",
             username: login.username,

@@ -1,9 +1,10 @@
 import { TestBed } from "@angular/core/testing";
-import { ActivatedRoute } from "@angular/router";
+import { ActivatedRoute, Router } from "@angular/router";
 import { mock } from "jest-mock-extended";
 import { BehaviorSubject, filter, firstValueFrom, of } from "rxjs";
 
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
+import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
 import { DomainSettingsService } from "@bitwarden/common/autofill/services/domain-settings.service";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
 import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
@@ -21,6 +22,7 @@ import { LoginView } from "@bitwarden/common/vault/models/view/login.view";
 import { ToastService } from "@bitwarden/components";
 import { PasswordRepromptService } from "@bitwarden/vault";
 
+import { AccountSwitcherService } from "../../../auth/popup/account-switching/services/account-switcher.service";
 import { AutofillOutcome } from "../../../autofill/enums/autofill-outcome.enum";
 import {
   AutofillService,
@@ -60,8 +62,11 @@ describe("VaultPopupAutofillService", () => {
   const mockMessagingService = mock<MessagingService>();
   const mockInlineMenuFieldQualificationService = mock<InlineMenuFieldQualificationService>();
   const mockLogService = mock<LogService>();
+  const mockAccountSwitcherService = mock<AccountSwitcherService>();
+  const mockRouter = mock<Router>();
 
   const mockUserId = Utils.newGuid() as UserId;
+  const otherUserId = Utils.newGuid() as UserId;
   const accountService: FakeAccountService = mockAccountServiceWith(mockUserId);
   // A test overwrites `activeAccount$` to exercise the no-active-user path; capture the original
   // stream so `beforeEach` can restore it and that overwrite cannot leak into later tests.
@@ -127,6 +132,8 @@ describe("VaultPopupAutofillService", () => {
           provide: LogService,
           useValue: mockLogService,
         },
+        { provide: AccountSwitcherService, useValue: mockAccountSwitcherService },
+        { provide: Router, useValue: mockRouter },
       ],
     });
 
@@ -341,6 +348,7 @@ describe("VaultPopupAutofillService", () => {
           tabId: mockCurrentTab.id,
           tabUrl: mockCurrentTab.url,
           cipherId: "test-cipher-id",
+          userId: mockUserId,
         });
       });
 
@@ -620,6 +628,157 @@ describe("VaultPopupAutofillService", () => {
         });
       });
     });
+    describe("doAutofillForAccount()", () => {
+      beforeEach(() => {
+        mockCipher.id = "shared-cipher-id";
+        mockCipherService.updateLastUsedDate.mockResolvedValue(undefined);
+        jest.spyOn(BrowserApi, "closePopup").mockImplementation();
+      });
+
+      it("fills for the account that owns the cipher without switching the active account", async () => {
+        const result = await service.doAutofillForAccount(
+          { userId: otherUserId, cipher: mockCipher },
+          false,
+        );
+
+        expect(result).toBe(true);
+        expect(BrowserApi.sendMessageWithResponse).toHaveBeenCalledWith("fillCipherForPopup", {
+          tabId: mockCurrentTab.id,
+          tabUrl: mockCurrentTab.url,
+          cipherId: "shared-cipher-id",
+          userId: otherUserId,
+        });
+        expect(mockCipherService.updateLastUsedDate).toHaveBeenCalledTimes(1);
+        expect(mockCipherService.updateLastUsedDate).toHaveBeenCalledWith(
+          "shared-cipher-id",
+          otherUserId,
+        );
+        expect(mockAccountSwitcherService.selectAccount).not.toHaveBeenCalled();
+      });
+
+      it("acts under each account for a shared item that is in both vaults", async () => {
+        await service.doAutofill(mockCipher, false);
+        await service.doAutofillForAccount({ userId: otherUserId, cipher: mockCipher }, false);
+
+        const fills = (BrowserApi.sendMessageWithResponse as jest.Mock).mock.calls.filter(
+          ([command]) => command === "fillCipherForPopup",
+        );
+        expect(fills.map(([, message]) => message.userId)).toEqual([mockUserId, otherUserId]);
+        expect(mockCipherService.updateLastUsedDate.mock.calls).toEqual([
+          ["shared-cipher-id", mockUserId],
+          ["shared-cipher-id", otherUserId],
+        ]);
+      });
+
+      it("copies the TOTP code the background returned for the cipher's account", async () => {
+        fillOutcome = { outcome: AutofillOutcome.Filled, totp: "123456", canAutoCopyTotp: true };
+
+        await service.doAutofillForAccount({ userId: otherUserId, cipher: mockCipher }, false);
+
+        expect(mockPlatformUtilsService.copyToClipboard).toHaveBeenCalledWith(
+          "123456",
+          expect.anything(),
+        );
+      });
+
+      it("does not fill another account's cipher that requires a master password reprompt", async () => {
+        mockCipher.reprompt = CipherRepromptType.Password;
+
+        const result = await service.doAutofillForAccount(
+          { userId: otherUserId, cipher: mockCipher },
+          false,
+        );
+
+        expect(result).toBe(false);
+        // The prompt would verify the active account's master password.
+        expect(mockPasswordRepromptService.showPasswordPrompt).not.toHaveBeenCalled();
+        expect(BrowserApi.sendMessageWithResponse).not.toHaveBeenCalledWith(
+          "fillCipherForPopup",
+          expect.anything(),
+        );
+        expect(mockCipherService.updateLastUsedDate).not.toHaveBeenCalled();
+      });
+
+      it("prompts as usual when the cipher's account is the active account", async () => {
+        mockCipher.reprompt = CipherRepromptType.Password;
+
+        const result = await service.doAutofillForAccount(
+          { userId: mockUserId, cipher: mockCipher },
+          false,
+        );
+
+        expect(result).toBe(true);
+        expect(mockPasswordRepromptService.showPasswordPrompt).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe("viewAccountCipher()", () => {
+      beforeEach(() => {
+        mockCipher.id = "cipher-of-other-account";
+        mockRouter.navigate.mockResolvedValue(true);
+        mockPasswordRepromptService.passwordRepromptCheck.mockResolvedValue(true);
+      });
+
+      it("switches to the cipher's account before the reprompt and the navigation", async () => {
+        const order: string[] = [];
+        mockAccountSwitcherService.selectAccount.mockImplementation(async () => {
+          order.push("switch");
+          return { userId: otherUserId, authenticationStatus: AuthenticationStatus.Unlocked };
+        });
+        mockPasswordRepromptService.passwordRepromptCheck.mockImplementation(async () => {
+          order.push("reprompt");
+          return true;
+        });
+        mockRouter.navigate.mockImplementation(async () => {
+          order.push("navigate");
+          return true;
+        });
+
+        const result = await service.viewAccountCipher({ userId: otherUserId, cipher: mockCipher });
+
+        expect(result).toBe(true);
+        expect(mockAccountSwitcherService.selectAccount).toHaveBeenCalledWith(otherUserId);
+        expect(order).toEqual(["switch", "reprompt", "navigate"]);
+        expect(mockRouter.navigate).toHaveBeenCalledWith(["/view-cipher"], {
+          queryParams: { cipherId: "cipher-of-other-account", type: CipherType.Login },
+        });
+      });
+
+      it("does not open the item when its account locked in the meantime", async () => {
+        mockAccountSwitcherService.selectAccount.mockResolvedValue({
+          userId: otherUserId,
+          authenticationStatus: AuthenticationStatus.Locked,
+        });
+
+        const result = await service.viewAccountCipher({ userId: otherUserId, cipher: mockCipher });
+
+        expect(result).toBe(false);
+        expect(mockPasswordRepromptService.passwordRepromptCheck).not.toHaveBeenCalled();
+        expect(mockRouter.navigate).not.toHaveBeenCalled();
+      });
+
+      it("does not open the item when the reprompt is declined", async () => {
+        mockAccountSwitcherService.selectAccount.mockResolvedValue({
+          userId: otherUserId,
+          authenticationStatus: AuthenticationStatus.Unlocked,
+        });
+        mockPasswordRepromptService.passwordRepromptCheck.mockResolvedValue(false);
+
+        const result = await service.viewAccountCipher({ userId: otherUserId, cipher: mockCipher });
+
+        expect(result).toBe(false);
+        expect(mockRouter.navigate).not.toHaveBeenCalled();
+      });
+
+      it("does not switch for a cipher of the active account", async () => {
+        const result = await service.viewAccountCipher({ userId: mockUserId, cipher: mockCipher });
+
+        expect(result).toBe(true);
+        expect(mockAccountSwitcherService.selectAccount).not.toHaveBeenCalled();
+        expect(mockRouter.navigate).toHaveBeenCalled();
+      });
+    });
+
     describe("handleAutofillSuggestionUsed", () => {
       const cipherId = "cipher-123";
 
@@ -632,6 +791,13 @@ describe("VaultPopupAutofillService", () => {
 
         expect(mockCipherService.updateLastUsedDate).toHaveBeenCalledTimes(1);
         expect(mockCipherService.updateLastUsedDate).toHaveBeenCalledWith(cipherId, mockUserId);
+      });
+
+      it("updates last used date for the given account", async () => {
+        await service.handleAutofillSuggestionUsed({ cipherId, userId: otherUserId });
+
+        expect(mockCipherService.updateLastUsedDate).toHaveBeenCalledTimes(1);
+        expect(mockCipherService.updateLastUsedDate).toHaveBeenCalledWith(cipherId, otherUserId);
       });
 
       it("does nothing when there is no active user", async () => {

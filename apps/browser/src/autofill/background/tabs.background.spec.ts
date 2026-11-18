@@ -1,13 +1,16 @@
 import { mock } from "jest-mock-extended";
-import { BehaviorSubject, map, Subject } from "rxjs";
+import { BehaviorSubject, combineLatest, map, Subject } from "rxjs";
 
 import { Account, AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
 import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
+import { AutofillSettingsServiceAbstraction } from "@bitwarden/common/autofill/services/autofill-settings.service";
 import { UserId } from "@bitwarden/common/types/guid";
 
 import MainBackground from "../../background/main.background";
 import { FillCipherPolicy } from "../services/abstractions/fill-cipher-policy";
+import { DefaultMultiAccountFillCipherPolicy } from "../services/default-multi-account-fill-cipher-policy";
 import {
   flushPromises,
   triggerTabOnActivatedEvent,
@@ -29,6 +32,8 @@ describe("TabsBackground", () => {
   let activeAccount$: BehaviorSubject<Account | null>;
   let authStatuses$: BehaviorSubject<Record<UserId, AuthenticationStatus>>;
   let changed: Record<UserId, Subject<void>>;
+  // Accounts, other than the active one, that have opted in to serve autofill while unlocked.
+  let optedIn$: BehaviorSubject<UserId[]>;
   const fillCipherPolicy = mock<FillCipherPolicy>();
   const mainBackground = mock<MainBackground>({
     messagingService: {
@@ -55,6 +60,26 @@ describe("TabsBackground", () => {
     );
     mainBackground.authService = authService;
     mainBackground.fillCipherPolicy = fillCipherPolicy;
+    // The accounts autofill serves: the active account, then those opted in, each while unlocked.
+    optedIn$ = new BehaviorSubject<UserId[]>([]);
+    const autofillAccountsService = mock<AutofillAccountsService>();
+    (autofillAccountsService as any).autofillUserIds$ = combineLatest([
+      activeAccount$,
+      authStatuses$,
+      optedIn$,
+    ]).pipe(
+      map(([active, statuses, optedIn]) =>
+        [...(active ? [active.id] : []), ...optedIn.filter((id) => id !== active?.id)].filter(
+          (id) => statuses[id] === AuthenticationStatus.Unlocked,
+        ),
+      ),
+    );
+    mainBackground.autofillAccountsService = autofillAccountsService;
+    mainBackground.multiAccountFillCipherPolicy = new DefaultMultiAccountFillCipherPolicy(
+      fillCipherPolicy,
+      autofillAccountsService,
+      mock<AutofillSettingsServiceAbstraction>(),
+    );
     mainBackground.logService = mock<MainBackground["logService"]>();
     tabsBackground = new TabsBackground(mainBackground, notificationBackground, overlayBackground);
   });
@@ -122,6 +147,10 @@ describe("TabsBackground", () => {
 
     it("follows the active account", async () => {
       activeAccount$.next({ id: otherUserId } as Account);
+      // The switch itself refreshes both menus for the newly active account.
+      await settle();
+      expect(mainBackground.refreshMenu).toHaveBeenCalledTimes(1);
+      jest.clearAllMocks();
 
       changed[userId].next();
       await settle();
@@ -139,6 +168,62 @@ describe("TabsBackground", () => {
 
       expect(mainBackground.refreshMenu).not.toHaveBeenCalled();
       expect(overlayBackground.updateOverlayCiphers).not.toHaveBeenCalled();
+    });
+
+    describe("with two accounts serving autofill", () => {
+      beforeEach(async () => {
+        optedIn$.next([otherUserId]);
+        await settle();
+        jest.clearAllMocks();
+      });
+
+      it("refreshes for a change of either account", async () => {
+        changed[otherUserId].next();
+        await settle();
+        expect(mainBackground.refreshMenu).toHaveBeenCalledTimes(1);
+
+        changed[userId].next();
+        await settle();
+        expect(mainBackground.refreshMenu).toHaveBeenCalledTimes(2);
+        expect(overlayBackground.updateOverlayCiphers).toHaveBeenCalledTimes(2);
+      });
+
+      it("rebuilds both menus when one of them locks, and stops following it", async () => {
+        authStatuses$.next({
+          [userId]: AuthenticationStatus.Unlocked,
+          [otherUserId]: AuthenticationStatus.Locked,
+        });
+        await settle();
+
+        expect(mainBackground.refreshMenu).toHaveBeenCalledTimes(1);
+        expect(overlayBackground.updateOverlayCiphers).toHaveBeenCalledTimes(1);
+
+        changed[otherUserId].next();
+        await settle();
+        expect(mainBackground.refreshMenu).toHaveBeenCalledTimes(1);
+      });
+
+      it("keeps following the account left behind by a switch while it serves", async () => {
+        activeAccount$.next({ id: otherUserId } as Account);
+        optedIn$.next([userId]);
+        await settle();
+        jest.clearAllMocks();
+
+        changed[userId].next();
+        await settle();
+
+        expect(mainBackground.refreshMenu).toHaveBeenCalledTimes(1);
+      });
+
+      it("does not refresh once both have locked", async () => {
+        authStatuses$.next({
+          [userId]: AuthenticationStatus.Locked,
+          [otherUserId]: AuthenticationStatus.Locked,
+        });
+        await settle();
+
+        expect(mainBackground.refreshMenu).not.toHaveBeenCalled();
+      });
     });
 
     it("keeps refreshing after a refresh fails", async () => {

@@ -4,6 +4,7 @@ import { Injectable } from "@angular/core";
 import {
   Observable,
   combineLatest,
+  distinctUntilChanged,
   filter,
   firstValueFrom,
   map,
@@ -47,6 +48,11 @@ export class AccountSwitcherService {
   ACCOUNT_LIMIT = 5;
   SPECIAL_ADD_ACCOUNT_ID = "addAccount";
   availableAccounts$: Observable<AvailableAccount[]>;
+  /**
+   * Whether the account rows offer the multi-account autofill opt-in: only while account switching
+   * is enabled and more than one account is logged in.
+   */
+  autofillOptInOffered$: Observable<boolean>;
 
   switchAccountFinished$: Observable<NewActiveUser | null>;
 
@@ -119,6 +125,18 @@ export class AccountSwitcherService {
           return 1;
         });
       }),
+    );
+
+    this.autofillOptInOffered$ = combineLatest([
+      this.availableAccounts$,
+      this.accountSwitchingEnabled$(),
+    ]).pipe(
+      map(
+        ([accounts, switchingEnabled]) =>
+          switchingEnabled &&
+          accounts.filter((account) => account.id !== this.SPECIAL_ADD_ACCOUNT_ID).length > 1,
+      ),
+      distinctUntilChanged(),
     );
 
     // Create a reusable observable that listens to the switchAccountFinish message and returns the userId from the message

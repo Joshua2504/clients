@@ -23,8 +23,8 @@ export abstract class TransitionBuffer implements Disposable {
   /**
    * Each report that resolved into a fill opportunity.
    *
-   * Resolution does not check that the document is still live, nor that its account is the active
-   * one. Subscribers should check both before acting.
+   * Resolution does not check that the document is still live, nor that its account is still the
+   * active account or one autofill serves. Subscribers should check both before acting.
    */
   abstract readonly resolved$: Observable<BufferedTransitionReport>;
 

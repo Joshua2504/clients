@@ -1,5 +1,7 @@
 import { Observable } from "rxjs";
 
+import { UserId } from "@bitwarden/common/types/guid";
+
 /**
  * The scripted-automation workflows that report readiness through
  * {@link AutofillLifecycleService.reportAutomatedLoginStepReady}. Set by the validating background
@@ -24,6 +26,11 @@ export type AutomatedLoginStepReady = Readonly<{
   frameId: number | undefined;
   frameUrl: string;
   workflow: AutomationWorkflow;
+  /**
+   * The accounts whose policy approved the workflow, stamped by the validating background. The
+   * step fills and submits a cipher of one of these accounts only.
+   */
+  userIds: readonly UserId[];
 }>;
 
 /**
@@ -109,13 +116,15 @@ export abstract class AutofillLifecycleService {
    * through to downstream automated logins. Reports that fail to supply a tab
    * and URL are dropped.
    *
-   * `workflow` must not be derived from a frame-controlled message body.
+   * `workflow` and `userIds` must not be derived from a frame-controlled message body.
+   * `userIds` names the accounts whose policy approved the workflow.
    */
   abstract reportAutomatedLoginStepReady: (
     tab: chrome.tabs.Tab,
     frameId: number | undefined,
     url: string | undefined,
     workflow: AutomationWorkflow,
+    userIds: readonly UserId[],
   ) => void;
   /**
    * Emits each automated-login step-ready fact for a consumer (the orchestrator) to interpret.
@@ -169,9 +178,9 @@ export abstract class AutofillLifecycleService {
    */
   abstract liveTabs$: Observable<ReadonlySet<number>>;
   /**
-   * Begins monitoring a freshly-injected frame: commands it to start when an
-   * account is logged in. Called by the injection path once a frame's scripts
-   * are in place.
+   * Begins monitoring a freshly-injected frame: commands it to start when the
+   * active account is logged in or autofill serves an account. Called by the
+   * injection path once a frame's scripts are in place.
    */
   abstract startMonitoringFrame: (tab: chrome.tabs.Tab, frameId: number) => Promise<void>;
   /**

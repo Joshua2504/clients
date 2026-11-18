@@ -7,7 +7,7 @@
           | i18n
       }}"
     >
-      @if (showNewPasskeyButton) {
+      @if (canAddCipher) {
         <button
           bitButton
           buttonType="primary"
@@ -22,6 +22,25 @@
     </popup-header>
 
     <div class="tw-p-2">
+      @if (
+        data.message.type === BrowserFido2MessageTypes.ConfirmNewCredentialRequest &&
+        accounts.length > 1
+      ) {
+        <bit-section>
+          <bit-form-field disableMargin>
+            <bit-label>{{ "savePasskeyToAccount" | i18n }}</bit-label>
+            <bit-select
+              data-testid="passkey-target-account"
+              [ngModel]="targetUserId"
+              (ngModelChange)="selectTargetAccount($event)"
+            >
+              @for (account of accounts; track account.userId) {
+                <bit-option [value]="account.userId" [label]="account.label"></bit-option>
+              }
+            </bit-select>
+          </bit-form-field>
+        </bit-section>
+      }
       @if (passkeyAction === PasskeyActions.Register) {
         <bit-section>
           <bit-search
@@ -42,11 +61,11 @@
               <bit-section-header>
                 <h2 bitTypography="h6">{{ "chooseCipherForPasskeySave" | i18n }}</h2>
               </bit-section-header>
-              @for (cipherItem of displayedCiphers; track cipherItem.id) {
+              @for (cipherItem of displayedCiphers; track cipherKey(cipherItem)) {
                 <app-fido2-cipher-row
-                  [cipher]="cipherItem"
+                  [cipher]="cipherItem.cipher"
                   title="{{ 'passkeyItem' | i18n }}"
-                  (onSelected)="handleCipherItemSelect($event)"
+                  (onSelected)="handleCipherItemSelect(cipherItem)"
                 ></app-fido2-cipher-row>
               }
             }
@@ -79,11 +98,12 @@
             <div class="tw-space-y-4">
               <p>{{ "passkeyAlreadyExists" | i18n }}</p>
               <div class="tw-divide-y tw-divide-secondary-300">
-                @for (cipherItem of displayedCiphers; track cipherItem.id) {
+                @for (cipherItem of displayedCiphers; track cipherKey(cipherItem)) {
                   <app-fido2-cipher-row
-                    [cipher]="cipherItem"
+                    [cipher]="cipherItem.cipher"
+                    [accountLabel]="showAccountLabels ? accountLabel(cipherItem.userId) : undefined"
                     title="{{ 'passkeyItem' | i18n }}"
-                    (onSelected)="handleCipherItemSelect($event)"
+                    (onSelected)="handleCipherItemSelect(cipherItem)"
                   ></app-fido2-cipher-row>
                 }
               </div>
@@ -94,11 +114,12 @@
           <bit-section>
             @if (displayedCiphers.length > 0) {
               <ng-container slot="title">{{ "chooseCipherForPasskeyAuth" | i18n }}</ng-container>
-              @for (cipherItem of displayedCiphers; track cipherItem.id) {
+              @for (cipherItem of displayedCiphers; track cipherKey(cipherItem)) {
                 <app-fido2-cipher-row
-                  [cipher]="cipherItem"
+                  [cipher]="cipherItem.cipher"
+                  [accountLabel]="showAccountLabels ? accountLabel(cipherItem.userId) : undefined"
                   title="{{ 'passkeyItem' | i18n }}"
-                  (onSelected)="handleCipherItemSelect($event)"
+                  (onSelected)="handleCipherItemSelect(cipherItem)"
                 ></app-fido2-cipher-row>
               }
             } @else {

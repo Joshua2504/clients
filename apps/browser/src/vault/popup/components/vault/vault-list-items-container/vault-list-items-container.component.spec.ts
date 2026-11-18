@@ -1,5 +1,5 @@
 import { CUSTOM_ELEMENTS_SCHEMA } from "@angular/core";
-import { ComponentFixture, TestBed } from "@angular/core/testing";
+import { ComponentFixture, fakeAsync, TestBed, tick } from "@angular/core/testing";
 import { NoopAnimationsModule } from "@angular/platform-browser/animations";
 import { Router } from "@angular/router";
 import { mock } from "jest-mock-extended";
@@ -7,11 +7,14 @@ import { BehaviorSubject, of } from "rxjs";
 
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
-import { CipherType } from "@bitwarden/common/vault/enums";
+import { CipherRepromptType, CipherType } from "@bitwarden/common/vault/enums";
 import { CompactModeService, DialogService } from "@bitwarden/components";
 import { PasswordRepromptService } from "@bitwarden/vault";
 
+import { BrowserApi } from "../../../../../platform/browser/browser-api";
+import BrowserPopupUtils from "../../../../../platform/browser/browser-popup-utils";
 import { VaultPopupAutofillService } from "../../../services/vault-popup-autofill.service";
 import { VaultPopupSectionService } from "../../../services/vault-popup-section.service";
 import { PopupCipherViewLike } from "../../../views/popup-cipher.view";
@@ -43,7 +46,13 @@ describe("VaultListItemsContainerComponent", () => {
   const vaultPopupAutofillService = {
     currentTabIsOnBlocklist$: currentTabIsOnBlocklist$.asObservable(),
     doAutofill: jest.fn(),
+    doAutofillForAccount: jest.fn(),
+    viewAccountCipher: jest.fn(),
   };
+
+  const cipherService = mock<CipherService>();
+  const router = { navigate: jest.fn() };
+  const passwordRepromptService = mock<PasswordRepromptService>();
 
   const compactModeService = {
     enabled$: of(false),
@@ -66,9 +75,9 @@ describe("VaultListItemsContainerComponent", () => {
         { provide: VaultPopupSectionService, useValue: vaultPopupSectionService },
         { provide: I18nService, useValue: { t: (k: string) => k } },
         { provide: AccountService, useValue: { activeAccount$: of({ id: "UserId" }) } },
-        { provide: CipherService, useValue: mock<CipherService>() },
-        { provide: Router, useValue: { navigate: jest.fn() } },
-        { provide: PasswordRepromptService, useValue: mock<PasswordRepromptService>() },
+        { provide: CipherService, useValue: cipherService },
+        { provide: Router, useValue: router },
+        { provide: PasswordRepromptService, useValue: passwordRepromptService },
       ],
       schemas: [CUSTOM_ELEMENTS_SCHEMA],
     })
@@ -166,6 +175,105 @@ describe("VaultListItemsContainerComponent", () => {
 
         expect(component.canAutofill()).toBe(false);
       });
+    });
+  });
+
+  describe("ciphers of a further autofill account", () => {
+    const otherUserId = "OtherUserId" as UserId;
+    const repromptCipher = { ...mockCipher, reprompt: CipherRepromptType.Password };
+
+    beforeEach(() => {
+      fixture.componentRef.setInput("isAutofillList", true);
+      fixture.componentRef.setInput("accountUserId", otherUserId);
+      fixture.detectChanges();
+    });
+
+    it("fills for the account that owns the cipher", async () => {
+      await component.onCipherSelect(mockCipher);
+
+      expect(vaultPopupAutofillService.doAutofillForAccount).toHaveBeenCalledWith({
+        userId: otherUserId,
+        cipher: mockCipher,
+      });
+      // Never the active account's fill.
+      expect(vaultPopupAutofillService.doAutofill).not.toHaveBeenCalled();
+    });
+
+    it("fills a shared item under the account of the section it was picked from", async () => {
+      await component.doAutofill(mockCipher);
+      fixture.componentRef.setInput("accountUserId", undefined);
+      fixture.detectChanges();
+      await component.doAutofill(mockCipher);
+
+      expect(vaultPopupAutofillService.doAutofillForAccount).toHaveBeenCalledTimes(1);
+      expect(vaultPopupAutofillService.doAutofillForAccount).toHaveBeenCalledWith({
+        userId: otherUserId,
+        cipher: mockCipher,
+      });
+      expect(vaultPopupAutofillService.doAutofill).toHaveBeenCalledTimes(1);
+      expect(vaultPopupAutofillService.doAutofill).toHaveBeenCalledWith(mockCipher);
+    });
+
+    it("opens the item in its own account instead of viewing it in the active account", fakeAsync(() => {
+      void component.onViewCipher(mockCipher);
+      tick(200);
+
+      expect(vaultPopupAutofillService.viewAccountCipher).toHaveBeenCalledWith({
+        userId: otherUserId,
+        cipher: mockCipher,
+      });
+      // The reprompt and the view page act on the active account: they wait for the switch.
+      expect(passwordRepromptService.passwordRepromptCheck).not.toHaveBeenCalled();
+      expect(router.navigate).not.toHaveBeenCalled();
+    }));
+
+    it("opens an item that requires a master password reprompt instead of filling it", fakeAsync(() => {
+      void component.onCipherSelect(repromptCipher);
+      tick(200);
+
+      expect(vaultPopupAutofillService.doAutofillForAccount).not.toHaveBeenCalled();
+      expect(vaultPopupAutofillService.doAutofill).not.toHaveBeenCalled();
+      expect(vaultPopupAutofillService.viewAccountCipher).toHaveBeenCalledWith({
+        userId: otherUserId,
+        cipher: repromptCipher,
+      });
+      expect(component.cipherItemTitleKey()(repromptCipher)).toBe("viewItemTitleWithField");
+      expect(component.cipherItemTitleKey()(mockCipher)).toBe("autofillTitleWithField");
+    }));
+
+    it("records a launch for the account that owns the cipher", async () => {
+      jest.spyOn(BrowserApi, "createNewTab").mockResolvedValue(undefined as any);
+      jest.spyOn(BrowserPopupUtils, "inPopup").mockReturnValue(false);
+
+      await component.launchCipher(mockCipher);
+
+      expect(cipherService.updateLastLaunchedDate).toHaveBeenCalledWith("cipher-1", otherUserId);
+    });
+  });
+
+  describe("ciphers of the active account", () => {
+    beforeEach(() => {
+      fixture.componentRef.setInput("isAutofillList", true);
+      fixture.detectChanges();
+    });
+
+    it("fills a cipher that requires a master password reprompt as before", async () => {
+      const repromptCipher = { ...mockCipher, reprompt: CipherRepromptType.Password };
+
+      await component.onCipherSelect(repromptCipher);
+
+      expect(vaultPopupAutofillService.doAutofill).toHaveBeenCalledWith(repromptCipher);
+      expect(vaultPopupAutofillService.doAutofillForAccount).not.toHaveBeenCalled();
+      expect(vaultPopupAutofillService.viewAccountCipher).not.toHaveBeenCalled();
+    });
+
+    it("records a launch for the active account", async () => {
+      jest.spyOn(BrowserApi, "createNewTab").mockResolvedValue(undefined as any);
+      jest.spyOn(BrowserPopupUtils, "inPopup").mockReturnValue(false);
+
+      await component.launchCipher(mockCipher);
+
+      expect(cipherService.updateLastLaunchedDate).toHaveBeenCalledWith("cipher-1", "UserId");
     });
   });
 

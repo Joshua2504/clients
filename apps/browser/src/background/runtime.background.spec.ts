@@ -5,6 +5,7 @@ import { AccountService } from "@bitwarden/common/auth/abstractions/account.serv
 import { LogoutReason } from "@bitwarden/common/auth/logout";
 import { ExtensionCommand } from "@bitwarden/common/autofill/constants";
 import { DomainSettingsService } from "@bitwarden/common/autofill/services/domain-settings.service";
+import { BillingAccountProfileStateService } from "@bitwarden/common/billing/abstractions/account/billing-account-profile-state.service";
 import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
 import {
   Environment,
@@ -40,7 +41,8 @@ import { AutofillMessageCommand } from "../autofill/enums/autofill-message.enums
 import { AutofillOutcome } from "../autofill/enums/autofill-outcome.enum";
 import { AutofillLifecycleService } from "../autofill/services/abstractions/autofill-lifecycle.service";
 import { AutofillService, PageDetail } from "../autofill/services/abstractions/autofill.service";
-import { CipherUse, FillCipherPolicy } from "../autofill/services/abstractions/fill-cipher-policy";
+import { CipherUse } from "../autofill/services/abstractions/fill-cipher-policy";
+import { MultiAccountFillCipherPolicy } from "../autofill/services/abstractions/multi-account-fill-cipher-policy";
 import { createChromeTabMock } from "../autofill/spec/autofill-mocks";
 import { crossContextBoundary, tagAsExternalMessage } from "../autofill/spec/testing-utils";
 import { BrowserApi } from "../platform/browser/browser-api";
@@ -69,6 +71,7 @@ type RuntimeBackgroundOverrides = {
   intraprocessMessageSender?: MockProxy<IntraprocessMessageSender>;
   fillAssistEventReceiver?: MockProxy<FillAssistEventReceiver>;
   configService?: MockProxy<ConfigService>;
+  billingAccountProfileStateService?: MockProxy<BillingAccountProfileStateService>;
 };
 
 function createRuntimeBackground({
@@ -82,6 +85,7 @@ function createRuntimeBackground({
   intraprocessMessageSender = mock<IntraprocessMessageSender>(),
   fillAssistEventReceiver = mock<FillAssistEventReceiver>(),
   configService = mock<ConfigService>(),
+  billingAccountProfileStateService = undefined as any,
 }: RuntimeBackgroundOverrides = {}) {
   // The `undefined` slots are collaborators no covered path reaches.
   // Give one a mock as soon as a test needs it.
@@ -97,7 +101,7 @@ function createRuntimeBackground({
     undefined as any, // messageListener
     accountService,
     undefined as any, // lockService
-    undefined as any, // billingAccountProfileStateService
+    billingAccountProfileStateService,
     undefined as any, // browserInitialInstallService
     autofillLifecycleService as any,
     undefined as any, // defaultPasswordManagerPromptStateAccessor
@@ -216,21 +220,33 @@ describe("RuntimeBackground collection dispatch", () => {
     });
   });
 
-  /** Serves `ciphers` to lookups by id, as the vault would. */
-  const serveCiphers = (policy: MockProxy<FillCipherPolicy>, ciphers: CipherView[]) =>
-    policy.ciphersForIds.mockImplementation(async (_userId, ids) =>
-      ciphers.filter((cipher) => ids.includes(cipher.id)),
+  /**
+   * Serves each account's `vaults` to lookups by reference, as the policy would: a reference
+   * resolves only within the accounts listed, which stand for the accounts autofill serves.
+   */
+  const serveCiphers = (
+    policy: MockProxy<MultiAccountFillCipherPolicy>,
+    vaults: Record<string, CipherView[]>,
+  ) =>
+    policy.ciphersForRefs.mockImplementation(async (refs) =>
+      refs.flatMap((ref) =>
+        (vaults[ref.userId] ?? [])
+          .filter((cipher) => cipher.id === ref.cipherId)
+          .map((cipher) => ({ userId: ref.userId, cipher })),
+      ),
     );
 
   describe("fillCipherForPopup", () => {
     const cipher = Object.assign(new CipherView(), { id: "cipher-1" });
-    let fillCipherPolicy: MockProxy<FillCipherPolicy>;
+    const activeUserId = "user-1" as UserId;
+    const otherUserId = "user-2" as UserId;
+    let fillCipherPolicy: MockProxy<MultiAccountFillCipherPolicy>;
 
     beforeEach(() => {
       jest.spyOn(BrowserApi, "getTab").mockResolvedValue(tab);
-      fillCipherPolicy = mock<FillCipherPolicy>();
-      serveCiphers(fillCipherPolicy, [cipher]);
-      (main as any).fillCipherPolicy = fillCipherPolicy;
+      fillCipherPolicy = mock<MultiAccountFillCipherPolicy>();
+      serveCiphers(fillCipherPolicy, { [activeUserId]: [cipher] });
+      (main as any).multiAccountFillCipherPolicy = fillCipherPolicy;
       autofillOrchestrator.unsafeAutofillTabWithCipher.mockResolvedValue({
         outcome: AutofillOutcome.Filled,
         totp: "totp-123",
@@ -239,23 +255,66 @@ describe("RuntimeBackground collection dispatch", () => {
 
     it("fetches the cipher by id and fills it through the orchestrator", async () => {
       const result = await runtimeBackground.processMessageWithSender(
-        { command: "fillCipherForPopup", tabId: 1, tabUrl: tab.url, cipherId: "cipher-1" },
+        {
+          command: "fillCipherForPopup",
+          tabId: 1,
+          tabUrl: tab.url,
+          cipherId: "cipher-1",
+          userId: activeUserId,
+        },
         popupSender,
       );
 
-      expect(autofillOrchestrator.unsafeAutofillTabWithCipher).toHaveBeenCalledWith(tab, cipher);
+      expect(autofillOrchestrator.unsafeAutofillTabWithCipher).toHaveBeenCalledWith(
+        tab,
+        cipher,
+        activeUserId,
+      );
       expect(result).toEqual({ outcome: AutofillOutcome.Filled, totp: "totp-123" });
+    });
+
+    it("fills the cipher of the account the message names, not the active account's", async () => {
+      // An item shared through an organization has the same id in both vaults.
+      const otherCopy = Object.assign(new CipherView(), { id: "cipher-1", name: "other copy" });
+      serveCiphers(fillCipherPolicy, { [activeUserId]: [cipher], [otherUserId]: [otherCopy] });
+
+      await runtimeBackground.processMessageWithSender(
+        {
+          command: "fillCipherForPopup",
+          tabId: 1,
+          tabUrl: tab.url,
+          cipherId: "cipher-1",
+          userId: otherUserId,
+        },
+        popupSender,
+      );
+
+      expect(fillCipherPolicy.ciphersForRefs).toHaveBeenCalledWith(
+        [{ userId: otherUserId, cipherId: "cipher-1" }],
+        CipherUse.UserFill,
+      );
+      expect(autofillOrchestrator.unsafeAutofillTabWithCipher).toHaveBeenCalledTimes(1);
+      expect(autofillOrchestrator.unsafeAutofillTabWithCipher).toHaveBeenCalledWith(
+        tab,
+        otherCopy,
+        otherUserId,
+      );
     });
 
     it("looks up the cipher as a user fill", async () => {
       await runtimeBackground.processMessageWithSender(
-        { command: "fillCipherForPopup", tabId: 1, tabUrl: tab.url, cipherId: "cipher-1" },
+        {
+          command: "fillCipherForPopup",
+          tabId: 1,
+          tabUrl: tab.url,
+          cipherId: "cipher-1",
+          userId: activeUserId,
+        },
         popupSender,
       );
 
-      expect(fillCipherPolicy.ciphersForIds).toHaveBeenCalledWith(
-        "user-1",
-        ["cipher-1"],
+      expect(fillCipherPolicy.ciphersForRefs).toHaveBeenCalledWith(
+        [{ userId: activeUserId, cipherId: "cipher-1" }],
         CipherUse.UserFill,
       );
     });
@@ -266,7 +325,13 @@ describe("RuntimeBackground collection dispatch", () => {
       const senderIsInternalSpy = jest.spyOn(BrowserApi, "senderIsInternal");
 
       await runtimeBackground.processMessageWithSender(
-        { command: "fillCipherForPopup", tabId: 1, tabUrl: tab.url, cipherId: "cipher-1" },
+        {
+          command: "fillCipherForPopup",
+          tabId: 1,
+          tabUrl: tab.url,
+          cipherId: "cipher-1",
+          userId: activeUserId,
+        },
         contentScriptSender,
       );
 
@@ -274,7 +339,7 @@ describe("RuntimeBackground collection dispatch", () => {
       // Logging the rejection is part of the security requirement: the warning is the
       // observable record that the boundary fired on this sender.
       expect(logService.warning).toHaveBeenCalled();
-      expect(fillCipherPolicy.ciphersForIds).not.toHaveBeenCalled();
+      expect(fillCipherPolicy.ciphersForRefs).not.toHaveBeenCalled();
       expect(autofillOrchestrator.unsafeAutofillTabWithCipher).not.toHaveBeenCalled();
     });
 
@@ -282,7 +347,12 @@ describe("RuntimeBackground collection dispatch", () => {
     // exit reports the same outcome, so a caller cannot use the reply to learn which check turned
     // it away.
     describe("security: emit a denied outcome when processing early exits", () => {
-      const fillMessage = { command: "fillCipherForPopup", tabId: 1, cipherId: "cipher-1" };
+      const fillMessage = {
+        command: "fillCipherForPopup",
+        tabId: 1,
+        cipherId: "cipher-1",
+        userId: activeUserId,
+      };
 
       it("denies a rejected sender", async () => {
         jest.spyOn(BrowserApi, "senderIsInternal").mockReturnValue(false);
@@ -318,11 +388,34 @@ describe("RuntimeBackground collection dispatch", () => {
         expect(result).toEqual({ outcome: AutofillOutcome.Denied });
       });
 
-      it("denies a request with no active user", async () => {
-        accountService.activeAccount$ = of(null as any);
+      it("denies a request when autofill serves no account", async () => {
+        serveCiphers(fillCipherPolicy, {});
 
         const result = await runtimeBackground.processMessageWithSender(
           { ...fillMessage, tabUrl: tab.url },
+          popupSender,
+        );
+
+        expect(autofillOrchestrator.unsafeAutofillTabWithCipher).not.toHaveBeenCalled();
+        expect(result).toEqual({ outcome: AutofillOutcome.Denied });
+      });
+
+      it("denies a request that names no account, without assuming the active one", async () => {
+        const result = await runtimeBackground.processMessageWithSender(
+          { ...fillMessage, tabUrl: tab.url, userId: undefined },
+          popupSender,
+        );
+
+        expect(fillCipherPolicy.ciphersForRefs).not.toHaveBeenCalled();
+        expect(autofillOrchestrator.unsafeAutofillTabWithCipher).not.toHaveBeenCalled();
+        expect(result).toEqual({ outcome: AutofillOutcome.Denied });
+      });
+
+      it("denies a cipher of an account that has locked, though the active account holds the same shared item", async () => {
+        // `ciphersForRefs` resolves only within the accounts autofill serves; the active
+        // account's copy of the item must not be filled in its place.
+        const result = await runtimeBackground.processMessageWithSender(
+          { ...fillMessage, tabUrl: tab.url, userId: otherUserId },
           popupSender,
         );
 
@@ -1095,5 +1188,61 @@ describe("RuntimeBackground runFillAssistHeuristicFallback", () => {
     await expect(
       runtimeBackground.processMessageWithSender(message, sender),
     ).resolves.not.toThrow();
+  });
+});
+
+// Whether the inline menu opens on TOTP fields. Which codes it shows is the overlay's decision.
+describe("RuntimeBackground getUserPremiumStatus", () => {
+  const activeUserId = "active-user" as UserId;
+  const otherUserId = "other-user" as UserId;
+  const sender = { frameId: 0, tab: { id: 1 } } as chrome.runtime.MessageSender;
+
+  let premiumUserIds: UserId[];
+  let autofillUserIds$: BehaviorSubject<UserId[]>;
+  let runtimeBackground: RuntimeBackground;
+
+  const premiumStatus = () =>
+    runtimeBackground.processMessageWithSender({ command: "getUserPremiumStatus" }, sender);
+
+  beforeEach(() => {
+    premiumUserIds = [];
+    autofillUserIds$ = new BehaviorSubject<UserId[]>([activeUserId, otherUserId]);
+    const main = mock<MainBackground>();
+    (main as any).autofillAccountsService = { autofillUserIds$ };
+    const accountService = mock<AccountService>();
+    accountService.activeAccount$ = of({ id: activeUserId } as any);
+    const billingAccountProfileStateService = mock<BillingAccountProfileStateService>();
+    billingAccountProfileStateService.hasPremiumFromAnySource$.mockImplementation((userId) =>
+      of(premiumUserIds.includes(userId)),
+    );
+    runtimeBackground = createRuntimeBackground({
+      main,
+      accountService,
+      billingAccountProfileStateService,
+    });
+  });
+
+  it("is true when only an account that is not active has premium", async () => {
+    premiumUserIds = [otherUserId];
+
+    await expect(premiumStatus()).resolves.toBe(true);
+  });
+
+  it("is false when no account autofill serves has premium", async () => {
+    await expect(premiumStatus()).resolves.toBe(false);
+  });
+
+  it("does not count the premium of an account autofill does not serve", async () => {
+    premiumUserIds = [otherUserId];
+    autofillUserIds$.next([activeUserId]);
+
+    await expect(premiumStatus()).resolves.toBe(false);
+  });
+
+  it("answers for the active account when autofill serves no account", async () => {
+    premiumUserIds = [activeUserId];
+    autofillUserIds$.next([]);
+
+    await expect(premiumStatus()).resolves.toBe(true);
   });
 });

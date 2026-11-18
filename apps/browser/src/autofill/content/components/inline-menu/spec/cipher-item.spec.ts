@@ -84,6 +84,17 @@ describe("InlineMenuCipherItem", () => {
     });
   });
 
+  it("names the cipher's account in the fill aria label when the cipher carries one", () => {
+    const cipher = { ...mockLoginCiphers[0], accountLabel: "other@example.com" };
+    const values = litValues(
+      InlineMenuCipherItem({ ...baseProps, accountText: "Account", cipher }),
+    );
+
+    expect(values[FILL_ARIA_LABEL_SLOT]).toBe(
+      `${mockI18n.fillCredentialsFor} ${cipher.name}, account: other@example.com`,
+    );
+  });
+
   describe("totp cipher", () => {
     const cipher = mockTotpCiphers[0];
 

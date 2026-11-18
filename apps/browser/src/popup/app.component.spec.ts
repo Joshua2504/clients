@@ -48,6 +48,7 @@ describe("AppComponent (browser popup)", () => {
   let router: MockProxy<Router>;
   let ngZone: MockProxy<NgZone>;
   let logService: MockProxy<LogService>;
+  let toastService: MockProxy<ToastService>;
 
   const userId = "user-1" as UserId;
 
@@ -64,6 +65,7 @@ describe("AppComponent (browser popup)", () => {
     authRequestAnsweringService = mock<AuthRequestAnsweringService>();
     router = mock<Router>();
     ngZone = mock<NgZone>();
+    toastService = mock<ToastService>();
 
     accountService.activeAccount$ = of({ id: userId } as any);
     authService.activeAccountStatus$ = EMPTY;
@@ -103,7 +105,7 @@ describe("AppComponent (browser popup)", () => {
           mock<PlatformUtilsService>(),
           mock<DialogService>(),
           messageListener,
-          mock<ToastService>(),
+          toastService,
           accountService,
           animationControlService,
           mock<BiometricStateService>(),
@@ -209,6 +211,44 @@ describe("AppComponent (browser popup)", () => {
       await flushAsync();
 
       expect(syncService.fullSync).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("doneLoggingOut", () => {
+    const flushAsync = () => new Promise(process.nextTick);
+
+    const receive = async (message: Record<string, unknown>) => {
+      messageListener.allMessages$ = of({ command: "doneLoggingOut", ...message }) as any;
+      authService.logOut.mockImplementation((callback: () => void) => callback());
+      premiumCheckoutPendingService.consumeCheckoutPending.mockResolvedValue(null);
+      await component.ngOnInit();
+      await flushAsync();
+    };
+
+    it("shows the logout reason when the active account was logged out", async () => {
+      await receive({ logoutReason: "sessionExpired", userId, loggedOutActiveAccount: true });
+
+      expect(toastService.showToast).toHaveBeenCalledWith(
+        expect.objectContaining({ variant: "warning" }),
+      );
+    });
+
+    it("shows the logout reason for a message that does not say which account it was", async () => {
+      await receive({ logoutReason: "sessionExpired", userId });
+
+      expect(toastService.showToast).toHaveBeenCalled();
+    });
+
+    it("shows no logout toast and does not navigate when an account that is not active was logged out", async () => {
+      await receive({
+        logoutReason: "sessionExpired",
+        userId: "user-2",
+        loggedOutActiveAccount: false,
+      });
+
+      expect(authService.logOut).toHaveBeenCalled();
+      expect(toastService.showToast).not.toHaveBeenCalled();
+      expect(router.navigate).not.toHaveBeenCalled();
     });
   });
 });

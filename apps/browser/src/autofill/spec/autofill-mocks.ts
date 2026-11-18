@@ -3,6 +3,7 @@ import { mock } from "jest-mock-extended";
 import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
 import { UriMatchStrategy } from "@bitwarden/common/models/domain/domain-service";
 import { ThemeTypes } from "@bitwarden/common/platform/enums";
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherType } from "@bitwarden/common/vault/enums";
 import { CipherRepromptType } from "@bitwarden/common/vault/enums/cipher-reprompt-type";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
@@ -120,6 +121,7 @@ export function createGenerateFillScriptOptionsMock(customFields = {}): Generate
     allowTotpAutofill: false,
     autoSubmitLogin: false,
     cipher: mock<CipherView>(),
+    userId: "mock-user-id" as UserId,
     canAccessTotp: false,
     tabUrl: "https://jest-testing-website.com",
     defaultUriMatch: UriMatchStrategy.Domain,

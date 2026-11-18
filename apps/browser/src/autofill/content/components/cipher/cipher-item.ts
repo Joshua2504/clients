@@ -46,6 +46,7 @@ export function CipherItem({
         itemName: name,
         notificationType,
         theme,
+        userId: cipher.userId,
         username: login?.username,
       })}
     </div>`;

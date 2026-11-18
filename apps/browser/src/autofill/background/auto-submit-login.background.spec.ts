@@ -3,12 +3,10 @@ import { BehaviorSubject } from "rxjs";
 
 import { PolicyService } from "@bitwarden/common/admin-console/abstractions/policy/policy.service.abstraction";
 import { Policy } from "@bitwarden/common/admin-console/models/domain/policy";
-import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
-import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
 import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
 import { Utils } from "@bitwarden/common/platform/misc/utils";
-import { FakeAccountService, mockAccountServiceWith } from "@bitwarden/common/spec";
 import { UserId } from "@bitwarden/common/types/guid";
 
 import { BrowserApi } from "../../platform/browser/browser-api";
@@ -34,15 +32,14 @@ describe("AutoSubmitLoginBackground", () => {
   let logService: MockProxy<LogService>;
   let autofillLifecycleService: MockProxy<AutofillLifecycleService>;
   let scriptInjectorService: MockProxy<ScriptInjectorService>;
-  let authStatus$: BehaviorSubject<AuthenticationStatus>;
-  let authService: MockProxy<AuthService>;
+  let autofillUserIds$: BehaviorSubject<UserId[]>;
+  let autofillAccountsService: MockProxy<AutofillAccountsService>;
   let platformUtilsService: MockProxy<PlatformUtilsService>;
   let policyDetails: MockProxy<Policy>;
   let automaticAppLogInPolicy$: BehaviorSubject<Policy[]>;
   let policyAppliesToUser$: BehaviorSubject<boolean>;
   let policyService: MockProxy<PolicyService>;
   let autoSubmitLoginBackground: AutoSubmitLoginBackground;
-  let accountService: FakeAccountService;
   const mockUserId = Utils.newGuid() as UserId;
   const validIpdUrl1 = "https://example.com";
   const validIpdUrl2 = "https://subdomain.example3.com";
@@ -53,9 +50,10 @@ describe("AutoSubmitLoginBackground", () => {
     logService = mock<LogService>();
     autofillLifecycleService = mock<AutofillLifecycleService>();
     scriptInjectorService = mock<ScriptInjectorService>();
-    authStatus$ = new BehaviorSubject(AuthenticationStatus.Unlocked);
-    authService = mock<AuthService>();
-    authService.activeAccountStatus$ = authStatus$;
+    // The accounts autofill serves: the unlocked active account, nobody opted in.
+    autofillUserIds$ = new BehaviorSubject<UserId[]>([mockUserId]);
+    autofillAccountsService = mock<AutofillAccountsService>();
+    (autofillAccountsService as any).autofillUserIds$ = autofillUserIds$;
     platformUtilsService = mock<PlatformUtilsService>();
     policyDetails = mock<Policy>({
       enabled: true,
@@ -69,15 +67,13 @@ describe("AutoSubmitLoginBackground", () => {
       policiesByType$: jest.fn().mockReturnValue(automaticAppLogInPolicy$),
       policyAppliesToUser$: jest.fn().mockReturnValue(policyAppliesToUser$),
     });
-    accountService = mockAccountServiceWith(mockUserId);
     autoSubmitLoginBackground = new AutoSubmitLoginBackground(
       logService,
       autofillLifecycleService,
       scriptInjectorService,
-      authService,
+      autofillAccountsService,
       platformUtilsService,
       policyService,
-      accountService,
     );
   });
 
@@ -143,7 +139,7 @@ describe("AutoSubmitLoginBackground", () => {
       it("sets up the auto-submit workflow when the web request occurs in a sub frame and the initiator of the request is a valid auto-submit host", async () => {
         const topFrameHost = "some-top-frame.com";
         const subFrameHost = "some-sub-frame.com";
-        autoSubmitLoginBackground["validAutoSubmitHosts"].add(topFrameHost);
+        autoSubmitLoginBackground["validAutoSubmitHosts"].set(topFrameHost, new Set([mockUserId]));
         webRequestDetails.type = "sub_frame";
         webRequestDetails.initiator = `https://${topFrameHost}`;
         webRequestDetails.url = `https://${subFrameHost}`;
@@ -178,7 +174,7 @@ describe("AutoSubmitLoginBackground", () => {
         });
 
         it("skips injecting the content script when the extension is not unlocked", async () => {
-          authStatus$.next(AuthenticationStatus.Locked);
+          autofillUserIds$.next([]);
 
           triggerWebNavigationOnCompletedEvent(webNavigationDetails);
           await flushPromises();
@@ -214,7 +210,10 @@ describe("AutoSubmitLoginBackground", () => {
           url: validAutoSubmitUrl,
           tabId: webRequestDetails.tabId,
         };
-        autoSubmitLoginBackground["validAutoSubmitHosts"].add(validAutoSubmitHost);
+        autoSubmitLoginBackground["validAutoSubmitHosts"].set(
+          validAutoSubmitHost,
+          new Set([mockUserId]),
+        );
       });
 
       it("clears the auto-submit data when a POST request is encountered during an active auto-submit login workflow", async () => {
@@ -286,7 +285,10 @@ describe("AutoSubmitLoginBackground", () => {
           url: validAutoSubmitUrl,
           tabId: 1,
         };
-        autoSubmitLoginBackground["validAutoSubmitHosts"].add(validAutoSubmitHost);
+        autoSubmitLoginBackground["validAutoSubmitHosts"].set(
+          validAutoSubmitHost,
+          new Set([mockUserId]),
+        );
       });
 
       it("reports a whole-flow invalidation keyed to the active flow's tab when a POST follows submission", () => {
@@ -392,7 +394,10 @@ describe("AutoSubmitLoginBackground", () => {
 
       it("allows a chained redirect from an already-promoted auto-submit host to continue", () => {
         const intermediateHost = "intermediate.example.com";
-        autoSubmitLoginBackground["validAutoSubmitHosts"].add(intermediateHost);
+        autoSubmitLoginBackground["validAutoSubmitHosts"].set(
+          intermediateHost,
+          new Set([mockUserId]),
+        );
 
         triggerWebRequestOnBeforeRedirectEvent(
           mock<chrome.webRequest.OnBeforeRedirectDetails>({
@@ -446,10 +451,9 @@ describe("AutoSubmitLoginBackground", () => {
           logService,
           autofillLifecycleService,
           scriptInjectorService,
-          authService,
+          autofillAccountsService,
           platformUtilsService,
           policyService,
-          accountService,
         );
         jest.spyOn(BrowserApi, "getTabFromCurrentWindow").mockResolvedValue(tab);
       });
@@ -474,7 +478,10 @@ describe("AutoSubmitLoginBackground", () => {
           jest.spyOn(BrowserApi, "getTabFromCurrentWindow").mockResolvedValue(null);
           await autoSubmitLoginBackground.init();
           await flushPromises();
-          autoSubmitLoginBackground["validAutoSubmitHosts"].add(validAutoSubmitHost);
+          autoSubmitLoginBackground["validAutoSubmitHosts"].set(
+            validAutoSubmitHost,
+            new Set([mockUserId]),
+          );
 
           triggerWebRequestOnBeforeRequestEvent(webRequestDetails);
 
@@ -487,7 +494,10 @@ describe("AutoSubmitLoginBackground", () => {
         it("treats the routed to url as the initiator of a request", async () => {
           await autoSubmitLoginBackground.init();
           await flushPromises();
-          autoSubmitLoginBackground["validAutoSubmitHosts"].add(validAutoSubmitHost);
+          autoSubmitLoginBackground["validAutoSubmitHosts"].set(
+            validAutoSubmitHost,
+            new Set([mockUserId]),
+          );
 
           triggerWebRequestOnBeforeRequestEvent(webRequestDetails);
 
@@ -533,7 +543,10 @@ describe("AutoSubmitLoginBackground", () => {
 
         describe("when a tab completes a navigation event", () => {
           it("clears the set of valid auto-submit hosts", () => {
-            autoSubmitLoginBackground["validAutoSubmitHosts"].add(validIpdUrl1);
+            autoSubmitLoginBackground["validAutoSubmitHosts"].set(
+              validIpdUrl1,
+              new Set([mockUserId]),
+            );
 
             triggerWebNavigationOnCompletedEvent(
               mock<chrome.webNavigation.WebNavigationFramedCallbackDetails>({
@@ -547,7 +560,10 @@ describe("AutoSubmitLoginBackground", () => {
           });
 
           it("reports a whole-flow invalidation, falling back to the navigating tab when no flow tab is recorded", () => {
-            autoSubmitLoginBackground["validAutoSubmitHosts"].add(validIpdUrl1);
+            autoSubmitLoginBackground["validAutoSubmitHosts"].set(
+              validIpdUrl1,
+              new Set([mockUserId]),
+            );
 
             triggerWebNavigationOnCompletedEvent(
               mock<chrome.webNavigation.WebNavigationFramedCallbackDetails>({
@@ -564,7 +580,10 @@ describe("AutoSubmitLoginBackground", () => {
 
           it("reports a whole-flow invalidation keyed to the recorded flow tab when one exists", () => {
             const flowTabId = 99;
-            autoSubmitLoginBackground["validAutoSubmitHosts"].add(validIpdUrl1);
+            autoSubmitLoginBackground["validAutoSubmitHosts"].set(
+              validIpdUrl1,
+              new Set([mockUserId]),
+            );
             autoSubmitLoginBackground["currentAutoSubmitHostData"] = {
               url: validAutoSubmitUrl,
               tabId: flowTabId,
@@ -662,7 +681,10 @@ describe("AutoSubmitLoginBackground", () => {
 
       beforeEach(async () => {
         await autoSubmitLoginBackground.init();
-        autoSubmitLoginBackground["validAutoSubmitHosts"].add(validAutoSubmitHost);
+        autoSubmitLoginBackground["validAutoSubmitHosts"].set(
+          validAutoSubmitHost,
+          new Set([mockUserId]),
+        );
         autoSubmitLoginBackground["currentAutoSubmitHostData"] = {
           url: validAutoSubmitUrl,
           tabId: 1,
@@ -698,6 +720,7 @@ describe("AutoSubmitLoginBackground", () => {
             sender.frameId,
             sender.url,
             AutomationWorkflow.autoSubmitLogin,
+            [mockUserId],
           );
         });
       });
@@ -728,6 +751,118 @@ describe("AutoSubmitLoginBackground", () => {
           expect(autofillLifecycleService.reportAutoSubmitInvalidated).not.toHaveBeenCalled();
         });
       });
+    });
+  });
+
+  describe("when several accounts serve autofill", () => {
+    const otherUserId = Utils.newGuid() as UserId;
+    const otherIdpUrl = "https://idp.other-organization.com";
+    const tab = mock<chrome.tabs.Tab>({ id: 1 });
+    let otherPolicy$: BehaviorSubject<Policy[]>;
+
+    /** Starts a workflow from `initiator` and reports a ready step from the routed-to host. */
+    const startWorkflowFrom = async (initiator: string) => {
+      triggerWebRequestOnBeforeRequestEvent(
+        mock<chrome.webRequest.WebRequestDetails>({
+          initiator,
+          url: validAutoSubmitUrl,
+          type: "main_frame",
+          tabId: 1,
+        }),
+      );
+      sendMockExtensionMessage(
+        { command: "automatedLoginStepReady" },
+        mock<chrome.runtime.MessageSender>({ tab, frameId: 0, url: validAutoSubmitUrl }),
+      );
+      await flushPromises();
+    };
+
+    // The message listener is registered again each time a policy is applied, and the test
+    // double does not collapse the repeats as the browser does, so every report is checked.
+    const expectApprovedBy = (userIds: UserId[]) => {
+      const reports = autofillLifecycleService.reportAutomatedLoginStepReady.mock.calls;
+      expect(reports.length).toBeGreaterThan(0);
+      reports.forEach((report) => expect(report[4]).toEqual(userIds));
+    };
+
+    beforeEach(async () => {
+      // Each account's organization approves its own IdP host.
+      otherPolicy$ = new BehaviorSubject<Policy[]>([
+        mock<Policy>({ enabled: true, data: { idpHost: otherIdpUrl } }),
+      ]);
+      policyService.policiesByType$.mockImplementation((_type, userId) =>
+        userId === otherUserId ? otherPolicy$ : automaticAppLogInPolicy$,
+      );
+      autofillUserIds$.next([mockUserId, otherUserId]);
+      await autoSubmitLoginBackground.init();
+      await flushPromises();
+    });
+
+    it("reads the policy of every account", () => {
+      expect(policyService.policiesByType$).toHaveBeenCalledWith(expect.anything(), mockUserId);
+      expect(policyService.policiesByType$).toHaveBeenCalledWith(expect.anything(), otherUserId);
+    });
+
+    it("reports a step as approved only by the account whose IdP host started the workflow", async () => {
+      await startWorkflowFrom(otherIdpUrl);
+
+      expectApprovedBy([otherUserId]);
+    });
+
+    it("reports both accounts when both policies approve the IdP host", async () => {
+      otherPolicy$.next([mock<Policy>({ enabled: true, data: { idpHost: validIpdUrl1 } })]);
+      await flushPromises();
+
+      await startWorkflowFrom(validIpdUrl1);
+
+      expectApprovedBy([mockUserId, otherUserId]);
+    });
+
+    it("carries the approving accounts through a redirect", async () => {
+      triggerWebRequestOnBeforeRedirectEvent(
+        mock<chrome.webRequest.OnBeforeRedirectDetails>({
+          url: otherIdpUrl,
+          redirectUrl: validAutoSubmitUrl,
+          type: "main_frame",
+        }),
+      );
+
+      expect(autoSubmitLoginBackground["validAutoSubmitHosts"].get(validAutoSubmitHost)).toEqual(
+        new Set([otherUserId]),
+      );
+    });
+
+    it("keeps listening for the other account when one account's policy is turned off", async () => {
+      jest.mocked(chrome.webRequest.onBeforeRequest.removeListener).mockClear();
+
+      otherPolicy$.next([mock<Policy>({ enabled: false, data: { idpHost: otherIdpUrl } })]);
+      await flushPromises();
+
+      expect(chrome.webRequest.onBeforeRequest.removeListener).not.toHaveBeenCalled();
+      expect(autoSubmitLoginBackground["isValidIdpHost"](otherIdpUrl)).toBe(false);
+      expect(autoSubmitLoginBackground["isValidIdpHost"](validIpdUrl1)).toBe(true);
+    });
+
+    it("skips injecting the content script once every account has locked", async () => {
+      triggerWebRequestOnBeforeRequestEvent(
+        mock<chrome.webRequest.WebRequestDetails>({
+          initiator: validIpdUrl1,
+          url: validAutoSubmitUrl,
+          type: "main_frame",
+          tabId: 1,
+        }),
+      );
+      autofillUserIds$.next([]);
+
+      triggerWebNavigationOnCompletedEvent(
+        mock<chrome.webNavigation.WebNavigationFramedCallbackDetails>({
+          tabId: 1,
+          url: validAutoSubmitUrl,
+        }),
+      );
+      await flushPromises();
+
+      expect(scriptInjectorService.inject).not.toHaveBeenCalled();
     });
   });
 });

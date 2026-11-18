@@ -78,6 +78,12 @@ export class DefaultFillCipherPolicy implements FillCipherPolicy {
     return (await this.cipherService.getNextIdentityCipher(userId)) ?? undefined;
   }
 
+  /**
+   * Advances the rotation for `url` of every user. The caller reads a rotation for one account
+   * and advances it before reading another, so only that account holds a rotation for `url`
+   * that is still current; `MultiAccountFillCipherPolicy` walks its own rotation when it serves
+   * several accounts and does not call this.
+   */
   advanceRotation(url: string): void {
     this.cipherService.updateLastUsedIndexForUrl(url);
   }

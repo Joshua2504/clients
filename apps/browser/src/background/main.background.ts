@@ -14,6 +14,7 @@ import {
   map,
   merge,
   of,
+  pairwise,
   switchMap,
   timeout,
 } from "rxjs";
@@ -1391,6 +1392,7 @@ export default class MainBackground {
     this.autofillLifecycleService = new DefaultAutofillLifecycleService(
       this.authService,
       this.logService,
+      this.autofillAccountsService,
     );
     this.autofillService = new AutofillService(
       this.cipherService,
@@ -1403,11 +1405,12 @@ export default class MainBackground {
       this.billingAccountProfileStateService,
       this.scriptInjectorService,
       this.accountService,
-      this.authService,
+      this.autofillAccountsService,
       this.userNotificationSettingsService,
       this.messageListener,
       this.animationControlService,
       this.autofillLifecycleService,
+      (userId) => this.switchAccount(userId),
     );
     this.autofillOrchestrator = new DefaultAutofillOrchestrator(
       this.autofillLifecycleService,
@@ -1417,7 +1420,8 @@ export default class MainBackground {
       this.platformUtilsService,
       () => this.updateOverlayCiphers(),
       this.logService,
-      this.fillCipherPolicy,
+      this.multiAccountFillCipherPolicy,
+      this.autofillAccountsService,
     );
     this.auditService = new AuditService(
       this.cryptoFunctionService,
@@ -1561,6 +1565,7 @@ export default class MainBackground {
       this.syncService,
       this.accountService,
       this.logService,
+      this.autofillAccountsService.autofillUserIds$,
     );
     this.fido2ActiveRequestManager = new Fido2ActiveRequestManager();
     this.fido2ClientService = new Fido2ClientService(
@@ -1572,6 +1577,7 @@ export default class MainBackground {
       this.taskSchedulerService,
       this.fido2ActiveRequestManager,
       this.logService,
+      this.autofillAccountsService.autofillUserIds$,
     );
 
     this.systemService = new SystemService(
@@ -1679,7 +1685,7 @@ export default class MainBackground {
     this.commandsBackground = new CommandsBackground(
       this,
       this.platformUtilsService,
-      this.authService,
+      this.autofillAccountsService,
       () => this.generatePasswordToClipboard(),
       this.accountService,
       this.lockService,
@@ -1723,24 +1729,26 @@ export default class MainBackground {
       this.fido2Background,
       this.#intraprocessMessageSender,
       this.messageListener,
-      this.fillCipherPolicy,
+      this.multiAccountFillCipherPolicy,
+      this.autofillAccountsService,
+      (userId) => this.switchAccount(userId),
     );
 
     this.overlayNotificationsBackground = new OverlayNotificationsBackground(
       this.logService,
       this.notificationBackground,
       this.accountService,
-      this.fillCipherPolicy,
+      this.multiAccountFillCipherPolicy,
+      this.autofillAccountsService,
     );
 
     this.autoSubmitLoginBackground = new AutoSubmitLoginBackground(
       this.logService,
       this.autofillLifecycleService,
       this.scriptInjectorService,
-      this.authService,
+      this.autofillAccountsService,
       this.platformUtilsService,
       this.policyService,
-      this.accountService,
     );
 
     this.inlineMenuFieldQualificationService = new InlineMenuFieldQualificationService();
@@ -1753,20 +1761,20 @@ export default class MainBackground {
       async (_tab) => {
         await firstValueFrom(this.generatePasswordToClipboard(), { defaultValue: undefined });
       },
-      async (tab, cipher) => {
+      async (tab, cipher, userId) => {
         if (tab == null) {
           return;
         }
 
         // The user chose this cipher from the context menu, so a fill that placed nothing is
         // mitigated by copying its code. See `autofill.design.md`, "Outcomes".
-        const result = await this.autofillOrchestrator.autofillTabWithCipher(tab, cipher);
+        const result = await this.autofillOrchestrator.autofillTabWithCipher(tab, cipher, userId);
         if (shouldAutoCopyTotp(result)) {
           this.platformUtilsService.copyToClipboard(result.totp);
         }
       },
       (tabId, frameId) => this.autofillOrchestrator.collectAutofillTriage(tabId, frameId),
-      this.authService,
+      this.autofillAccountsService,
       this.totpService,
       this.eventCollectionService,
       this.userVerificationService,
@@ -1774,7 +1782,8 @@ export default class MainBackground {
       this.autofillTriageService,
       new WebmapperDraftService(this.stateProvider),
       this.#intraprocessMessageSender,
-      this.fillCipherPolicy,
+      this.multiAccountFillCipherPolicy,
+      (userId) => this.switchAccount(userId),
     );
 
     this.contextMenusBackground = new ContextMenusBackground(
@@ -1811,22 +1820,22 @@ export default class MainBackground {
       this.accountService,
       this.restrictedItemTypesService,
       this.configService,
+      this.autofillAccountsService,
     );
 
     this.cipherContextMenuHandler = new CipherContextMenuHandler(
       this.mainContextMenuHandler,
-      this.authService,
+      this.autofillAccountsService,
       this.cipherService,
       this.accountService,
-      this.fillCipherPolicy,
+      this.multiAccountFillCipherPolicy,
     );
 
     if (chrome.webRequest != null && chrome.webRequest.onAuthRequired != null) {
       this.webRequestBackground = new WebRequestBackground(
         this.platformUtilsService,
-        this.fillCipherPolicy,
-        this.authService,
-        this.accountService,
+        this.multiAccountFillCipherPolicy,
+        this.autofillAccountsService,
         chrome.webRequest,
         this.autofillSettingsService,
         this.eventCollectionService,
@@ -1994,6 +2003,7 @@ export default class MainBackground {
       setTimeout(async () => {
         await this.fullSync(false);
         this.backgroundSyncService.init();
+        this.syncAccountsUnlockedWhileNotActive();
         this.serverNotificationsService.startListening();
 
         this.taskService.listenForTaskNotifications();
@@ -2120,12 +2130,16 @@ export default class MainBackground {
 
     // TODO: PM-44635 - Use AccountSwitcherService.nextSwitchableAccount$ from
     // @bitwarden/common/auth/account-switcher, which never picks a logged-out account.
-    const newActiveUser =
-      userBeingLoggedOut === activeUserId
-        ? await firstValueFrom(this.accountService.nextUpAccount$.pipe(map((a) => a?.id)))
-        : null;
+    // Logging out an account that is not active (for example when its background sync finds a
+    // changed security stamp) leaves the active account where it is.
+    const loggedOutActiveAccount = userBeingLoggedOut === activeUserId;
+    if (loggedOutActiveAccount) {
+      const newActiveUser = await firstValueFrom(
+        this.accountService.nextUpAccount$.pipe(map((a) => a?.id)),
+      );
 
-    await this.switchAccount(newActiveUser);
+      await this.switchAccount(newActiveUser);
+    }
 
     // HACK: We shouldn't wait for the authentication status to change but instead subscribe to the
     // authentication status to do various actions.
@@ -2171,6 +2185,9 @@ export default class MainBackground {
     this.messagingService.send("doneLoggingOut", {
       logoutReason: logoutReason,
       userId: userBeingLoggedOut,
+      // Lets the popup tell the logout of the account it shows from one of an account in the
+      // background; by now the active account has already moved on.
+      loggedOutActiveAccount,
     });
 
     if (needStorageReseed) {
@@ -2182,7 +2199,13 @@ export default class MainBackground {
       // eslint-disable-next-line @typescript-eslint/no-floating-promises
       BrowserApi.sendMessage("updateBadge");
     }
-    await this.mainContextMenuHandler?.noAccess();
+    if (loggedOutActiveAccount) {
+      await this.mainContextMenuHandler?.noAccess();
+    } else {
+      // The active account is untouched; rebuild the menu without the logged-out account's items
+      // instead of replacing it with the "unlock" entry.
+      await this.refreshMenu();
+    }
     await this.systemService.clearPendingClipboard();
     await this.processReloadService.reloadProcess();
   }
@@ -2282,18 +2305,65 @@ export default class MainBackground {
     }
   }
 
+  /**
+   * Syncs the active account, then every other unlocked account, one after another. Each account
+   * syncs when `override` is set or its last sync is older than the sync interval.
+   */
   private async fullSync(override = false) {
-    const syncInternal = 6 * 60 * 60 * 1000; // 6 hours
-    const lastSync = await this.syncService.getLastSync();
-
-    let lastSyncAgo = syncInternal + 1;
-    if (lastSync != null) {
-      lastSyncAgo = new Date().getTime() - lastSync.getTime();
-    }
-
-    if (override || lastSyncAgo >= syncInternal) {
+    const activeUserId = (await firstValueFrom(this.accountService.activeAccount$))?.id;
+    if (override || this.isSyncDue(await this.syncService.getLastSync())) {
       await this.syncService.fullSync(override);
     }
+
+    // A locked account cannot decrypt its vault; it syncs on unlock instead.
+    const authStatuses = await firstValueFrom(this.authService.authStatuses$);
+    for (const [userId, status] of Object.entries(authStatuses) as [
+      UserId,
+      AuthenticationStatus,
+    ][]) {
+      if (userId === activeUserId || status !== AuthenticationStatus.Unlocked) {
+        continue;
+      }
+      if (override || this.isSyncDue(await firstValueFrom(this.syncService.lastSync$(userId)))) {
+        await this.syncService.fullSync(override, { userId });
+      }
+    }
+  }
+
+  private isSyncDue(lastSync: Date | null): boolean {
+    const syncInterval = 6 * 60 * 60 * 1000; // 6 hours
+    return lastSync == null || new Date().getTime() - lastSync.getTime() >= syncInterval;
+  }
+
+  /**
+   * Syncs an account that becomes unlocked while another account is active. Unlocking syncs only
+   * the active account. Accounts that were just added are left to the login flow, which syncs them.
+   */
+  private syncAccountsUnlockedWhileNotActive() {
+    this.authService.authStatuses$
+      .pipe(
+        pairwise(),
+        map(([previous, current]) =>
+          (Object.keys(current) as UserId[]).filter(
+            (userId) =>
+              previous[userId] != null &&
+              previous[userId] !== AuthenticationStatus.Unlocked &&
+              current[userId] === AuthenticationStatus.Unlocked,
+          ),
+        ),
+        filter((userIds) => userIds.length > 0),
+        concatMap(async (userIds) => {
+          const activeUserId = (await firstValueFrom(this.accountService.activeAccount$))?.id;
+          for (const userId of userIds.filter((id) => id !== activeUserId)) {
+            try {
+              await this.syncService.fullSync(false, { userId });
+            } catch (e) {
+              this.logService.error("Failed to sync an account unlocked while not active", e);
+            }
+          }
+        }),
+      )
+      .subscribe();
   }
 
   /**
@@ -2401,15 +2471,18 @@ export default class MainBackground {
       this.configService,
       this.#intraprocessMessageSender,
       this.messageListener,
-      this.fillCipherPolicy,
+      this.multiAccountFillCipherPolicy,
+      this.autofillAccountsService,
+      this.billingAccountProfileStateService,
     );
 
     this.autofillBadgeUpdaterService = new AutofillBadgeUpdaterService(
       this.badgeService,
       this.accountService,
-      this.fillCipherPolicy,
+      this.multiAccountFillCipherPolicy,
       this.badgeSettingsService,
       this.logService,
+      this.autofillAccountsService,
     );
 
     this.clipboardNotificationBadgeUpdaterService = new ClipboardNotificationBadgeUpdaterService(

@@ -150,6 +150,7 @@ export const mockI18n = {
   never: "Never",
   noItemsToShow: "No items to show",
   myVault: "My vault",
+  notificationAccount: "Account",
   notificationAddDesc: "Should Bitwarden remember this password for you?",
   notificationAddSave: "Save",
   notificationChangeDesc: "Do you want to update this password in Bitwarden?",

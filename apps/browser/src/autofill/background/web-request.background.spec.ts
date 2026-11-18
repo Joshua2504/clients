@@ -1,9 +1,10 @@
 import { mock } from "jest-mock-extended";
-import { BehaviorSubject, defer, NEVER, of, Subject } from "rxjs";
+import { BehaviorSubject, defer, map, NEVER, Observable, of, Subject, switchMap } from "rxjs";
 
 import { Account, AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
 import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { AutofillSettingsServiceAbstraction } from "@bitwarden/common/autofill/services/autofill-settings.service";
 import { EventCollectionService, EventType } from "@bitwarden/common/dirt/event-logs";
 import {
@@ -23,6 +24,7 @@ import { LoginView } from "@bitwarden/common/vault/models/view/login.view";
 
 import { CipherUse } from "../services/abstractions/fill-cipher-policy";
 import { DefaultFillCipherPolicy } from "../services/default-fill-cipher-policy";
+import { DefaultMultiAccountFillCipherPolicy } from "../services/default-multi-account-fill-cipher-policy";
 import { flushPromises } from "../spec/testing-utils";
 
 import WebRequestBackground, {
@@ -56,6 +58,9 @@ describe("WebRequestBackground", () => {
   let fillCipherPolicy: DefaultFillCipherPolicy;
   let authService: ReturnType<typeof mock<AuthService>>;
   let accountService: ReturnType<typeof mock<AccountService>>;
+  let autofillAccountsService: ReturnType<typeof mock<AutofillAccountsService>>;
+  // Unlocked accounts, other than the active one, that have opted in to serve autofill.
+  let otherAutofillUserIds$: BehaviorSubject<UserId[]>;
   let autofillSettingsService: ReturnType<typeof mock<AutofillSettingsServiceAbstraction>>;
   let eventCollectionService: ReturnType<typeof mock<EventCollectionService>>;
   let logService: ReturnType<typeof mock<LogService>>;
@@ -72,9 +77,12 @@ describe("WebRequestBackground", () => {
   const createWebRequestBackground = () =>
     new WebRequestBackground(
       platformUtilsService,
-      fillCipherPolicy,
-      authService,
-      accountService,
+      new DefaultMultiAccountFillCipherPolicy(
+        fillCipherPolicy,
+        autofillAccountsService,
+        autofillSettingsService,
+      ),
+      autofillAccountsService,
       webRequest as unknown as typeof chrome.webRequest,
       autofillSettingsService,
       eventCollectionService,
@@ -107,6 +115,29 @@ describe("WebRequestBackground", () => {
     accountService = mock<AccountService>();
     accountService.activeAccount$ = activeAccount$;
 
+    // The accounts autofill serves: the active account while it is unlocked, then the others.
+    // With none opted in, they follow the active account alone.
+    otherAutofillUserIds$ = new BehaviorSubject<UserId[]>([]);
+    const autofillUserIds$: Observable<UserId[]> = defer(() => accountService.activeAccount$).pipe(
+      switchMap((active) =>
+        active == null
+          ? of(false)
+          : authService
+              .authStatusFor$(active.id)
+              .pipe(map((status) => status === AuthenticationStatus.Unlocked)),
+      ),
+      switchMap((activeServes) =>
+        otherAutofillUserIds$.pipe(
+          map((others) => (activeServes ? [activeAccount$.value!.id, ...others] : others)),
+        ),
+      ),
+    );
+    autofillAccountsService = mock<AutofillAccountsService>();
+    (autofillAccountsService as any).autofillUserIds$ = autofillUserIds$;
+    autofillAccountsService.isAutofillUser$.mockImplementation((id) =>
+      autofillUserIds$.pipe(map((userIds) => userIds.includes(id))),
+    );
+
     // By default only the login-level setting applies: the global setting is off and the
     // login-level controls are shown.
     mockDevFlagEnabled.mockImplementation(
@@ -117,6 +148,10 @@ describe("WebRequestBackground", () => {
     autofillSettingsService = mock<AutofillSettingsServiceAbstraction>();
     autofillSettingsService.httpAuthenticationAvailable$ = httpAuthenticationAvailable$;
     autofillSettingsService.resolvedEnableBasicAuthResponse$ = globalSetting$;
+    // The per-account reader follows whatever a test assigns to the active-account one.
+    autofillSettingsService.resolvedEnableBasicAuthResponseFor$.mockImplementation(() =>
+      defer(() => autofillSettingsService.resolvedEnableBasicAuthResponse$),
+    );
 
     eventCollectionService = mock<EventCollectionService>();
     eventCollectionService.collect.mockResolvedValue(undefined);
@@ -448,6 +483,9 @@ describe("WebRequestBackground", () => {
       expect(eventCollectionService.collect).toHaveBeenCalledWith(
         EventType.Cipher_ClientHttpAuthReleased,
         "released-cipher-id",
+        false,
+        undefined,
+        userId,
       );
       expect(callback).toHaveBeenCalledWith({
         authCredentials: { username: "jane.doe@example.com", password: "fake-password" },
@@ -494,6 +532,113 @@ describe("WebRequestBackground", () => {
 
       expect(callback).toHaveBeenCalledWith({});
       expect(eventCollectionService.collect).not.toHaveBeenCalled();
+    });
+
+    describe("with two accounts serving autofill", () => {
+      const otherUserId = "other-user-id" as UserId;
+      let vaults: Map<UserId, CipherView[]>;
+
+      beforeEach(() => {
+        vaults = new Map<UserId, CipherView[]>([
+          [userId, []],
+          [otherUserId, []],
+        ]);
+        cipherService.getAllDecryptedForUrl.mockImplementation(
+          async (_url, owner) => vaults.get(owner) ?? [],
+        );
+        otherAutofillUserIds$.next([otherUserId]);
+      });
+
+      it("answers with the single candidate of the account that is not active, for that account", async () => {
+        vaults.set(otherUserId, [createCipher("jane.doe@example.com", "fake-password", "work")]);
+
+        await triggerAuthRequired();
+
+        expect(eventCollectionService.collect).toHaveBeenCalledWith(
+          EventType.Cipher_ClientHttpAuthReleased,
+          "work",
+          false,
+          undefined,
+          otherUserId,
+        );
+        expect(callback).toHaveBeenCalledWith({
+          authCredentials: { username: "jane.doe@example.com", password: "fake-password" },
+        });
+      });
+
+      it("does not answer when both accounts hold a candidate for the URL", async () => {
+        vaults.set(userId, [createCipher("jane.doe@example.com", "fake-password", "personal")]);
+        vaults.set(otherUserId, [createCipher("john.doe@example.com", "other-password", "work")]);
+
+        await triggerAuthRequired();
+
+        expect(callback).toHaveBeenCalledWith({});
+        expect(eventCollectionService.collect).not.toHaveBeenCalled();
+      });
+
+      it("does not answer when both accounts hold the same shared item", async () => {
+        vaults.set(userId, [createCipher("jane.doe@example.com", "fake-password", "shared")]);
+        vaults.set(otherUserId, [createCipher("jane.doe@example.com", "fake-password", "shared")]);
+
+        await triggerAuthRequired();
+
+        expect(callback).toHaveBeenCalledWith({});
+        expect(eventCollectionService.collect).not.toHaveBeenCalled();
+      });
+
+      it("judges each login by the setting of its own account", async () => {
+        // Neither login has opted in itself; only the other account has the global setting on.
+        const options = { httpAuthenticationEnabled: false };
+        vaults.set(userId, [
+          createCipher("jane.doe@example.com", "fake-password", "personal", null, options),
+        ]);
+        vaults.set(otherUserId, [
+          createCipher("john.doe@example.com", "other-password", "work", null, options),
+        ]);
+        autofillSettingsService.resolvedEnableBasicAuthResponseFor$.mockImplementation((owner) =>
+          of(owner === otherUserId),
+        );
+
+        await triggerAuthRequired();
+
+        expect(callback).toHaveBeenCalledWith({
+          authCredentials: { username: "john.doe@example.com", password: "other-password" },
+        });
+      });
+
+      it("answers from the remaining account once the other has locked", async () => {
+        vaults.set(userId, [createCipher("jane.doe@example.com", "fake-password", "personal")]);
+        vaults.set(otherUserId, [createCipher("john.doe@example.com", "other-password", "work")]);
+        otherAutofillUserIds$.next([]);
+
+        await triggerAuthRequired();
+
+        expect(cipherService.getAllDecryptedForUrl).not.toHaveBeenCalledWith(
+          expect.anything(),
+          otherUserId,
+          undefined,
+          expect.anything(),
+        );
+        expect(callback).toHaveBeenCalledWith({
+          authCredentials: { username: "jane.doe@example.com", password: "fake-password" },
+        });
+      });
+
+      it("does not answer when the candidate's account locks before its credential is released", async () => {
+        vaults.set(otherUserId, [createCipher("john.doe@example.com", "other-password", "work")]);
+        cipherService.getAllDecryptedForUrl.mockImplementation(async (_url, owner) => {
+          const ciphers = vaults.get(owner) ?? [];
+          if (owner === otherUserId) {
+            otherAutofillUserIds$.next([]);
+          }
+          return ciphers;
+        });
+
+        await triggerAuthRequired();
+
+        expect(callback).toHaveBeenCalledWith({});
+        expect(eventCollectionService.collect).not.toHaveBeenCalled();
+      });
     });
 
     it("does not respond with credentials when the matching login has no password", async () => {

@@ -1,9 +1,7 @@
 import { mock, MockProxy } from "jest-mock-extended";
-import { of } from "rxjs";
+import { BehaviorSubject, firstValueFrom, of } from "rxjs";
 
-import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
 import { UserVerificationService } from "@bitwarden/common/auth/abstractions/user-verification/user-verification.service.abstraction";
-import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
 import {
   AUTOFILL_ID,
   AUTOFILL_TRIAGE_ID,
@@ -14,6 +12,7 @@ import {
   GENERATE_PASSWORD_ID,
   NOOP_COMMAND_SUFFIX,
 } from "@bitwarden/common/autofill/constants";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { EventCollectionService } from "@bitwarden/common/dirt/event-logs";
 import { IntraprocessMessageSender } from "@bitwarden/common/platform/messaging";
 import { FakeAccountService, mockAccountServiceWith } from "@bitwarden/common/spec";
@@ -28,7 +27,8 @@ import { BrowserApi } from "../../platform/browser/browser-api";
 import BrowserPopupUtils from "../../platform/browser/browser-popup-utils";
 import AutofillPageDetails from "../models/autofill-page-details";
 import { AutofillTriageService } from "../services/abstractions/autofill-triage.service";
-import { CipherUse, FillCipherPolicy } from "../services/abstractions/fill-cipher-policy";
+import { CipherUse } from "../services/abstractions/fill-cipher-policy";
+import { MultiAccountFillCipherPolicy } from "../services/abstractions/multi-account-fill-cipher-policy";
 import { WebmapperDraftService } from "../services/webmapper-draft.service";
 import { AutofillTriageFieldResult } from "../types/autofill-triage";
 import { emptyDraft, WebmapperDraft } from "../webmapper/draft";
@@ -60,11 +60,26 @@ describe("ContextMenuClickedHandler", () => {
     };
   };
 
-  /** Serves `ciphers` to lookups by id, as the vault would. */
-  const serveCiphers = (policy: MockProxy<FillCipherPolicy>, ciphers: CipherView[]) =>
-    policy.ciphersForIds.mockImplementation(async (_userId, ids) =>
-      ciphers.filter((cipher) => ids.includes(cipher.id)),
+  const mockUserId = "UserId" as UserId;
+  const otherUserId = "OtherUserId" as UserId;
+
+  /** Serves `ciphers` to lookups by reference, as the vault of `owner` would. */
+  const serveCiphers = (
+    policy: MockProxy<MultiAccountFillCipherPolicy>,
+    ciphers: CipherView[],
+    owner: UserId = mockUserId,
+  ) =>
+    policy.ciphersForRefs.mockImplementation(async (refs) =>
+      refs.flatMap((ref) =>
+        ciphers
+          .filter((cipher) => ref.userId === owner && ref.cipherId === cipher.id)
+          .map((cipher) => ({ userId: owner, cipher })),
+      ),
     );
+
+  /** The menu item id of cipher `cipherId` of `owner` beneath `parentId`. */
+  const cipherItem = (parentId: string, cipherId = "1", owner: UserId = mockUserId) =>
+    `${parentId}_${owner}:${cipherId}`;
 
   const createCipher = (data?: {
     id?: CipherView["id"];
@@ -86,14 +101,14 @@ describe("ContextMenuClickedHandler", () => {
     return cipherView;
   };
 
-  const mockUserId = "UserId" as UserId;
-
   let copyToClipboard: CopyToClipboardAction;
   let generatePasswordToClipboard: GeneratePasswordToClipboardAction;
   let autofill: AutofillAction;
+  let switchAccount: jest.Mock<Promise<void>, [UserId]>;
   let collectAutofillTriage: jest.Mock<ReturnType<CollectAutofillTriageAction>, [number, number?]>;
-  let authService: MockProxy<AuthService>;
-  let fillCipherPolicy: MockProxy<FillCipherPolicy>;
+  // The accounts autofill serves: the unlocked active account, nobody opted in.
+  let autofillUserIds$: BehaviorSubject<UserId[]>;
+  let fillCipherPolicy: MockProxy<MultiAccountFillCipherPolicy>;
   let accountService: FakeAccountService;
   let totpService: MockProxy<TotpService>;
   let eventCollectionService: MockProxy<EventCollectionService>;
@@ -107,9 +122,10 @@ describe("ContextMenuClickedHandler", () => {
   beforeEach(() => {
     copyToClipboard = jest.fn<void, [CopyToClipboardOptions]>();
     generatePasswordToClipboard = jest.fn<Promise<void>, [tab: chrome.tabs.Tab]>();
-    autofill = jest.fn<Promise<void>, [tab: chrome.tabs.Tab, cipher: CipherView]>();
+    autofill = jest.fn<Promise<void>, [tab: chrome.tabs.Tab, cipher: CipherView, userId: UserId]>();
     collectAutofillTriage = jest.fn<ReturnType<CollectAutofillTriageAction>, [number, number?]>();
-    authService = mock();
+    switchAccount = jest.fn<Promise<void>, [UserId]>();
+    autofillUserIds$ = new BehaviorSubject<UserId[]>([mockUserId]);
     fillCipherPolicy = mock();
     accountService = mockAccountServiceWith(mockUserId as UserId);
     totpService = mock();
@@ -124,7 +140,7 @@ describe("ContextMenuClickedHandler", () => {
       generatePasswordToClipboard,
       autofill,
       collectAutofillTriage,
-      authService,
+      { autofillUserIds$ } as unknown as AutofillAccountsService,
       totpService,
       eventCollectionService,
       userVerificationService,
@@ -133,6 +149,7 @@ describe("ContextMenuClickedHandler", () => {
       webmapperDrafts,
       intraprocessMessageSender,
       fillCipherPolicy,
+      switchAccount,
     );
   });
 
@@ -140,7 +157,6 @@ describe("ContextMenuClickedHandler", () => {
 
   describe("run", () => {
     beforeEach(() => {
-      authService.getAuthStatus.mockResolvedValue(AuthenticationStatus.Unlocked);
       userVerificationService.hasMasterPassword.mockResolvedValue(false);
     });
 
@@ -187,7 +203,9 @@ describe("ContextMenuClickedHandler", () => {
       ])("breaks silently when cipher is missing for $label", async ({ parentId, extra }) => {
         serveCiphers(fillCipherPolicy, []);
 
-        await expect(runWithUrl(createData(`${parentId}_1`, parentId))).resolves.toBeUndefined();
+        await expect(
+          runWithUrl(createData(cipherItem(parentId), parentId)),
+        ).resolves.toBeUndefined();
 
         expect(copyToClipboard).not.toHaveBeenCalled();
         extra();
@@ -217,7 +235,9 @@ describe("ContextMenuClickedHandler", () => {
         unset(cipher);
         serveCiphers(fillCipherPolicy, [cipher]);
 
-        await expect(runWithUrl(createData(`${parentId}_1`, parentId))).resolves.toBeUndefined();
+        await expect(
+          runWithUrl(createData(cipherItem(parentId), parentId)),
+        ).resolves.toBeUndefined();
 
         expect(copyToClipboard).not.toHaveBeenCalled();
         if (isTotp) {
@@ -240,21 +260,20 @@ describe("ContextMenuClickedHandler", () => {
       const cipher = createCipher();
       serveCiphers(fillCipherPolicy, [cipher]);
 
-      await sut.run(createData(`${AUTOFILL_ID}_1`, AUTOFILL_ID), { id: 5 } as any);
+      await sut.run(createData(cipherItem(AUTOFILL_ID), AUTOFILL_ID), { id: 5 } as any);
 
       expect(autofill).toHaveBeenCalledTimes(1);
 
-      expect(autofill).toHaveBeenCalledWith({ id: 5 }, cipher);
+      expect(autofill).toHaveBeenCalledWith({ id: 5 }, cipher, mockUserId);
     });
 
     it("looks up the cipher the user picked by id as a user fill", async () => {
       serveCiphers(fillCipherPolicy, [createCipher()]);
 
-      await sut.run(createData(`${AUTOFILL_ID}_1`, AUTOFILL_ID), { id: 5 } as any);
+      await sut.run(createData(cipherItem(AUTOFILL_ID), AUTOFILL_ID), { id: 5 } as any);
 
-      expect(fillCipherPolicy.ciphersForIds).toHaveBeenCalledWith(
-        mockUserId,
-        ["1"],
+      expect(fillCipherPolicy.ciphersForRefs).toHaveBeenCalledWith(
+        [{ userId: mockUserId, cipherId: "1" }],
         CipherUse.UserFill,
       );
     });
@@ -262,7 +281,7 @@ describe("ContextMenuClickedHandler", () => {
     it("copies username to clipboard", async () => {
       serveCiphers(fillCipherPolicy, [createCipher({ username: "TEST_USERNAME" })]);
 
-      await sut.run(createData(`${COPY_USERNAME_ID}_1`, COPY_USERNAME_ID), {
+      await sut.run(createData(cipherItem(COPY_USERNAME_ID), COPY_USERNAME_ID), {
         url: "https://test.com",
       } as any);
 
@@ -277,7 +296,7 @@ describe("ContextMenuClickedHandler", () => {
     it("copies password to clipboard", async () => {
       serveCiphers(fillCipherPolicy, [createCipher({ password: "TEST_PASSWORD" })]);
 
-      await sut.run(createData(`${COPY_PASSWORD_ID}_1`, COPY_PASSWORD_ID), {
+      await sut.run(createData(cipherItem(COPY_PASSWORD_ID), COPY_PASSWORD_ID), {
         url: "https://test.com",
       } as any);
 
@@ -306,7 +325,7 @@ describe("ContextMenuClickedHandler", () => {
         });
       });
 
-      await sut.run(createData(`${COPY_VERIFICATION_CODE_ID}_1`, COPY_VERIFICATION_CODE_ID), {
+      await sut.run(createData(cipherItem(COPY_VERIFICATION_CODE_ID), COPY_VERIFICATION_CODE_ID), {
         url: "https://test.com",
       } as any);
 
@@ -321,9 +340,12 @@ describe("ContextMenuClickedHandler", () => {
     it("attempts to find a cipher when noop but unlocked", async () => {
       fillCipherPolicy.ciphersForUrl.mockResolvedValue([
         {
-          ...createCipher({ username: "NOOP_USERNAME" }),
-          reprompt: CipherRepromptType.None,
-        } as any,
+          userId: mockUserId,
+          cipher: {
+            ...createCipher({ username: "NOOP_USERNAME" }),
+            reprompt: CipherRepromptType.None,
+          } as any,
+        },
       ]);
 
       await sut.run(createData(`${COPY_USERNAME_ID}_${NOOP_COMMAND_SUFFIX}`, COPY_USERNAME_ID), {
@@ -334,7 +356,6 @@ describe("ContextMenuClickedHandler", () => {
 
       expect(fillCipherPolicy.ciphersForUrl).toHaveBeenCalledWith(
         "https://test.com",
-        mockUserId,
         CipherUse.UserFill,
         { includeOtherTypes: [] },
       );
@@ -350,9 +371,12 @@ describe("ContextMenuClickedHandler", () => {
     it("attempts to find a cipher when noop but unlocked", async () => {
       fillCipherPolicy.ciphersForUrl.mockResolvedValue([
         {
-          ...createCipher({ username: "NOOP_USERNAME" }),
-          reprompt: CipherRepromptType.Password,
-        } as any,
+          userId: mockUserId,
+          cipher: {
+            ...createCipher({ username: "NOOP_USERNAME" }),
+            reprompt: CipherRepromptType.Password,
+          } as any,
+        },
       ]);
 
       await sut.run(createData(`${COPY_USERNAME_ID}_${NOOP_COMMAND_SUFFIX}`, COPY_USERNAME_ID), {
@@ -363,10 +387,150 @@ describe("ContextMenuClickedHandler", () => {
 
       expect(fillCipherPolicy.ciphersForUrl).toHaveBeenCalledWith(
         "https://test.com",
-        mockUserId,
         CipherUse.UserFill,
         { includeOtherTypes: [] },
       );
+    });
+
+    describe("with two accounts serving autofill", () => {
+      const tab = { id: 5, url: "https://test.com" } as any;
+
+      beforeEach(() => {
+        autofillUserIds$.next([mockUserId, otherUserId]);
+        jest.spyOn(BrowserPopupUtils, "openPopout").mockResolvedValue(undefined);
+        jest.spyOn(BrowserApi, "tabSendMessageData").mockResolvedValue(undefined);
+      });
+
+      it("fills the cipher of the account its menu item names, for that account", async () => {
+        const cipher = createCipher();
+        serveCiphers(fillCipherPolicy, [cipher], otherUserId);
+        const setAccountActivity = jest.spyOn(accountService, "setAccountActivity");
+
+        await sut.run(createData(cipherItem(AUTOFILL_ID, "1", otherUserId), AUTOFILL_ID), tab);
+
+        expect(autofill).toHaveBeenCalledWith(tab, cipher, otherUserId);
+        expect(setAccountActivity).toHaveBeenCalledTimes(1);
+        expect(setAccountActivity).toHaveBeenCalledWith(otherUserId, expect.any(Date));
+      });
+
+      it("fills the same shared item from the vault of the account that was picked", async () => {
+        // The item has one id in both vaults; the policy answers per reference.
+        const activeCopy = createCipher({ id: "shared", username: "active" });
+        const otherCopy = createCipher({ id: "shared", username: "other" });
+        fillCipherPolicy.ciphersForRefs.mockImplementation(async ([ref]) => [
+          { userId: ref.userId, cipher: ref.userId === otherUserId ? otherCopy : activeCopy },
+        ]);
+
+        await sut.run(createData(cipherItem(AUTOFILL_ID, "shared", otherUserId), AUTOFILL_ID), tab);
+
+        expect(autofill).toHaveBeenCalledTimes(1);
+        expect(autofill).toHaveBeenCalledWith(tab, otherCopy, otherUserId);
+      });
+
+      it("does nothing for an item of an account that has locked since the menu was built", async () => {
+        // `ciphersForRefs` leaves out a cipher whose account no longer serves autofill.
+        fillCipherPolicy.ciphersForRefs.mockResolvedValue([]);
+
+        await sut.run(createData(cipherItem(AUTOFILL_ID, "1", otherUserId), AUTOFILL_ID), tab);
+
+        expect(autofill).not.toHaveBeenCalled();
+        expect(copyToClipboard).not.toHaveBeenCalled();
+      });
+
+      it("ignores an item id that names no account", async () => {
+        await sut.run(createData(`${AUTOFILL_ID}_1`, AUTOFILL_ID), tab);
+
+        expect(fillCipherPolicy.ciphersForRefs).not.toHaveBeenCalled();
+        expect(autofill).not.toHaveBeenCalled();
+      });
+
+      it("records a copied password for the account that owns the cipher", async () => {
+        serveCiphers(fillCipherPolicy, [createCipher({ password: "PW" })], otherUserId);
+
+        await sut.run(
+          createData(cipherItem(COPY_PASSWORD_ID, "1", otherUserId), COPY_PASSWORD_ID),
+          tab,
+        );
+
+        expect(copyToClipboard).toHaveBeenCalledWith({ text: "PW", tab });
+        expect(eventCollectionService.collect).toHaveBeenCalledWith(
+          expect.anything(),
+          "1",
+          false,
+          undefined,
+          otherUserId,
+        );
+      });
+
+      describe("a reprompt-protected cipher of an account that is not active", () => {
+        let cipher: CipherView;
+
+        beforeEach(async () => {
+          cipher = createCipher();
+          cipher.reprompt = CipherRepromptType.Password;
+          serveCiphers(fillCipherPolicy, [cipher], otherUserId);
+          userVerificationService.hasMasterPassword.mockResolvedValue(true);
+          autofillUserIds$.next([mockUserId as UserId, otherUserId]);
+          await accountService.addAccount(otherUserId, {
+            email: "other@example.com",
+            emailVerified: true,
+            name: "Other",
+          } as any);
+          await accountService.switchAccount(mockUserId as UserId);
+        });
+
+        it("makes its account the active one before the reprompt popout opens", async () => {
+          const activeAtPopout: (UserId | undefined)[] = [];
+          switchAccount.mockImplementation((userId) => accountService.switchAccount(userId));
+          jest.spyOn(BrowserPopupUtils, "openPopout").mockImplementation(async () => {
+            activeAtPopout.push((await firstValueFrom(accountService.activeAccount$))?.id);
+            return undefined as unknown as chrome.windows.Window;
+          });
+
+          await sut.run(createData(cipherItem(AUTOFILL_ID, "1", otherUserId), AUTOFILL_ID), tab);
+
+          expect(userVerificationService.hasMasterPassword).toHaveBeenCalledWith(otherUserId);
+          expect(switchAccount).toHaveBeenCalledWith(otherUserId);
+          expect(activeAtPopout).toEqual([otherUserId]);
+          // The fill follows the reprompt, from the popout.
+          expect(autofill).not.toHaveBeenCalled();
+        });
+
+        it("refuses without a popout when the switch does not take effect", async () => {
+          switchAccount.mockResolvedValue(undefined);
+
+          await sut.run(createData(cipherItem(AUTOFILL_ID, "1", otherUserId), AUTOFILL_ID), tab);
+
+          expect(switchAccount).toHaveBeenCalledWith(otherUserId);
+          expect(autofill).not.toHaveBeenCalled();
+          expect(BrowserPopupUtils.openPopout).not.toHaveBeenCalled();
+        });
+
+        it("refuses without switching when its account no longer serves autofill", async () => {
+          autofillUserIds$.next([mockUserId as UserId]);
+
+          await sut.run(
+            createData(cipherItem(COPY_PASSWORD_ID, "1", otherUserId), COPY_PASSWORD_ID),
+            tab,
+          );
+
+          expect(switchAccount).not.toHaveBeenCalled();
+          expect(copyToClipboard).not.toHaveBeenCalled();
+          expect(BrowserPopupUtils.openPopout).not.toHaveBeenCalled();
+        });
+      });
+
+      it("opens the reprompt popout for a protected cipher of the active account", async () => {
+        const cipher = createCipher();
+        cipher.reprompt = CipherRepromptType.Password;
+        serveCiphers(fillCipherPolicy, [cipher]);
+        userVerificationService.hasMasterPassword.mockResolvedValue(true);
+
+        await sut.run(createData(cipherItem(AUTOFILL_ID), AUTOFILL_ID), tab);
+
+        expect(autofill).not.toHaveBeenCalled();
+        expect(BrowserPopupUtils.openPopout).toHaveBeenCalled();
+      });
     });
 
     describe("autofill triage", () => {

@@ -28,6 +28,8 @@ export type InlineMenuCipherItemProps = {
   handleViewCipher: (e: Event) => void;
   bordered?: boolean;
   usernameText?: string;
+  /** Precedes the cipher's account in the accessible name of its fill button. */
+  accountText?: string;
   cardNumberEndsWithText?: string;
   fillVerificationCodeText?: string;
   totpCodeAria?: string;
@@ -48,6 +50,7 @@ export function InlineMenuCipherItem({
   handleViewCipher,
   bordered = true,
   usernameText,
+  accountText,
   cardNumberEndsWithText,
   fillVerificationCodeText,
   totpCodeAria,
@@ -59,7 +62,10 @@ export function InlineMenuCipherItem({
   const isTotp = !!(cipher.login?.totpField && cipher.login?.totp);
   const period = cipher.login?.totpCodeTimeInterval ?? 30;
   const fillPrefix = cipher.login?.passkey ? logInWithPasskeyAriaLabel : fillCredentialsForText;
-  const fillLabel = `${fillPrefix} ${cipher.name}`;
+  const accountSuffix = cipher.accountLabel
+    ? `, ${accountText ? `${accountText.toLowerCase()}: ` : ""}${cipher.accountLabel}`
+    : "";
+  const fillLabel = `${fillPrefix} ${cipher.name}${accountSuffix}`;
   const fillDescription = getFillAriaDescription(cipher, usernameText, cardNumberEndsWithText);
   const viewButtonAria = `${viewButtonText} ${cipher.name}, ${opensInANewWindowText}`;
   const uri = (cipher.icon.imageEnabled && cipher.icon.image) || undefined;
@@ -117,6 +123,7 @@ export function InlineMenuCipherItem({
                   totp: cipher.login!.totp!,
                   totpCodeAria,
                   username: showTotpUsername ? cipher.login?.username : undefined,
+                  accountLabel: cipher.accountLabel,
                   masked: !!cipher.reprompt,
                 })
               : CipherDetails({ theme, cipher })
@@ -131,6 +138,7 @@ export function InlineMenuCipherItem({
           class=${viewCipherButtonStyles(theme)}
           @click=${onViewCipher}
           @keyup=${onViewKeyUp}
+          ?hidden=${cipher.canView === false}
         >
           ${ExternalLink({ theme, color: themes[theme].primary["600"] })}
         </button>
@@ -229,8 +237,15 @@ function getAdjacentCipherItem(
 }
 
 function focusViewCipherButton(currentListItem: HTMLElement, currentButtonElement: HTMLElement) {
+  // The vault item view shows the active account only, so a cipher of another account has its
+  // view button hidden.
+  const viewCipherButton = currentButtonElement.nextElementSibling as HTMLElement | null;
+  if (!viewCipherButton || viewCipherButton.hidden) {
+    return;
+  }
+
   currentListItem.querySelector(CIPHER_CONTENT_SELECTOR)?.classList.add("remove-outline");
-  (currentButtonElement.nextElementSibling as HTMLElement | null)?.focus();
+  viewCipherButton.focus();
 }
 
 function getFillAriaDescription(
@@ -319,6 +334,10 @@ const viewCipherButtonStyles = (theme: Theme) => css`
   background: transparent;
   cursor: pointer;
   line-height: 0;
+
+  &[hidden] {
+    display: none;
+  }
 
   :focus {
     outline: 2px solid ${themes[theme].primary["600"]};

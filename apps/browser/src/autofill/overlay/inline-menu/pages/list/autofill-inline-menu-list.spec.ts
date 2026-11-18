@@ -861,6 +861,43 @@ describe("AutofillInlineMenuList", () => {
         postWindowMessage(createInitAutofillInlineMenuListMessageMock());
       });
 
+      describe("when more than one account serves autofill", () => {
+        const accountLabel = "other@example.com";
+
+        beforeEach(() => {
+          postWindowMessage(
+            createInitAutofillInlineMenuListMessageMock({
+              ciphers: [
+                createAutofillOverlayCipherDataMock(1, { accountLabel }),
+                createAutofillOverlayCipherDataMock(2, { accountLabel, canView: false }),
+              ],
+            }),
+          );
+        });
+
+        it("shows the account of each cipher and names it in the fill button", () => {
+          const fillCipherButton =
+            autofillInlineMenuList["inlineMenuListContainer"].querySelector(".fill-cipher-button");
+
+          expect(fillCipherButton.querySelector(".cipher-account").textContent).toBe(accountLabel);
+          expect(fillCipherButton.getAttribute("aria-label")).toContain(accountLabel);
+        });
+
+        it("offers no view button for a cipher of an account other than the active one", () => {
+          const cipherContainers =
+            autofillInlineMenuList["inlineMenuListContainer"].querySelectorAll(".cipher-container");
+
+          expect(cipherContainers[0].querySelector(".view-cipher-button")).not.toBeNull();
+          expect(cipherContainers[1].querySelector(".view-cipher-button")).toBeNull();
+        });
+      });
+
+      it("shows no account when the cipher carries no account label", () => {
+        expect(
+          autofillInlineMenuList["inlineMenuListContainer"].querySelector(".cipher-account"),
+        ).toBeNull();
+      });
+
       it("creates the view for a list of login ciphers", () => {
         expect(autofillInlineMenuList["inlineMenuListContainer"]).toMatchSnapshot();
       });

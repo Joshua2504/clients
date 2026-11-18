@@ -37,12 +37,18 @@ opportunity, autofill applies its policy before it commits a fill:
   re-evaluated when the setting changes — it keeps reporting transitions until the extension logs out or
   context loss ends it — so this fill-time check, not the injection-time gate, is what enforces the setting when a
   user toggles it off mid-session.
-- **The transition's account must be the active account, and that account must be unlocked.** Each
-  transition is attributed to the account that is active when the background receives it. An
-  opportunity from one account never fills for another, even when it resolves after a switch. A
-  page-load fill raises no unlock prompt: an opportunity that resolves while the active account is
-  locked is refused. A lock or switch after the opportunity resolves
-  [retires](./lifecycle.design.md#retiring-an-opportunity) it.
+- **An account must be there to serve the opportunity, with the setting above enabled for it.** A
+  page-load fill is served by the [autofill accounts](./multi-account.design.md#autofill-accounts):
+  the active account when it is unlocked, and every other unlocked account that has opted in.
+  Each transition is attributed to the autofill accounts at the time the background receives it,
+  and its cipher is chosen among the logins of those that have autofill on page load enabled: a
+  cipher is governed by the setting of its own account. A page-load fill raises no unlock prompt:
+  an opportunity that resolves while there is no autofill account is refused. A lock of the
+  cipher's account after the opportunity resolves
+  [retires](./lifecycle.design.md#retiring-an-opportunity) it, and so does a switch that ends
+  that account's service; the commit denies the fill. With no account opted in, the autofill
+  accounts are the unlocked active account alone, and an opportunity from one account never fills
+  for another, even when it resolves after a switch.
 - **A cipher must match the frame's page.** Autofill reads the frame to learn its fields and selects
   the cipher saved for its URL; with no match there is nothing to fill and the opportunity is
   discarded.
@@ -72,7 +78,9 @@ more tightly than any other fill to match.
 
 Two constraints carry that weight. First, automated login runs only where policy permits: the
 approved host set is administrator-configured and approval is re-checked at every
-step rather than once at the start. A redirect can carry a frame off an approved host mid-login, so
+step rather than once at the start. Approval belongs to the account whose organization configured
+it: a workflow that an account's approved host started submits only that account's ciphers, however
+many accounts autofill serves. A redirect can carry a frame off an approved host mid-login, so
 the check that governs an action is the one taken at the moment of that action, not at injection.
 Second, a frame is never trusted to declare itself part of an automated login. The frame
 contributes only _timing_. It reports that its current step has rendered and is ready to be acted on.
@@ -122,7 +130,9 @@ fill contract narrow lets autofill's fill invariants live in one place rather th
 re-derived at every entry point.
 
 The service applies **policy** during fill operations. This includes enforcing enterprise policy,
-reading a user's settings, and checking whether licensing entitlements permit an action.
+reading a user's settings, and checking whether licensing entitlements permit an action. All of
+these are read for the account that owns the cipher, which the fill operation is given with it;
+none is read for the active account.
 
 The service also carries broader autofill responsibilities that sit outside the fill operation,
 including injecting the content scripts, driving the reprompt popout, and event and TOTP handling.

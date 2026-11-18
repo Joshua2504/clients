@@ -1,5 +1,5 @@
 import { mock, MockProxy, mockReset } from "jest-mock-extended";
-import { BehaviorSubject, of, Subject } from "rxjs";
+import { BehaviorSubject, NEVER, of, Subject } from "rxjs";
 import { map } from "rxjs/operators";
 
 import { PolicyService } from "@bitwarden/common/admin-console/abstractions/policy/policy.service.abstraction";
@@ -9,12 +9,15 @@ import {
   AutofillOverlayVisibility,
   SHOW_AUTOFILL_BUTTON,
 } from "@bitwarden/common/autofill/constants";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { AutofillSettingsServiceAbstraction as AutofillSettingsService } from "@bitwarden/common/autofill/services/autofill-settings.service";
 import {
   DefaultDomainSettingsService,
   DomainSettingsService,
 } from "@bitwarden/common/autofill/services/domain-settings.service";
 import { InlineMenuVisibilitySetting } from "@bitwarden/common/autofill/types";
+import { AccountCipher } from "@bitwarden/common/autofill/types/account-cipher";
+import { BillingAccountProfileStateService } from "@bitwarden/common/billing/abstractions/account/billing-account-profile-state.service";
 import { NeverDomains } from "@bitwarden/common/models/domain/domain-service";
 import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
 import {
@@ -22,6 +25,7 @@ import {
   EnvironmentService,
   Region,
 } from "@bitwarden/common/platform/abstractions/environment.service";
+import { Fido2ActiveRequestEvents } from "@bitwarden/common/platform/abstractions/fido2/fido2-active-request-manager.abstraction";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
 import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
 import { ThemeType } from "@bitwarden/common/platform/enums";
@@ -63,6 +67,7 @@ import {
 import { AutofillService } from "../services/abstractions/autofill.service";
 import { CipherUse } from "../services/abstractions/fill-cipher-policy";
 import { DefaultFillCipherPolicy } from "../services/default-fill-cipher-policy";
+import { DefaultMultiAccountFillCipherPolicy } from "../services/default-multi-account-fill-cipher-policy";
 import { InlineMenuFieldQualificationService } from "../services/inline-menu-field-qualification.service";
 import {
   createAutofillFieldMock,
@@ -106,15 +111,27 @@ import { OverlayBackground } from "./overlay.background";
 describe("OverlayBackground", () => {
   const generatedPassword = "generated-password";
   const mockUserId = Utils.newGuid() as UserId;
+  const otherUserId = Utils.newGuid() as UserId;
+  const otherUserEmail = "other@example.com";
+  /** Pairs a cipher with the account that owns it, the active account unless stated. */
+  const owned = (cipher: CipherView, userId: UserId = mockUserId): AccountCipher => ({
+    userId,
+    cipher,
+  });
   const sendResponse = jest.fn();
   let accountService: FakeAccountService;
   let fakeStateProvider: FakeStateProvider;
   let showFaviconsMock$: BehaviorSubject<boolean>;
+  // The accounts with premium. Every account has it unless a test narrows the set.
+  let premiumUserIds: Set<UserId> | undefined;
   let neverDomainsMock$: BehaviorSubject<NeverDomains>;
   let domainSettingsService: DomainSettingsService;
   let logService: MockProxy<LogService>;
   let cipherService: MockProxy<CipherService>;
   let fillCipherPolicy: DefaultFillCipherPolicy;
+  let multiAccountFillCipherPolicy: DefaultMultiAccountFillCipherPolicy;
+  /** The accounts that serve autofill. Follows `activeAccountStatusMock$` unless a test sets it. */
+  let autofillUserIds$: BehaviorSubject<UserId[]>;
   let autofillService: MockProxy<AutofillService>;
   let configService: MockProxy<ConfigService>;
   let activeAccountStatusMock$: BehaviorSubject<AuthenticationStatus>;
@@ -215,6 +232,15 @@ describe("OverlayBackground", () => {
     logService = mock<LogService>();
     cipherService = mock<CipherService>({
       getAllDecryptedForUrl: jest.fn().mockResolvedValue([]),
+      // A fill or view names a cipher by its inline menu key and the background reads it again
+      // from its account's vault. The vault holds what the inline menu holds unless a test says
+      // otherwise.
+      getAllDecryptedForIds: jest.fn().mockImplementation(async (userId: UserId, ids: string[]) =>
+        Array.from(overlayBackground["inlineMenuCiphers"].values())
+          .filter((held) => held.userId === userId && ids.includes(held.cipher.id))
+          .map((held) => held.cipher),
+      ),
+      cipherListViews$: jest.fn().mockReturnValue(NEVER),
     });
     enableNotificationAnimationMock$ = new BehaviorSubject(true);
     enableInlineMenuAnimationMock$ = new BehaviorSubject(true);
@@ -224,6 +250,19 @@ describe("OverlayBackground", () => {
     activeAccountStatusMock$ = new BehaviorSubject(AuthenticationStatus.Unlocked);
     authService = mock<AuthService>();
     authService.activeAccountStatus$ = activeAccountStatusMock$;
+    // With no account opted in, the accounts that serve autofill are the unlocked active
+    // account alone, or none.
+    autofillUserIds$ = new BehaviorSubject<UserId[]>([mockUserId]);
+    activeAccountStatusMock$.subscribe((status) => {
+      const userIds = status === AuthenticationStatus.Unlocked ? [mockUserId] : [];
+      if (userIds.length !== autofillUserIds$.value.length) {
+        autofillUserIds$.next(userIds);
+      }
+    });
+    const autofillAccountsService = mock<AutofillAccountsService>();
+    Object.defineProperty(autofillAccountsService, "autofillUserIds$", {
+      value: autofillUserIds$,
+    });
     environmentMock$ = new BehaviorSubject(
       new CloudEnvironment({
         key: Region.US,
@@ -236,6 +275,9 @@ describe("OverlayBackground", () => {
     inlineMenuVisibilityMock$ = new BehaviorSubject(AutofillOverlayVisibility.OnFieldFocus);
     autofillSettingsService = mock<AutofillSettingsService>();
     autofillSettingsService.inlineMenuVisibility$ = inlineMenuVisibilityMock$;
+    autofillSettingsService.showInlineMenuCardsFor$.mockReturnValue(of(true));
+    autofillSettingsService.showInlineMenuIdentitiesFor$.mockReturnValue(of(true));
+    autofillSettingsService.showInlineMenuSshKeysFor$.mockReturnValue(of(true));
     i18nService = mock<I18nService>();
     platformUtilsService = mock<BrowserPlatformUtilsService>();
     enablePasskeysMock$ = new BehaviorSubject(true);
@@ -267,6 +309,16 @@ describe("OverlayBackground", () => {
     autofillOrchestrator.fillCipher.mockResolvedValue({ outcome: AutofillOutcome.Filled });
     fillCipherPolicy = new DefaultFillCipherPolicy(cipherService);
     jest.spyOn(fillCipherPolicy, "ciphersForUrl");
+    multiAccountFillCipherPolicy = new DefaultMultiAccountFillCipherPolicy(
+      fillCipherPolicy,
+      autofillAccountsService,
+      autofillSettingsService,
+    );
+    premiumUserIds = undefined;
+    const billingAccountProfileStateService = mock<BillingAccountProfileStateService>();
+    billingAccountProfileStateService.hasPremiumFromAnySource$.mockImplementation((userId) =>
+      of(premiumUserIds == null || premiumUserIds.has(userId)),
+    );
     overlayBackground = new OverlayBackground(
       logService,
       cipherService,
@@ -290,7 +342,9 @@ describe("OverlayBackground", () => {
       intraprocessMessageSender,
       // Wired as `MainBackground` wires it, so ingest tagging is exercised rather than faked.
       new MessageListener(intraprocessMessageSender.messages$({ external$: externalMessages })),
-      fillCipherPolicy,
+      multiAccountFillCipherPolicy,
+      autofillAccountsService,
+      billingAccountProfileStateService,
     );
     portKeyForTabSpy = overlayBackground["portKeyForTab"];
     pageDetailsForTabSpy = overlayBackground["pageDetailsForTab"];
@@ -1156,8 +1210,8 @@ describe("OverlayBackground", () => {
       expect(cipherService.sortCiphersByLastUsedThenName).toHaveBeenCalled();
       expect(overlayBackground["inlineMenuCiphers"]).toStrictEqual(
         new Map([
-          ["inline-menu-cipher-0", cardCipher],
-          ["inline-menu-cipher-1", loginCipher1],
+          ["inline-menu-cipher-0", owned(cardCipher)],
+          ["inline-menu-cipher-1", owned(loginCipher1)],
         ]),
       );
     });
@@ -1176,12 +1230,13 @@ describe("OverlayBackground", () => {
         url,
         mockUserId,
         CipherUse.UserFill,
+        undefined,
       );
       expect(cipherService.sortCiphersByLastUsedThenName).toHaveBeenCalled();
       expect(overlayBackground["inlineMenuCiphers"]).toStrictEqual(
         new Map([
-          ["inline-menu-cipher-0", loginCipher1],
-          ["inline-menu-cipher-1", loginCipher2],
+          ["inline-menu-cipher-0", owned(loginCipher1)],
+          ["inline-menu-cipher-1", owned(loginCipher2)],
         ]),
       );
     });
@@ -1204,8 +1259,8 @@ describe("OverlayBackground", () => {
       expect(cipherService.sortCiphersByLastUsedThenName).toHaveBeenCalled();
       expect(overlayBackground["inlineMenuCiphers"]).toStrictEqual(
         new Map([
-          ["inline-menu-cipher-0", cardCipher],
-          ["inline-menu-cipher-1", loginCipher1],
+          ["inline-menu-cipher-0", owned(cardCipher)],
+          ["inline-menu-cipher-1", owned(loginCipher1)],
         ]),
       );
     });
@@ -2349,14 +2404,16 @@ describe("OverlayBackground", () => {
         overlayBackground["inlineMenuCiphers"] = new Map([
           [
             "inline-menu-cipher-0",
-            mock<CipherView>({
-              type: CipherType.Login,
-              login: {
-                username: "username1",
-                password: "password1",
-                uri: "https://example.com",
-              },
-            }),
+            owned(
+              mock<CipherView>({
+                type: CipherType.Login,
+                login: {
+                  username: "username1",
+                  password: "password1",
+                  uri: "https://example.com",
+                },
+              }),
+            ),
           ],
         ]);
         await overlayBackground["getInlineMenuCipherData"]();
@@ -2807,7 +2864,7 @@ describe("OverlayBackground", () => {
       describe("when the focused field has a value", () => {
         beforeEach(() => {
           overlayBackground["inlineMenuCiphers"] = new Map([
-            ["inline-menu-cipher-1", mock<CipherView>({ id: "inline-menu-cipher-1" })],
+            ["inline-menu-cipher-1", owned(mock<CipherView>({ id: "inline-menu-cipher-1" }))],
           ]);
           jest.spyOn(overlayBackground as any, "checkFocusedFieldHasValue").mockResolvedValue(true);
         });
@@ -3919,7 +3976,7 @@ describe("OverlayBackground", () => {
           reprompt: CipherRepromptType.Password,
           type: CipherType.Login,
         });
-        overlayBackground["inlineMenuCiphers"] = new Map([["inline-menu-cipher-1", cipher]]);
+        overlayBackground["inlineMenuCiphers"] = new Map([["inline-menu-cipher-1", owned(cipher)]]);
         overlayBackground["pageDetailsForTab"][sender.tab.id] = new Map([
           [sender.frameId, { frameId: sender.frameId, tab: sender.tab, details: pageDetails }],
         ]);
@@ -3932,7 +3989,11 @@ describe("OverlayBackground", () => {
         });
         await flushPromises();
 
-        expect(autofillService.isPasswordRepromptRequired).toHaveBeenCalledWith(cipher, sender.tab);
+        expect(autofillService.isPasswordRepromptRequired).toHaveBeenCalledWith(
+          cipher,
+          sender.tab,
+          mockUserId,
+        );
         expect(autofillOrchestrator.fillCipher).not.toHaveBeenCalled();
       });
 
@@ -3941,9 +4002,9 @@ describe("OverlayBackground", () => {
         const cipher2 = mock<CipherView>({ id: "inline-menu-cipher-2" });
         const cipher3 = mock<CipherView>({ id: "inline-menu-cipher-3" });
         overlayBackground["inlineMenuCiphers"] = new Map([
-          ["inline-menu-cipher-1", cipher1],
-          ["inline-menu-cipher-2", cipher2],
-          ["inline-menu-cipher-3", cipher3],
+          ["inline-menu-cipher-1", owned(cipher1)],
+          ["inline-menu-cipher-2", owned(cipher2)],
+          ["inline-menu-cipher-3", owned(cipher3)],
         ]);
         const pageDetailsForTab = {
           frameId: sender.frameId,
@@ -3970,10 +4031,12 @@ describe("OverlayBackground", () => {
         expect(autofillService.isPasswordRepromptRequired).toHaveBeenCalledWith(
           cipher2,
           sender.tab,
+          mockUserId,
         );
         expect(autofillOrchestrator.fillCipher).toHaveBeenCalledWith({
           tab: sender.tab,
           cipher: cipher2,
+          userId: mockUserId,
           pageDetails: [pageDetailsForTab],
           fillNewPassword: true,
           allowTotpAutofill: true,
@@ -3983,9 +4046,9 @@ describe("OverlayBackground", () => {
         });
         expect(overlayBackground["inlineMenuCiphers"].entries()).toStrictEqual(
           new Map([
-            ["inline-menu-cipher-2", cipher2],
-            ["inline-menu-cipher-1", cipher1],
-            ["inline-menu-cipher-3", cipher3],
+            ["inline-menu-cipher-2", owned(cipher2)],
+            ["inline-menu-cipher-1", owned(cipher1)],
+            ["inline-menu-cipher-3", owned(cipher3)],
           ]).entries(),
         );
       });
@@ -3995,9 +4058,9 @@ describe("OverlayBackground", () => {
         const cipher2 = mock<CipherView>({ id: "inline-menu-cipher-2" });
         const cipher3 = mock<CipherView>({ id: "inline-menu-cipher-3" });
         overlayBackground["inlineMenuCiphers"] = new Map([
-          ["inline-menu-cipher-1", cipher1],
-          ["inline-menu-cipher-2", cipher2],
-          ["inline-menu-cipher-3", cipher3],
+          ["inline-menu-cipher-1", owned(cipher1)],
+          ["inline-menu-cipher-2", owned(cipher2)],
+          ["inline-menu-cipher-3", owned(cipher3)],
         ]);
         overlayBackground["pageDetailsForTab"][sender.tab.id] = new Map([
           [sender.frameId, { frameId: sender.frameId, tab: sender.tab, details: pageDetails }],
@@ -4016,16 +4079,18 @@ describe("OverlayBackground", () => {
         expect(autofillOrchestrator.fillCipher).toHaveBeenCalled();
         expect(overlayBackground["inlineMenuCiphers"].entries()).toStrictEqual(
           new Map([
-            ["inline-menu-cipher-1", cipher1],
-            ["inline-menu-cipher-2", cipher2],
-            ["inline-menu-cipher-3", cipher3],
+            ["inline-menu-cipher-1", owned(cipher1)],
+            ["inline-menu-cipher-2", owned(cipher2)],
+            ["inline-menu-cipher-3", owned(cipher3)],
           ]).entries(),
         );
       });
 
       it("copies the cipher's totp code to the clipboard after filling", async () => {
         const cipher2 = mock<CipherView>({ id: "inline-menu-cipher-2" });
-        overlayBackground["inlineMenuCiphers"] = new Map([["inline-menu-cipher-2", cipher2]]);
+        overlayBackground["inlineMenuCiphers"] = new Map([
+          ["inline-menu-cipher-2", owned(cipher2)],
+        ]);
         overlayBackground["pageDetailsForTab"][sender.tab.id] = new Map([
           [sender.frameId, { frameId: sender.frameId, tab: sender.tab, details: pageDetails }],
         ]);
@@ -4051,7 +4116,9 @@ describe("OverlayBackground", () => {
 
       it("mitigates an absent fill by copying the cipher's totp code", async () => {
         const cipher2 = mock<CipherView>({ id: "inline-menu-cipher-2" });
-        overlayBackground["inlineMenuCiphers"] = new Map([["inline-menu-cipher-2", cipher2]]);
+        overlayBackground["inlineMenuCiphers"] = new Map([
+          ["inline-menu-cipher-2", owned(cipher2)],
+        ]);
         overlayBackground["pageDetailsForTab"][sender.tab.id] = new Map([
           [sender.frameId, { frameId: sender.frameId, tab: sender.tab, details: pageDetails }],
         ]);
@@ -4085,7 +4152,9 @@ describe("OverlayBackground", () => {
 
       it("copies nothing when the user's preference withholds auto-copy", async () => {
         const cipher2 = mock<CipherView>({ id: "inline-menu-cipher-2" });
-        overlayBackground["inlineMenuCiphers"] = new Map([["inline-menu-cipher-2", cipher2]]);
+        overlayBackground["inlineMenuCiphers"] = new Map([
+          ["inline-menu-cipher-2", owned(cipher2)],
+        ]);
         overlayBackground["pageDetailsForTab"][sender.tab.id] = new Map([
           [sender.frameId, { frameId: sender.frameId, tab: sender.tab, details: pageDetails }],
         ]);
@@ -4113,7 +4182,9 @@ describe("OverlayBackground", () => {
 
       it("security: copies nothing when the orchestrator denies the fill", async () => {
         const cipher2 = mock<CipherView>({ id: "inline-menu-cipher-2" });
-        overlayBackground["inlineMenuCiphers"] = new Map([["inline-menu-cipher-2", cipher2]]);
+        overlayBackground["inlineMenuCiphers"] = new Map([
+          ["inline-menu-cipher-2", owned(cipher2)],
+        ]);
         overlayBackground["pageDetailsForTab"][sender.tab.id] = new Map([
           [sender.frameId, { frameId: sender.frameId, tab: sender.tab, details: pageDetails }],
         ]);
@@ -4142,7 +4213,9 @@ describe("OverlayBackground", () => {
 
       it("copies nothing when the attempt released no totp", async () => {
         const cipher2 = mock<CipherView>({ id: "inline-menu-cipher-2" });
-        overlayBackground["inlineMenuCiphers"] = new Map([["inline-menu-cipher-2", cipher2]]);
+        overlayBackground["inlineMenuCiphers"] = new Map([
+          ["inline-menu-cipher-2", owned(cipher2)],
+        ]);
         overlayBackground["pageDetailsForTab"][sender.tab.id] = new Map([
           [sender.frameId, { frameId: sender.frameId, tab: sender.tab, details: pageDetails }],
         ]);
@@ -4180,7 +4253,9 @@ describe("OverlayBackground", () => {
             tab: sender.tab,
             details: pageDetails,
           };
-          overlayBackground["inlineMenuCiphers"] = new Map([["inline-menu-cipher-1", cipher1]]);
+          overlayBackground["inlineMenuCiphers"] = new Map([
+            ["inline-menu-cipher-1", owned(cipher1)],
+          ]);
           overlayBackground["pageDetailsForTab"][sender.tab.id] = new Map([
             [sender.frameId, pageDetailsForTab],
           ]);
@@ -4288,7 +4363,9 @@ describe("OverlayBackground", () => {
           fields: [currentPasswordField, newPasswordField, confirmNewPasswordField],
         });
         const cipher2 = mock<CipherView>({ id: "inline-menu-cipher-2" });
-        overlayBackground["inlineMenuCiphers"] = new Map([["inline-menu-cipher-2", cipher2]]);
+        overlayBackground["inlineMenuCiphers"] = new Map([
+          ["inline-menu-cipher-2", owned(cipher2)],
+        ]);
         overlayBackground["pageDetailsForTab"][sender.tab.id] = new Map([
           [sender.frameId, { frameId: sender.frameId, tab: sender.tab, details: pageDetails }],
         ]);
@@ -4358,7 +4435,7 @@ describe("OverlayBackground", () => {
 
       it("returns early if the passed cipher ID does not match one of the inline menu ciphers", async () => {
         overlayBackground["inlineMenuCiphers"] = new Map([
-          ["inline-menu-cipher-0", mock<CipherView>({ id: "inline-menu-cipher-0" })],
+          ["inline-menu-cipher-0", owned(mock<CipherView>({ id: "inline-menu-cipher-0" }))],
         ]);
 
         sendPortMessage(listMessageConnectorSpy, {
@@ -4374,8 +4451,8 @@ describe("OverlayBackground", () => {
       it("will open the view vault item popout with the selected cipher", async () => {
         const cipher = mock<CipherView>({ id: "inline-menu-cipher-1" });
         overlayBackground["inlineMenuCiphers"] = new Map([
-          ["inline-menu-cipher-0", mock<CipherView>({ id: "inline-menu-cipher-0" })],
-          ["inline-menu-cipher-1", cipher],
+          ["inline-menu-cipher-0", owned(mock<CipherView>({ id: "inline-menu-cipher-0" }))],
+          ["inline-menu-cipher-1", owned(cipher)],
         ]);
 
         sendPortMessage(listMessageConnectorSpy, {
@@ -4542,6 +4619,7 @@ describe("OverlayBackground", () => {
         expect(autofillOrchestrator.fillCipher).toHaveBeenCalledWith({
           tab: sender.tab,
           cipher: expect.any(Object),
+          userId: mockUserId,
           pageDetails: [overlayBackground["pageDetailsForTab"][sender.tab.id].get(sender.frameId)],
           fillNewPassword: true,
           allowTotpAutofill: false,
@@ -4761,6 +4839,401 @@ describe("OverlayBackground", () => {
       expect(listPortSpy.postMessage).not.toHaveBeenCalledWith({
         command: "checkAutofillInlineMenuListFocused",
       });
+    });
+  });
+
+  describe("serving several accounts", () => {
+    const url = "https://jest-testing-website.com";
+    const portKey = "inlineMenuListPort";
+    let sender: chrome.runtime.MessageSender;
+    let vaults: Map<UserId, CipherView[]>;
+
+    const login = (id: string, name: string) =>
+      mock<CipherView>({
+        id,
+        name,
+        type: CipherType.Login,
+        reprompt: CipherRepromptType.None,
+        login: { username: `username-${name}`, password: "password", uri: url },
+      });
+    const card = (id: string, name: string) =>
+      mock<CipherView>({
+        id,
+        name,
+        type: CipherType.Card,
+        card: { subTitle: `subtitle-${name}` },
+      });
+    /** The ciphers last posted to the inline menu list. */
+    const postedCiphers = () =>
+      (listPortSpy.postMessage as jest.Mock).mock.calls
+        .map(([message]) => message)
+        .filter((message) => message.command === "updateAutofillInlineMenuListCiphers")
+        .pop()?.ciphers;
+    const fillByKey = async (inlineMenuCipherId: string) => {
+      sendPortMessage(listMessageConnectorSpy, {
+        command: "fillAutofillInlineMenuCipher",
+        inlineMenuCipherId,
+        portKey,
+      });
+      await flushPromises();
+    };
+    /** Waits out the throttle that coalesces updates of the inline menu ciphers. */
+    const rebuildSettled = async () => {
+      await flushPromises();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await flushPromises();
+    };
+
+    beforeEach(async () => {
+      await accountService.addAccount(otherUserId, {
+        name: "other",
+        email: otherUserEmail,
+        emailVerified: true,
+        creationDate: new Date("2024-01-01T00:00:00.000Z"),
+      });
+      vaults = new Map();
+      cipherService.getAllDecryptedForUrl.mockImplementation(async (_url, userId) => [
+        ...(vaults.get(userId) ?? []),
+      ]);
+      cipherService.getAllDecryptedForIds.mockImplementation(async (userId, ids) =>
+        (vaults.get(userId) ?? []).filter((cipher) => ids.includes(cipher.id)),
+      );
+      cipherService.sortCiphersByLastUsedThenName.mockReturnValue(0);
+
+      sender = mock<chrome.runtime.MessageSender>({ tab: createChromeTabMock({ id: 1, url }) });
+      portKeyForTabSpy[sender.tab.id] = portKey;
+      getTabFromCurrentWindowIdSpy.mockResolvedValue(sender.tab);
+      overlayBackground["focusedFieldData"] = createFocusedFieldDataMock({ tabId: sender.tab.id });
+      overlayBackground["pageDetailsForTab"][sender.tab.id] = new Map([
+        [
+          sender.frameId,
+          { frameId: sender.frameId, tab: sender.tab, details: createAutofillPageDetailsMock() },
+        ],
+      ]);
+      autofillService.isPasswordRepromptRequired.mockResolvedValue(false);
+
+      autofillUserIds$.next([mockUserId, otherUserId]);
+      await rebuildSettled();
+      await initOverlayElementPorts();
+      listMessageConnectorSpy.sender = sender;
+    });
+
+    // No rebuild of one test may run into the mocks of the next.
+    afterEach(rebuildSettled);
+
+    describe("with two unlocked accounts that hold a login for the URL", () => {
+      const activeLogin = login("id-active", "active");
+      const otherLogin = login("id-other", "other");
+
+      beforeEach(async () => {
+        vaults.set(mockUserId, [activeLogin]);
+        vaults.set(otherUserId, [otherLogin]);
+
+        await overlayBackground.updateOverlayCiphers();
+        await rebuildSettled();
+      });
+
+      it("holds each cipher with the account that owns it", () => {
+        expect(overlayBackground["inlineMenuCiphers"]).toStrictEqual(
+          new Map([
+            ["inline-menu-cipher-0", owned(activeLogin)],
+            ["inline-menu-cipher-1", owned(otherLogin, otherUserId)],
+          ]),
+        );
+      });
+
+      it("labels each cipher with its account and names it by an opaque key", () => {
+        expect(postedCiphers()).toEqual([
+          expect.objectContaining({
+            id: "inline-menu-cipher-0",
+            name: "active",
+            accountLabel: "email",
+          }),
+          expect.objectContaining({
+            id: "inline-menu-cipher-1",
+            name: "other",
+            accountLabel: otherUserEmail,
+            canView: false,
+          }),
+        ]);
+        expect(postedCiphers()[0]).not.toHaveProperty("canView");
+        expect(JSON.stringify(postedCiphers())).not.toContain(otherUserId);
+        expect(JSON.stringify(postedCiphers())).not.toContain("id-other");
+      });
+
+      describe("with a TOTP seed in both logins", () => {
+        const totpLogin = (id: string, name: string, organizationUseTotp = false) =>
+          mock<CipherView>({
+            id,
+            name,
+            type: CipherType.Login,
+            reprompt: CipherRepromptType.None,
+            organizationUseTotp,
+            login: { username: name, password: "password", uri: url, totp: `seed-${name}` },
+          });
+        const postTotpCiphers = async (ciphers: Map<UserId, CipherView[]>) => {
+          totpService.getCode$.mockImplementation((seed: string) =>
+            of({ code: `code-of-${seed}`, period: 30 }),
+          );
+          for (const [userId, list] of ciphers) {
+            vaults.set(userId, list);
+          }
+          await overlayBackground.updateOverlayCiphers();
+          await rebuildSettled();
+          return postedCiphers().map((cipher: any) => cipher.login?.totp);
+        };
+
+        it("never reveals the code of an account without premium while the active account has it", async () => {
+          premiumUserIds = new Set([mockUserId]);
+
+          const codes = await postTotpCiphers(
+            new Map([
+              [mockUserId, [totpLogin("id-active", "active")]],
+              [otherUserId, [totpLogin("id-other", "other")]],
+            ]),
+          );
+
+          expect(codes).toEqual(["code-of-seed-active", undefined]);
+          expect(totpService.getCode$).not.toHaveBeenCalledWith("seed-other");
+        });
+
+        it("shows the code of a premium account that is not active while the active account has none", async () => {
+          premiumUserIds = new Set([otherUserId]);
+
+          const codes = await postTotpCiphers(
+            new Map([
+              [mockUserId, [totpLogin("id-active", "active")]],
+              [otherUserId, [totpLogin("id-other", "other")]],
+            ]),
+          );
+
+          expect(codes).toEqual([undefined, "code-of-seed-other"]);
+          expect(totpService.getCode$).not.toHaveBeenCalledWith("seed-active");
+        });
+
+        it("shows the code of a cipher whose organization grants TOTP to an account without premium", async () => {
+          premiumUserIds = new Set();
+
+          const codes = await postTotpCiphers(
+            new Map([
+              [mockUserId, [totpLogin("id-active", "active")]],
+              [otherUserId, [totpLogin("id-other", "other", true)]],
+            ]),
+          );
+
+          expect(codes).toEqual([undefined, "code-of-seed-other"]);
+        });
+      });
+
+      it("fills a cipher for the account that owns it", async () => {
+        await fillByKey("inline-menu-cipher-1");
+
+        expect(autofillService.isPasswordRepromptRequired).toHaveBeenCalledWith(
+          otherLogin,
+          sender.tab,
+          otherUserId,
+        );
+        expect(autofillOrchestrator.fillCipher).toHaveBeenCalledWith(
+          expect.objectContaining({ cipher: otherLogin, userId: otherUserId }),
+        );
+      });
+
+      it("rebuilds the list when an account locks while the inline menu is open", async () => {
+        autofillUserIds$.next([mockUserId]);
+        await rebuildSettled();
+
+        expect(overlayBackground["inlineMenuCiphers"]).toStrictEqual(
+          new Map([["inline-menu-cipher-0", owned(activeLogin)]]),
+        );
+        expect(postedCiphers()).toEqual([expect.objectContaining({ name: "active" })]);
+        expect(postedCiphers()[0]).not.toHaveProperty("accountLabel");
+      });
+
+      it("refuses a fill by key once the cipher's account has locked", async () => {
+        const heldBeforeLock = new Map(overlayBackground["inlineMenuCiphers"]);
+        autofillUserIds$.next([mockUserId]);
+        await rebuildSettled();
+        // A key of the list the inline menu was sent before the lock, as if the rebuild had not
+        // reached the background's own list yet.
+        overlayBackground["inlineMenuCiphers"] = heldBeforeLock;
+
+        await fillByKey("inline-menu-cipher-1");
+
+        expect(autofillService.isPasswordRepromptRequired).not.toHaveBeenCalled();
+        expect(autofillOrchestrator.fillCipher).not.toHaveBeenCalled();
+      });
+
+      it("refuses a fill by key once the cipher no longer exists in its account", async () => {
+        vaults.set(otherUserId, []);
+
+        await fillByKey("inline-menu-cipher-1");
+
+        expect(autofillOrchestrator.fillCipher).not.toHaveBeenCalled();
+      });
+
+      it("does not open the vault item view for a cipher of another account", async () => {
+        const openViewVaultItemPopoutSpy = jest
+          .spyOn(overlayBackground as any, "openViewVaultItemPopout")
+          .mockImplementation();
+
+        sendPortMessage(listMessageConnectorSpy, {
+          command: "viewSelectedCipher",
+          inlineMenuCipherId: "inline-menu-cipher-1",
+          portKey,
+        });
+        await flushPromises();
+
+        expect(openViewVaultItemPopoutSpy).not.toHaveBeenCalled();
+      });
+
+      it("drops the held ciphers when the last account locks", async () => {
+        autofillUserIds$.next([]);
+        await rebuildSettled();
+
+        expect(overlayBackground["inlineMenuCiphers"].size).toBe(0);
+      });
+    });
+
+    describe("with the same shared item in both accounts", () => {
+      const sharedId = "id-shared";
+      const sharedForActive = login(sharedId, "shared");
+      const sharedForOther = login(sharedId, "shared");
+
+      beforeEach(async () => {
+        vaults.set(mockUserId, [sharedForActive]);
+        vaults.set(otherUserId, [sharedForOther]);
+
+        await overlayBackground.updateOverlayCiphers();
+        await rebuildSettled();
+      });
+
+      it("offers the item once per account", () => {
+        expect(postedCiphers()).toEqual([
+          expect.objectContaining({ id: "inline-menu-cipher-0", accountLabel: "email" }),
+          expect.objectContaining({ id: "inline-menu-cipher-1", accountLabel: otherUserEmail }),
+        ]);
+      });
+
+      it("fills the copy of the account the chosen entry belongs to", async () => {
+        await fillByKey("inline-menu-cipher-1");
+
+        expect(autofillOrchestrator.fillCipher).toHaveBeenCalledTimes(1);
+        const filled = autofillOrchestrator.fillCipher.mock.calls[0][0];
+        expect(filled.userId).toBe(otherUserId);
+        expect(filled.cipher).toBe(sharedForOther);
+      });
+
+      describe("when the item holds a passkey the page asks for", () => {
+        let continued: jest.Mock;
+
+        beforeEach(() => {
+          const credential = mock<Fido2CredentialView>({
+            credentialId: "credential-id",
+            rpId: "jest-testing-website.com",
+            rpName: "website",
+            userName: "passkey-user",
+          });
+          sharedForActive.login.fido2Credentials = [credential];
+          sharedForOther.login.fido2Credentials = [credential];
+          overlayBackground["focusedFieldData"] = createFocusedFieldDataMock({
+            tabId: sender.tab.id,
+            showPasskeys: true,
+          });
+          overlayBackground["inlineMenuFido2Credentials"] = new Set(["credential-id"]);
+          void fido2ActiveRequestManager.newActiveRequest(
+            sender.tab.id,
+            [credential, credential],
+            new AbortController(),
+          );
+          continued = jest.fn();
+          fido2ActiveRequestManager.getActiveRequest(sender.tab.id).subject.subscribe(continued);
+        });
+
+        const fillPasskeyByKey = async (inlineMenuCipherId: string) => {
+          sendPortMessage(listMessageConnectorSpy, {
+            command: "fillAutofillInlineMenuCipher",
+            inlineMenuCipherId,
+            usePasskey: true,
+            portKey,
+          });
+          await flushPromises();
+        };
+
+        it("offers the passkey of each account, labelled with its account", async () => {
+          const ciphers = await overlayBackground["getInlineMenuCipherData"]();
+
+          const passkeyRows = ciphers.filter((cipher) => cipher.login?.passkey);
+          expect(passkeyRows).toEqual([
+            expect.objectContaining({ id: "inline-menu-cipher-0", accountLabel: "email" }),
+            expect.objectContaining({ id: "inline-menu-cipher-1", accountLabel: otherUserEmail }),
+          ]);
+        });
+
+        it("continues the passkey request with the account of the chosen entry", async () => {
+          await fillPasskeyByKey("inline-menu-cipher-1");
+
+          expect(continued).toHaveBeenCalledWith({
+            type: Fido2ActiveRequestEvents.Continue,
+            credentialId: "credential-id",
+            userId: otherUserId,
+          });
+        });
+
+        it("refuses the passkey once the cipher's account has locked", async () => {
+          const heldBeforeLock = new Map(overlayBackground["inlineMenuCiphers"]);
+          autofillUserIds$.next([mockUserId]);
+          await rebuildSettled();
+          overlayBackground["inlineMenuCiphers"] = heldBeforeLock;
+
+          await fillPasskeyByKey("inline-menu-cipher-1");
+
+          expect(continued).not.toHaveBeenCalledWith(
+            expect.objectContaining({ type: Fido2ActiveRequestEvents.Continue }),
+          );
+        });
+      });
+    });
+
+    it("leaves out the cards of an account that does not show cards in the inline menu", async () => {
+      const activeCard = card("id-card-active", "active-card");
+      const otherCard = card("id-card-other", "other-card");
+      vaults.set(mockUserId, [activeCard]);
+      vaults.set(otherUserId, [otherCard]);
+      autofillSettingsService.showInlineMenuCardsFor$.mockImplementation((userId) =>
+        of(userId === mockUserId),
+      );
+
+      await overlayBackground.updateOverlayCiphers();
+      await rebuildSettled();
+
+      expect(overlayBackground["inlineMenuCiphers"]).toStrictEqual(
+        new Map([["inline-menu-cipher-0", owned(activeCard)]]),
+      );
+    });
+
+    it("sets the page up for cards when any account shows them", async () => {
+      autofillSettingsService.showInlineMenuCardsFor$.mockImplementation((userId) =>
+        of(userId === otherUserId),
+      );
+
+      sendMockExtensionMessage({ command: "getInlineMenuCardsVisibility" }, sender, sendResponse);
+      await flushPromises();
+
+      expect(sendResponse).toHaveBeenCalledWith(true);
+    });
+
+    it("presents the inline menu as unlocked while another account serves autofill", async () => {
+      activeAccountStatusMock$.next(AuthenticationStatus.Locked);
+      autofillUserIds$.next([otherUserId]);
+
+      expect(await overlayBackground["getAuthStatus"]()).toBe(AuthenticationStatus.Unlocked);
+    });
+
+    it("presents the inline menu as locked when no account serves autofill", async () => {
+      activeAccountStatusMock$.next(AuthenticationStatus.Locked);
+      autofillUserIds$.next([]);
+
+      expect(await overlayBackground["getAuthStatus"]()).toBe(AuthenticationStatus.Locked);
     });
   });
 

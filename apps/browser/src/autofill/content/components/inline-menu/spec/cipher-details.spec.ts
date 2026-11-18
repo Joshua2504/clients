@@ -17,6 +17,8 @@ jest.mock("lit", () => jest.requireActual("../../lit-stories/lit-jest-mocks").li
 describe("CipherDetails", () => {
   const SUBTITLE_SLOT = 1;
   const PASSKEY_SECOND_LINE_SLOT = 2;
+  /** The account follows the subtitle of a cipher that is not shown as a passkey. */
+  const ACCOUNT_SLOT = 2;
 
   it("renders login username as the subtitle", () => {
     const values = litValues(
@@ -27,6 +29,28 @@ describe("CipherDetails", () => {
     );
 
     expect(values[SUBTITLE_SLOT]).toContain(mockLoginCiphers[0].login!.username);
+  });
+
+  it("renders the cipher's account when the cipher carries an account label", () => {
+    const values = litValues(
+      CipherDetails({
+        theme: ThemeTypes.Light,
+        cipher: { ...mockLoginCiphers[0], accountLabel: "other@example.com" },
+      }),
+    );
+
+    expect(values[ACCOUNT_SLOT]).toContain("other@example.com");
+  });
+
+  it("renders nothing for the account when the cipher carries no account label", () => {
+    const values = litValues(
+      CipherDetails({
+        theme: ThemeTypes.Light,
+        cipher: mockLoginCiphers[0],
+      }),
+    );
+
+    expect(values[ACCOUNT_SLOT]).toBe(nothing);
   });
 
   it("renders card details as the subtitle", () => {

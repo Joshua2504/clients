@@ -2,9 +2,11 @@ import { mock, MockProxy } from "jest-mock-extended";
 import { BehaviorSubject, defer, filter, map, of, Subject, throwError } from "rxjs";
 
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { AutofillSettingsServiceAbstraction } from "@bitwarden/common/autofill/services/autofill-settings.service";
 import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
 import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
 import { CipherType } from "@bitwarden/common/vault/enums";
 import { CipherRepromptType } from "@bitwarden/common/vault/enums/cipher-reprompt-type";
@@ -20,6 +22,7 @@ import {
 } from "../services/abstractions/autofill-lifecycle.service";
 import { AutofillService, PageDetail } from "../services/abstractions/autofill.service";
 import { DefaultFillCipherPolicy } from "../services/default-fill-cipher-policy";
+import { DefaultMultiAccountFillCipherPolicy } from "../services/default-multi-account-fill-cipher-policy";
 import {
   createAutofillFieldMock,
   createAutofillPageDetailsMock,
@@ -45,6 +48,12 @@ describe("DefaultAutofillOrchestrator", () => {
   let platformUtilsService: MockProxy<PlatformUtilsService>;
   let updateOverlayCiphers: jest.Mock<Promise<void>, []>;
   let fillCipherPolicy: DefaultFillCipherPolicy;
+  let multiAccountFillCipherPolicy: DefaultMultiAccountFillCipherPolicy;
+  let autofillAccountsService: MockProxy<AutofillAccountsService>;
+  // The accounts autofill serves. One by default: the unlocked active account, nobody opted in.
+  let autofillUserIds$: BehaviorSubject<UserId[]>;
+  const USER_1 = "user-1" as UserId;
+  const USER_2 = "user-2" as UserId;
   const logService = mock<LogService>();
 
   let pageTransitionResolved$: Subject<PageTransitionResolved>;
@@ -89,6 +98,7 @@ describe("DefaultAutofillOrchestrator", () => {
   const emitAutomatedLoginStep = (
     pd: PageDetail,
     workflow: AutomationWorkflow = AutomationWorkflow.autoSubmitLogin,
+    userIds: UserId[] = [USER_1],
   ) =>
     automatedLoginStepReady$.next({
       tab: pd.tab,
@@ -96,6 +106,7 @@ describe("DefaultAutofillOrchestrator", () => {
       frameId: pd.frameId,
       frameUrl: pd.tab.url ?? DEFAULT_URL,
       workflow,
+      userIds,
     });
 
   // A promise whose resolution the test controls, so it can hold a fill in flight.
@@ -128,7 +139,8 @@ describe("DefaultAutofillOrchestrator", () => {
       platformUtilsService,
       updateOverlayCiphers,
       logService,
-      fillCipherPolicy,
+      multiAccountFillCipherPolicy,
+      autofillAccountsService,
       now,
     );
 
@@ -180,7 +192,15 @@ describe("DefaultAutofillOrchestrator", () => {
       .mockResolvedValue(mock<chrome.webNavigation.GetFrameResultDetails>({ url: DEFAULT_URL }));
 
     autofillSettingsService = mock<AutofillSettingsServiceAbstraction>();
-    autofillSettingsService.autofillOnPageLoad$ = autofillOnPageLoad$;
+    autofillSettingsService.autofillOnPageLoadFor$.mockImplementation(() => autofillOnPageLoad$);
+    autofillSettingsService.autofillOnPageLoadDefaultFor$.mockReturnValue(of(true));
+
+    autofillUserIds$ = new BehaviorSubject<UserId[]>([USER_1]);
+    autofillAccountsService = mock<AutofillAccountsService>();
+    (autofillAccountsService as any).autofillUserIds$ = autofillUserIds$;
+    autofillAccountsService.isAutofillUser$.mockImplementation((userId) =>
+      autofillUserIds$.pipe(map((userIds) => userIds.includes(userId))),
+    );
 
     accountService = mock<AccountService>();
     (accountService as any).activeAccount$ = new BehaviorSubject({ id: "user-1" });
@@ -190,6 +210,12 @@ describe("DefaultAutofillOrchestrator", () => {
     fillCipherPolicy = new DefaultFillCipherPolicy(cipherService);
     jest.spyOn(fillCipherPolicy, "nextCipherForUrl");
     jest.spyOn(fillCipherPolicy, "advanceRotation");
+    multiAccountFillCipherPolicy = new DefaultMultiAccountFillCipherPolicy(
+      fillCipherPolicy,
+      autofillAccountsService,
+      autofillSettingsService,
+      () => NOW,
+    );
 
     autofillOrchestrator = construct();
     autofillOrchestrator.init();
@@ -1039,6 +1065,7 @@ describe("DefaultAutofillOrchestrator", () => {
       const result = await autofillOrchestrator.fillCipher({
         tab,
         cipher: makeCipher(CipherType.Login),
+        userId: USER_1,
         pageDetails: [pd],
       });
 
@@ -1064,6 +1091,7 @@ describe("DefaultAutofillOrchestrator", () => {
       const result = await autofillOrchestrator.fillCipher({
         tab,
         cipher: makeCipher(CipherType.Login),
+        userId: USER_1,
         pageDetails: [pageDetail(1, 0)],
       });
 
@@ -1083,7 +1111,7 @@ describe("DefaultAutofillOrchestrator", () => {
         canAutoCopyTotp: true,
       });
 
-      const result = await autofillOrchestrator.autofillTabWithCipher(pd.tab, cipher);
+      const result = await autofillOrchestrator.autofillTabWithCipher(pd.tab, cipher, USER_1);
 
       expect(autofillService.doAutoFill).toHaveBeenCalledWith(
         expect.objectContaining({ tab: pd.tab, cipher, pageDetails: [pd] }),
@@ -1107,7 +1135,11 @@ describe("DefaultAutofillOrchestrator", () => {
         .spyOn(BrowserApi, "getTabFromCurrentWindow")
         .mockResolvedValue(createChromeTabMock({ id: 2 }));
 
-      const result = await autofillOrchestrator.autofillTabWithCipher(pd.tab, { id: "c1" } as any);
+      const result = await autofillOrchestrator.autofillTabWithCipher(
+        pd.tab,
+        { id: "c1" } as any,
+        USER_1,
+      );
 
       expect(autofillService.doAutoFill).not.toHaveBeenCalled();
       expect(result).toEqual({ outcome: AutofillOutcome.Denied });
@@ -1119,6 +1151,7 @@ describe("DefaultAutofillOrchestrator", () => {
       const result = await autofillOrchestrator.autofillTabWithCipher(
         createChromeTabMock({ id: 1 }),
         { id: "c1" } as any,
+        USER_1,
       );
 
       expect(autofillService.doAutoFill).not.toHaveBeenCalled();
@@ -1137,9 +1170,11 @@ describe("DefaultAutofillOrchestrator", () => {
         .spyOn(BrowserApi, "getTabFromCurrentWindow")
         .mockResolvedValue(createChromeTabMock({ id: 2 }));
 
-      const result = await autofillOrchestrator.unsafeAutofillTabWithCipher(pd.tab, {
-        id: "c1",
-      } as any);
+      const result = await autofillOrchestrator.unsafeAutofillTabWithCipher(
+        pd.tab,
+        { id: "c1" } as any,
+        USER_1,
+      );
 
       expect(autofillService.doAutoFill).toHaveBeenCalled();
       expect(result).toEqual({ outcome: AutofillOutcome.Filled });
@@ -1151,6 +1186,7 @@ describe("DefaultAutofillOrchestrator", () => {
       const result = await autofillOrchestrator.unsafeAutofillTabWithCipher(
         createChromeTabMock({ id: 1 }),
         { id: "c1" } as any,
+        USER_1,
       );
 
       expect(autofillService.doAutoFill).not.toHaveBeenCalled();
@@ -1165,9 +1201,11 @@ describe("DefaultAutofillOrchestrator", () => {
         .spyOn(BrowserApi, "getTab")
         .mockResolvedValue(createChromeTabMock({ id: 1, url: "https://navigated.example" }));
 
-      const result = await autofillOrchestrator.unsafeAutofillTabWithCipher(target, {
-        id: "c1",
-      } as any);
+      const result = await autofillOrchestrator.unsafeAutofillTabWithCipher(
+        target,
+        { id: "c1" } as any,
+        USER_1,
+      );
 
       expect(autofillService.doAutoFill).not.toHaveBeenCalled();
       expect(result).toEqual({ outcome: AutofillOutcome.Denied });
@@ -1317,6 +1355,169 @@ describe("DefaultAutofillOrchestrator", () => {
 
       expect(fillCipherPolicy.nextCipherForUrl).not.toHaveBeenCalled();
       expect(cipherService.getLastUsedForUrl).toHaveBeenCalled();
+    });
+  });
+
+  describe("several accounts serving autofill", () => {
+    // Each account's vault, as `CipherService` returns it for the URL.
+    let vaults: Map<UserId, CipherView[]>;
+
+    const usedAt = (id: string, lastUsedDate: number, overrides: Partial<CipherView> = {}) =>
+      makeCipher(CipherType.Login, { id, localData: { lastUsedDate }, ...overrides });
+
+    beforeEach(() => {
+      vaults = new Map([
+        [USER_1, [usedAt("personal", 100)]],
+        [USER_2, [usedAt("work", 200)]],
+      ]);
+      cipherService.getAllDecryptedForUrl.mockImplementation(
+        async (_url, userId) => vaults.get(userId) ?? [],
+      );
+      cipherService.getAllDecryptedForIds.mockImplementation(async (userId, ids) =>
+        (vaults.get(userId) ?? []).filter((cipher) => ids.includes(cipher.id)),
+      );
+      autofillService.collectPageDetailsFromTab$.mockReturnValue(of([pageDetail(1, 0)]));
+      autofillService.doAutoFill.mockResolvedValue({ outcome: AutofillOutcome.Filled });
+      autofillUserIds$.next([USER_1, USER_2]);
+    });
+
+    it("fills a page load with the most recently used login of either account, for its account", async () => {
+      emitPageTransition(pageDetail(1, 0));
+      await flushPromises();
+
+      expect(autofillService.doAutoFill).toHaveBeenCalledWith(
+        expect.objectContaining({ cipher: vaults.get(USER_2)![0], userId: USER_2 }),
+      );
+      expect(accountService.setAccountActivity).toHaveBeenCalledWith(USER_2, expect.any(Date));
+      expect(accountService.setAccountActivity).not.toHaveBeenCalledWith(USER_1, expect.any(Date));
+    });
+
+    it("offers a page load only the logins of accounts with autofill on page load on", async () => {
+      autofillSettingsService.autofillOnPageLoadFor$.mockImplementation((userId) =>
+        of(userId === USER_1),
+      );
+      // USER_2 holds the more recently used login.
+      autofillUserIds$.next([USER_1, USER_2]);
+
+      emitPageTransition(pageDetail(1, 0));
+      await flushPromises();
+
+      expect(autofillService.doAutoFill).toHaveBeenCalledTimes(1);
+      expect(autofillService.doAutoFill).toHaveBeenCalledWith(
+        expect.objectContaining({ cipher: vaults.get(USER_1)![0], userId: USER_1 }),
+      );
+    });
+
+    it("judges the reprompt of a commanded fill for the account that owns the cipher", async () => {
+      autofillOrchestrator.autofillActiveTabFromCommand(createChromeTabMock({ id: 1 }));
+      await flushPromises();
+
+      expect(autofillService.isPasswordRepromptRequired).toHaveBeenCalledWith(
+        vaults.get(USER_2)![0],
+        expect.objectContaining({ id: 1 }),
+        USER_2,
+      );
+    });
+
+    it("walks the same shared item once per account, each fill for its own account", async () => {
+      // An item shared through an organization has one id in both vaults.
+      vaults = new Map([
+        [USER_1, [usedAt("shared", 100)]],
+        [USER_2, [usedAt("shared", 100)]],
+      ]);
+      const tab = createChromeTabMock({ id: 1 });
+
+      autofillOrchestrator.autofillActiveTabFromCommand(tab);
+      await flushPromises();
+      autofillOrchestrator.autofillActiveTabFromCommand(tab);
+      await flushPromises();
+
+      expect(autofillService.doAutoFill.mock.calls.map(([options]) => options.userId)).toEqual([
+        USER_1,
+        USER_2,
+      ]);
+      expect(accountService.setAccountActivity).toHaveBeenCalledWith(USER_1, expect.any(Date));
+      expect(accountService.setAccountActivity).toHaveBeenCalledWith(USER_2, expect.any(Date));
+    });
+
+    it("security: denies a fill whose account locks between selection and commit", async () => {
+      // The reprompt check runs after selection and before the commit.
+      autofillService.isPasswordRepromptRequired.mockImplementation(async () => {
+        autofillUserIds$.next([USER_1]);
+        return false;
+      });
+
+      emitPageTransition(pageDetail(1, 0));
+      await flushPromises();
+
+      expect(autofillService.isPasswordRepromptRequired).toHaveBeenCalledWith(
+        vaults.get(USER_2)![0],
+        expect.anything(),
+        USER_2,
+      );
+      expect(autofillService.doAutoFill).not.toHaveBeenCalled();
+      expect(accountService.setAccountActivity).not.toHaveBeenCalled();
+    });
+
+    it("security: denies a caller-supplied cipher of an account that has locked, without falling back", async () => {
+      const tab = createChromeTabMock({ id: 1 });
+      autofillUserIds$.next([USER_1]);
+
+      const result = await autofillOrchestrator.fillCipher({
+        tab,
+        cipher: usedAt("shared", 100),
+        userId: USER_2,
+        pageDetails: [pageDetail(1, 0)],
+      });
+
+      expect(result).toEqual({ outcome: AutofillOutcome.Denied });
+      expect(autofillService.doAutoFill).not.toHaveBeenCalled();
+    });
+
+    it("submits only a login of an account whose policy approved the workflow", async () => {
+      // USER_2 holds the more recently used login, but only USER_1's organization approved.
+      emitAutomatedLoginStep(pageDetail(1, 0), AutomationWorkflow.autoSubmitLogin, [USER_1]);
+      await flushPromises();
+
+      expect(autofillService.doAutoFill).toHaveBeenCalledTimes(1);
+      expect(autofillService.doAutoFill).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cipher: vaults.get(USER_1)![0],
+          userId: USER_1,
+          autoSubmitLogin: true,
+        }),
+      );
+    });
+
+    it("does not submit when the approving account no longer serves autofill", async () => {
+      autofillUserIds$.next([USER_1]);
+
+      emitAutomatedLoginStep(pageDetail(1, 0), AutomationWorkflow.autoSubmitLogin, [USER_2]);
+      await flushPromises();
+
+      expectAbandoned();
+    });
+  });
+
+  describe("no account serving autofill", () => {
+    beforeEach(() => {
+      autofillUserIds$.next([]);
+      autofillService.collectPageDetailsFromTab$.mockReturnValue(of([pageDetail(1, 0)]));
+    });
+
+    it("abandons a page-load opportunity before it reads the page", async () => {
+      emitPageTransition(pageDetail(1, 0));
+      await flushPromises();
+
+      expectAbandoned();
+    });
+
+    it("abandons a command without selecting a cipher", async () => {
+      autofillOrchestrator.autofillActiveTabFromCommand(createChromeTabMock({ id: 1 }));
+      await flushPromises();
+
+      expect(fillCipherPolicy.nextCipherForUrl).not.toHaveBeenCalled();
+      expect(autofillService.doAutoFill).not.toHaveBeenCalled();
     });
   });
 });

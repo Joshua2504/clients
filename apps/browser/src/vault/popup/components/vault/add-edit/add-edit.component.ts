@@ -407,6 +407,9 @@ export class AddEditComponent implements OnInit, OnDestroy {
     }
 
     await BrowserApi.sendMessage("showLoginSavedNotification", {
+      // The account the cipher was just saved to, so "View" in the confirmation opens it there
+      // even when the active account changes before it is clicked.
+      userId: await firstValueFrom(this.userId$),
       cipherId: cipher.id,
       itemName: cipher.name,
       senderTabId: senderTab.id,

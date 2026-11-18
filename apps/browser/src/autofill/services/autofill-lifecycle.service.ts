@@ -1,5 +1,14 @@
-import { BehaviorSubject, concat, defer, firstValueFrom, Observable, Subject } from "rxjs";
 import {
+  BehaviorSubject,
+  combineLatest,
+  concat,
+  defer,
+  firstValueFrom,
+  Observable,
+  Subject,
+} from "rxjs";
+import {
+  distinctUntilChanged,
   filter,
   ignoreElements,
   map,
@@ -14,7 +23,9 @@ import {
 
 import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
 import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
+import { UserId } from "@bitwarden/common/types/guid";
 
 import { BrowserApi } from "../../platform/browser/browser-api";
 import { AutofillerCommand, AutofillLifecycleCommand } from "../enums/autofill-message.enums";
@@ -191,10 +202,30 @@ export class DefaultAutofillLifecycleService implements AutofillLifecycleService
     (message) => this.logService.error(message),
   );
 
+  /**
+   * Whether monitoring is warranted: the active account is signed in, locked or unlocked, or
+   * autofill serves an account. While no account has opted in to serve autofill beside the
+   * active one, the second condition implies the first, so this is the active account being
+   * signed in. See `multi-account.design.md`.
+   */
+  private readonly monitoringWarranted$: Observable<boolean>;
+
   constructor(
     private authService: AuthService,
     private logService: LogService,
-  ) {}
+    private autofillAccountsService: AutofillAccountsService,
+  ) {
+    this.monitoringWarranted$ = combineLatest([
+      this.authService.activeAccountStatus$,
+      this.autofillAccountsService.autofillUserIds$,
+    ]).pipe(
+      map(
+        ([status, autofillUserIds]) =>
+          status !== AuthenticationStatus.LoggedOut || autofillUserIds.length > 0,
+      ),
+      distinctUntilChanged(),
+    );
+  }
 
   /**
    * Wires the background listeners and reactive pipelines. The subscriptions
@@ -262,11 +293,9 @@ export class DefaultAutofillLifecycleService implements AutofillLifecycleService
       )
       .subscribe(this.liveTabs);
 
-    this.authService.activeAccountStatus$
+    this.monitoringWarranted$
       .pipe(startWith(undefined), pairwise())
-      .subscribe(([previousStatus, currentStatus]) =>
-        this.handleAuthStatusTransition(previousStatus, currentStatus),
-      );
+      .subscribe(([previous, current]) => this.handleMonitoringTransition(previous, current));
   }
 
   reportPageTransition(
@@ -291,6 +320,7 @@ export class DefaultAutofillLifecycleService implements AutofillLifecycleService
     frameId: number | undefined,
     frameUrl: string | undefined,
     workflow: AutomationWorkflow,
+    userIds: readonly UserId[],
   ) {
     const tabId = tab?.id;
     // A step-ready fact without a tab id or URL cannot target a secure operation downstream.
@@ -299,7 +329,16 @@ export class DefaultAutofillLifecycleService implements AutofillLifecycleService
     }
 
     // prevent shared rx consumers from mutating a shared message
-    this.stepReadyReports$.next(Object.freeze({ tab, tabId, frameId, frameUrl, workflow }));
+    this.stepReadyReports$.next(
+      Object.freeze({
+        tab,
+        tabId,
+        frameId,
+        frameUrl,
+        workflow,
+        userIds: Object.freeze([...userIds]),
+      }),
+    );
   }
 
   reportAutoSubmitFlowComplete(tabId: number | undefined, host: string | undefined) {
@@ -328,9 +367,9 @@ export class DefaultAutofillLifecycleService implements AutofillLifecycleService
   }
 
   /**
-   * Begins monitoring a freshly-injected frame: commands it to start when an
-   * account is logged in. Called by the injection path once a frame's scripts
-   * are in place.
+   * Begins monitoring a freshly-injected frame: commands it to start when the
+   * active account is logged in or autofill serves an account. Called by the
+   * injection path once a frame's scripts are in place.
    */
   async startMonitoringFrame(tab: chrome.tabs.Tab, frameId: number) {
     const tabId = tab.id;
@@ -341,15 +380,13 @@ export class DefaultAutofillLifecycleService implements AutofillLifecycleService
     // Re-check auth status in case a logout occurred between injection and the call
     //
     // FIXME: A race condition can still occur here. There is no happens-before
-    // relationship between an `activeAccountStatus$` logout emission and this
+    // relationship between a `monitoringWarranted$` logout emission and this
     // send. A logout landing just after this check triggers
-    // `handleAuthStatusTransition`, which stops connected ports. A frame whose
+    // `handleMonitoringTransition`, which stops connected ports. A frame whose
     // port hasn't yet registered can still slip through. This may be eliminated
     // by using rx to fully sequence script injections.
-    const accountIsLoggedIn =
-      (await firstValueFrom(this.authService.activeAccountStatus$)) !==
-      AuthenticationStatus.LoggedOut;
-    if (!accountIsLoggedIn) {
+    const monitoringWarranted = await firstValueFrom(this.monitoringWarranted$);
+    if (!monitoringWarranted) {
       this.logService.warning("Autofill monitoring disabled; the active account is logged out.");
       return;
     }
@@ -420,34 +457,29 @@ export class DefaultAutofillLifecycleService implements AutofillLifecycleService
 
   /**
    * Broadcasts monitor lifecycle commands to every currently-connected autofill
-   * content script when the active account's authentication status crosses the
-   * `LoggedOut` boundary. On `LoggedOut → logged-in`, sends `startAutofillMonitors`.
-   * On `logged-in → LoggedOut`, sends both `stopAutofillMonitors` and
-   * `disableAutofiller`. Lock and unlock transitions emit no broadcast — monitors
+   * content script when {@link monitoringWarranted$} changes: when the active
+   * account's authentication status crosses the `LoggedOut` boundary while autofill
+   * serves no account, or when autofill starts or stops serving an account while the
+   * active account is logged out. On the way in, sends `startAutofillMonitors`.
+   * On the way out, sends both `stopAutofillMonitors` and `disableAutofiller`.
+   * Lock and unlock transitions of the active account emit no broadcast — monitors
    * run across the lock boundary, and a running autofiller survives a lock.
    */
-  private handleAuthStatusTransition(
-    previousStatus: AuthenticationStatus | undefined,
-    currentStatus: AuthenticationStatus | undefined,
-  ) {
-    if (previousStatus === undefined || previousStatus === currentStatus) {
+  private handleMonitoringTransition(previous: boolean | undefined, current: boolean | undefined) {
+    if (previous === undefined || current === undefined || previous === current) {
       // The first emission paired with `startWith(undefined)` is not a
       // transition — it's the seed. Skip it so a service-worker boot into any
       // auth state is silent.
       return;
     }
-    const wasLoggedOut = previousStatus === AuthenticationStatus.LoggedOut;
-    const isLoggedOut = currentStatus === AuthenticationStatus.LoggedOut;
-    if (wasLoggedOut && !isLoggedOut) {
+    if (current) {
       this.broadcastToInjectedScripts({ command: AutofillLifecycleCommand.start });
       this.markConnectedFramesMonitoring(true);
       return;
     }
-    if (!wasLoggedOut && isLoggedOut) {
-      this.broadcastToInjectedScripts({ command: AutofillLifecycleCommand.stop });
-      this.broadcastToInjectedScripts({ command: AutofillerCommand.disable });
-      this.markConnectedFramesMonitoring(false);
-    }
+    this.broadcastToInjectedScripts({ command: AutofillLifecycleCommand.stop });
+    this.broadcastToInjectedScripts({ command: AutofillerCommand.disable });
+    this.markConnectedFramesMonitoring(false);
   }
 
   /**

@@ -39,6 +39,13 @@ export class Fido2CipherRowComponent {
   // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
   // eslint-disable-next-line @angular-eslint/prefer-signals
   @Input({ required: true }) title!: string;
+  /**
+   * Names the account the cipher belongs to. Given when the listed ciphers can belong to more
+   * than one account.
+   */
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-signals
+  @Input() accountLabel: string | undefined = undefined;
 
   protected selectCipher(c: CipherView) {
     this.onSelected.emit(c);

@@ -419,6 +419,10 @@ body * {
       letter-spacing: 0.2rem;
     }
 
+    &.cipher-account {
+      font-size: 1.2rem;
+    }
+
     &--passkey {
       display: flex;
       align-content: center;

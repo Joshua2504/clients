@@ -1,5 +1,5 @@
 import { mock, MockProxy } from "jest-mock-extended";
-import { BehaviorSubject, firstValueFrom, of, Subject } from "rxjs";
+import { BehaviorSubject, combineLatest, firstValueFrom, map, of, Subject } from "rxjs";
 
 import { CollectionService } from "@bitwarden/admin-console/common";
 import { OrganizationService } from "@bitwarden/common/admin-console/abstractions/organization/organization.service.abstraction";
@@ -9,6 +9,8 @@ import { AccountService } from "@bitwarden/common/auth/abstractions/account.serv
 import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
 import { AuthService } from "@bitwarden/common/auth/services/auth.service";
 import { ExtensionCommand } from "@bitwarden/common/autofill/constants";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
+import { AutofillSettingsServiceAbstraction } from "@bitwarden/common/autofill/services/autofill-settings.service";
 import { DomainSettingsService } from "@bitwarden/common/autofill/services/domain-settings.service";
 import { UserNotificationSettingsServiceAbstraction } from "@bitwarden/common/autofill/services/user-notification-settings.service";
 import { ProductTierType } from "@bitwarden/common/billing/enums";
@@ -27,6 +29,7 @@ import { ThemeStateService } from "@bitwarden/common/platform/theming/theme-stat
 import { mockAccountInfoWith } from "@bitwarden/common/spec";
 import { CipherId, UserId } from "@bitwarden/common/types/guid";
 import { ChangeLoginPasswordService } from "@bitwarden/common/vault/abstractions/change-login-password.service";
+import { CipherType } from "@bitwarden/common/vault/enums";
 import { CipherRepromptType } from "@bitwarden/common/vault/enums/cipher-reprompt-type";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 import { FolderView } from "@bitwarden/common/vault/models/view/folder.view";
@@ -42,6 +45,7 @@ import { FormData } from "../services/abstractions/autofill.service";
 import { CipherUse, FillCipherPolicy } from "../services/abstractions/fill-cipher-policy";
 import AutofillService from "../services/autofill.service";
 import { DefaultFillCipherPolicy } from "../services/default-fill-cipher-policy";
+import { DefaultMultiAccountFillCipherPolicy } from "../services/default-multi-account-fill-cipher-policy";
 import { createAutofillPageDetailsMock, createChromeTabMock } from "../spec/autofill-mocks";
 import {
   crossContextBoundary,
@@ -119,6 +123,13 @@ describe("NotificationBackground", () => {
       name: "Test User",
     }),
   });
+  // The accounts that serve autofill besides the active one. Empty unless a test opts one in.
+  let otherAutofillUserIds$: BehaviorSubject<UserId[]>;
+  /** The ciphers of the active account, as a notification names them. */
+  const cipherRefs = (...cipherIds: string[]) =>
+    cipherIds.map((cipherId) => ({ userId, cipherId }));
+  const autofillAccountsService = mock<AutofillAccountsService>();
+  const switchAccount = jest.fn();
 
   beforeEach(() => {
     intraprocessMessageSender = new IntraprocessMessageSender();
@@ -138,6 +149,24 @@ describe("NotificationBackground", () => {
       storedCipherPolicy.ciphersForUrl(...args),
     );
     fillCipherPolicy.canOfferSave.mockResolvedValue(true);
+    otherAutofillUserIds$ = new BehaviorSubject<UserId[]>([]);
+    // As `AutofillAccountsService` lists them: the active account while it is unlocked, then
+    // the others.
+    const autofillUserIds$ = combineLatest([
+      activeAccountSubject,
+      activeAccountStatusMock$,
+      otherAutofillUserIds$,
+    ]).pipe(
+      map(([activeAccount, status, others]) => [
+        ...(activeAccount && status === AuthenticationStatus.Unlocked ? [activeAccount.id] : []),
+        ...others,
+      ]),
+    );
+    (autofillAccountsService as any).autofillUserIds$ = autofillUserIds$;
+    autofillAccountsService.isAutofillUser$.mockImplementation((id) =>
+      autofillUserIds$.pipe(map((userIds) => userIds.includes(id))),
+    );
+    authService.authStatusFor$.mockReturnValue(of(AuthenticationStatus.Unlocked));
     notificationBackground = new NotificationBackground(
       accountService,
       authService,
@@ -160,7 +189,13 @@ describe("NotificationBackground", () => {
       intraprocessMessageSender,
       // Wired as `MainBackground` wires it, so ingest tagging is exercised rather than faked.
       new MessageListener(intraprocessMessageSender.messages$({ external$: externalMessages })),
-      fillCipherPolicy,
+      new DefaultMultiAccountFillCipherPolicy(
+        fillCipherPolicy,
+        autofillAccountsService,
+        mock<AutofillSettingsServiceAbstraction>(),
+      ),
+      autofillAccountsService,
+      switchAccount,
     );
   });
 
@@ -181,6 +216,7 @@ describe("NotificationBackground", () => {
         tab: createChromeTabMock(),
         expires: new Date(),
         wasVaultLocked: false,
+        userId,
         launchTimestamp: 0,
       };
       const cipherView = notificationBackground["convertAddLoginQueueMessageToCipherView"](message);
@@ -211,6 +247,7 @@ describe("NotificationBackground", () => {
         tab: createChromeTabMock(),
         expires: new Date(),
         wasVaultLocked: false,
+        userId,
         launchTimestamp: 0,
       };
       const cipherView = notificationBackground["convertAddLoginQueueMessageToCipherView"](
@@ -233,6 +270,7 @@ describe("NotificationBackground", () => {
         tab: createChromeTabMock(),
         expires: new Date(),
         wasVaultLocked: false,
+        userId,
         launchTimestamp: 0,
       };
       const cipherView = notificationBackground["convertAddLoginQueueMessageToCipherView"](message);
@@ -252,6 +290,7 @@ describe("NotificationBackground", () => {
         tab: createChromeTabMock(),
         expires: new Date(),
         wasVaultLocked: false,
+        userId,
         launchTimestamp: 0,
       };
       const cipherView = notificationBackground["convertAddLoginQueueMessageToCipherView"](message);
@@ -269,6 +308,7 @@ describe("NotificationBackground", () => {
         data: { username: "", password: "", uri: "" },
         expires: new Date(),
         wasVaultLocked: false,
+        userId,
         launchTimestamp: 0,
       });
 
@@ -313,7 +353,7 @@ describe("NotificationBackground", () => {
         ]),
       );
 
-      await expect(notificationBackground["getOrgData"]()).resolves.toEqual([
+      await expect(notificationBackground["getOrgData"](userId)).resolves.toEqual([
         { id: "enabledOrg", name: "On", productTierType: ProductTierType.Teams },
       ]);
     });
@@ -336,7 +376,7 @@ describe("NotificationBackground", () => {
         ]),
       );
 
-      await expect(notificationBackground["getOrgData"]()).resolves.toEqual([]);
+      await expect(notificationBackground["getOrgData"](userId)).resolves.toEqual([]);
     });
 
     it("returns every organization when all are enabled", async () => {
@@ -363,7 +403,7 @@ describe("NotificationBackground", () => {
         ]),
       );
 
-      await expect(notificationBackground["getOrgData"]()).resolves.toEqual([
+      await expect(notificationBackground["getOrgData"](userId)).resolves.toEqual([
         { id: "firstEnabledOrg", name: "FirstOrg", productTierType: ProductTierType.Teams },
         { id: "secondEnabledOrg", name: "SecondOrg", productTierType: ProductTierType.Families },
       ]);
@@ -584,6 +624,7 @@ describe("NotificationBackground", () => {
       let createNewTabSpy: jest.SpyInstance;
 
       beforeEach(() => {
+        activeAccountStatusMock$.next(AuthenticationStatus.Unlocked);
         changeLoginPasswordService.getChangePasswordUrl.mockReset();
         taskService.tasksEnabled$.mockReturnValue(of(true));
         taskService.pendingTasks$.mockReturnValue(of([]));
@@ -609,6 +650,7 @@ describe("NotificationBackground", () => {
           tabUrl,
           userId,
           CipherUse.SecurityTask,
+          undefined,
         );
         expect(changeLoginPasswordService.getChangePasswordUrl).toHaveBeenCalledWith(cipher);
         expect(createNewTabSpy).toHaveBeenCalledWith(
@@ -660,6 +702,7 @@ describe("NotificationBackground", () => {
           tabUrl,
           userId,
           CipherUse.SecurityTask,
+          undefined,
         );
         expect(createNewTabSpy).not.toHaveBeenCalled();
       });
@@ -1010,6 +1053,7 @@ describe("NotificationBackground", () => {
             formEntryData.uri,
             userId,
             CipherUse.SavePrompt,
+            undefined,
           );
 
           expect(pushChangePasswordToQueueSpy).not.toHaveBeenCalled();
@@ -1073,7 +1117,7 @@ describe("NotificationBackground", () => {
 
           expect(pushAddLoginToQueueSpy).not.toHaveBeenCalled();
           expect(pushChangePasswordToQueueSpy).toHaveBeenCalledWith(
-            ["cipher-id-1", "cipher-id-2"],
+            cipherRefs("cipher-id-1", "cipher-id-2"),
             mockFormattedURI,
             formEntryData.newPassword,
             sender.tab,
@@ -1166,7 +1210,7 @@ describe("NotificationBackground", () => {
 
           expect(pushAddLoginToQueueSpy).not.toHaveBeenCalled();
           expect(pushChangePasswordToQueueSpy).toHaveBeenCalledWith(
-            ["cipher-id-2"],
+            cipherRefs("cipher-id-2"),
             mockFormattedURI,
             formEntryData.newPassword,
             sender.tab,
@@ -1222,7 +1266,7 @@ describe("NotificationBackground", () => {
 
           expect(pushAddLoginToQueueSpy).not.toHaveBeenCalled();
           expect(pushChangePasswordToQueueSpy).toHaveBeenCalledWith(
-            ["cipher-id-3"],
+            cipherRefs("cipher-id-3"),
             mockFormattedURI,
             formEntryData.newPassword,
             sender.tab,
@@ -1318,7 +1362,7 @@ describe("NotificationBackground", () => {
 
           expect(pushAddLoginToQueueSpy).not.toHaveBeenCalled();
           expect(pushChangePasswordToQueueSpy).toHaveBeenCalledWith(
-            ["cipher-id-1"],
+            cipherRefs("cipher-id-1"),
             mockFormattedURI,
             formEntryData.newPassword,
             sender.tab,
@@ -1386,7 +1430,7 @@ describe("NotificationBackground", () => {
 
           expect(pushAddLoginToQueueSpy).not.toHaveBeenCalled();
           expect(pushChangePasswordToQueueSpy).toHaveBeenCalledWith(
-            ["cipher-id-3"],
+            cipherRefs("cipher-id-3"),
             mockFormattedURI,
             formEntryData.newPassword,
             sender.tab,
@@ -1522,7 +1566,7 @@ describe("NotificationBackground", () => {
 
           expect(pushAddLoginToQueueSpy).not.toHaveBeenCalled();
           expect(pushChangePasswordToQueueSpy).toHaveBeenCalledWith(
-            ["cipher-id-1"],
+            cipherRefs("cipher-id-1"),
             mockFormattedURI,
             formEntryData.newPassword,
             sender.tab,
@@ -1755,7 +1799,7 @@ describe("NotificationBackground", () => {
 
           expect(pushAddLoginToQueueSpy).not.toHaveBeenCalled();
           expect(pushChangePasswordToQueueSpy).toHaveBeenCalledWith(
-            ["cipher-id-2", "cipher-id-3"],
+            cipherRefs("cipher-id-2", "cipher-id-3"),
             mockFormattedURI,
             formEntryData.newPassword,
             sender.tab,
@@ -1878,7 +1922,7 @@ describe("NotificationBackground", () => {
 
           expect(pushAddLoginToQueueSpy).not.toHaveBeenCalled();
           expect(pushChangePasswordToQueueSpy).toHaveBeenCalledWith(
-            ["cipher-id-1", "cipher-id-2", "cipher-id-3"],
+            cipherRefs("cipher-id-1", "cipher-id-2", "cipher-id-3"),
             mockFormattedURI,
             formEntryData.password,
             sender.tab,
@@ -1961,7 +2005,7 @@ describe("NotificationBackground", () => {
 
           expect(pushAddLoginToQueueSpy).not.toHaveBeenCalled();
           expect(pushChangePasswordToQueueSpy).toHaveBeenCalledWith(
-            ["cipher-id-1", "cipher-id-2"],
+            cipherRefs("cipher-id-1", "cipher-id-2"),
             mockFormattedURI,
             formEntryData.password,
             sender.tab,
@@ -2017,7 +2061,7 @@ describe("NotificationBackground", () => {
 
           expect(pushAddLoginToQueueSpy).not.toHaveBeenCalled();
           expect(pushChangePasswordToQueueSpy).toHaveBeenCalledWith(
-            ["cipher-id-1", "cipher-id-2"],
+            cipherRefs("cipher-id-1", "cipher-id-2"),
             mockFormattedURI,
             formEntryData.password,
             sender.tab,
@@ -2225,7 +2269,7 @@ describe("NotificationBackground", () => {
 
           expect(pushAddLoginToQueueSpy).not.toHaveBeenCalled();
           expect(pushChangePasswordToQueueSpy).toHaveBeenCalledWith(
-            ["cipher-id-1", "cipher-id-2", "cipher-id-3"],
+            cipherRefs("cipher-id-1", "cipher-id-2", "cipher-id-3"),
             mockFormattedURI,
             formEntryData.newPassword,
             sender.tab,
@@ -2290,10 +2334,12 @@ describe("NotificationBackground", () => {
           "removeTabFromNotificationQueue",
         );
         const firstQueueMessage = mock<AddLoginQueueMessage>({
+          userId,
           tab: createChromeTabMock({ id: 1 }),
         });
         const secondQueueMessage = mock<AddLoginQueueMessage>({ tab });
         const thirdQueueMessage = mock<AddLoginQueueMessage>({
+          userId,
           tab: createChromeTabMock({ id: 3 }),
         });
         notificationBackground["notificationQueue"] = [
@@ -2402,6 +2448,7 @@ describe("NotificationBackground", () => {
           };
           notificationBackground["notificationQueue"] = [
             mock<AddLoginQueueMessage>({
+              userId,
               tab: createChromeTabMock({ id: 1 }),
             }),
           ];
@@ -2424,6 +2471,7 @@ describe("NotificationBackground", () => {
           };
           notificationBackground["notificationQueue"] = [
             mock<AddUnlockVaultQueueMessage>({
+              userId,
               tab,
               type: NotificationType.UnlockVault,
             }),
@@ -2447,6 +2495,7 @@ describe("NotificationBackground", () => {
           };
           notificationBackground["notificationQueue"] = [
             mock<AddLoginQueueMessage>({
+              userId,
               type: NotificationType.AddLogin,
               tab,
               domain: "another.com",
@@ -2468,10 +2517,11 @@ describe("NotificationBackground", () => {
             folder: "folder-id",
           };
           const queueMessage = mock<AddChangePasswordNotificationQueueMessage>({
+            userId,
             type: NotificationType.ChangePassword,
             tab,
             domain: "example.com",
-            data: { newPassword: "newPassword" },
+            data: { newPassword: "newPassword", cipherIds: [], cipherRefs: [] },
           });
           notificationBackground["notificationQueue"] = [queueMessage];
           const cipherView = mock<CipherView>({
@@ -2517,10 +2567,11 @@ describe("NotificationBackground", () => {
             folder: "folder-id",
           };
           const queueMessage = mock<AddChangePasswordNotificationQueueMessage>({
+            userId,
             type: NotificationType.ChangePassword,
             tab,
             domain: "example.com",
-            data: { newPassword: "newPassword" },
+            data: { newPassword: "newPassword", cipherIds: [], cipherRefs: [] },
           });
           notificationBackground["notificationQueue"] = [queueMessage];
           const cipherView = mock<CipherView>({
@@ -2594,10 +2645,11 @@ describe("NotificationBackground", () => {
             folder: "folder-id",
           };
           const queueMessage = mock<AddChangePasswordNotificationQueueMessage>({
+            userId,
             type: NotificationType.ChangePassword,
             tab,
             domain: "example.com",
-            data: { newPassword: "newPassword" },
+            data: { newPassword: "newPassword", cipherIds: [], cipherRefs: [] },
           });
           notificationBackground["notificationQueue"] = [queueMessage];
           const cipherView = mock<CipherView>({
@@ -2647,6 +2699,7 @@ describe("NotificationBackground", () => {
               domain: "example.com",
               data,
               wasVaultLocked: false,
+              userId,
             }),
           ];
           fillCipherPolicy.canOfferSave.mockResolvedValueOnce(false);
@@ -2677,8 +2730,9 @@ describe("NotificationBackground", () => {
               type: NotificationType.ChangePassword,
               tab,
               domain: "example.com",
-              data: { newPassword: "revealed" },
+              data: { newPassword: "revealed", cipherIds: [], cipherRefs: [] },
               wasVaultLocked: true,
+              userId,
             }),
           ];
           fillCipherPolicy.canOfferSave.mockResolvedValueOnce(false);
@@ -2714,6 +2768,7 @@ describe("NotificationBackground", () => {
               domain: "example.com",
               data,
               wasVaultLocked: false,
+              userId,
             }),
           ];
           createWithServerSpy.mockResolvedValueOnce(mock<CipherView>({ id: "testId" }));
@@ -2746,6 +2801,7 @@ describe("NotificationBackground", () => {
               uri: "https://example.com",
             },
             wasVaultLocked: true,
+            userId,
           });
           notificationBackground["notificationQueue"] = [queueMessage];
           const cipherView = mock<CipherView>({
@@ -2760,6 +2816,7 @@ describe("NotificationBackground", () => {
             queueMessage.data.uri,
             userId,
             CipherUse.SavePrompt,
+            undefined,
           );
           expect(updatePasswordSpy).toHaveBeenCalledWith(
             cipherView,
@@ -2781,10 +2838,11 @@ describe("NotificationBackground", () => {
             folder: "folder-id",
           };
           const queueMessage = mock<AddChangePasswordNotificationQueueMessage>({
+            userId,
             type: NotificationType.ChangePassword,
             tab,
             domain: "example.com",
-            data: { newPassword: "newPassword" },
+            data: { newPassword: "newPassword", cipherIds: [], cipherRefs: [] },
           });
           notificationBackground["notificationQueue"] = [queueMessage];
           const cipherView = mock<CipherView>();
@@ -2841,6 +2899,7 @@ describe("NotificationBackground", () => {
               uri: "https://example.com",
             },
             wasVaultLocked: false,
+            userId,
             launchTimestamp: Date.now(),
             expires: new Date(Date.now() + 10000),
           });
@@ -2885,6 +2944,7 @@ describe("NotificationBackground", () => {
               uri: "https://example.com",
             },
             wasVaultLocked: false,
+            userId,
             launchTimestamp: Date.now(),
             expires: new Date(Date.now() + 10000),
           });
@@ -2936,6 +2996,7 @@ describe("NotificationBackground", () => {
               uri: "https://example.com",
             },
             wasVaultLocked: false,
+            userId,
             launchTimestamp: Date.now(),
             expires: new Date(Date.now() + 10000),
           });
@@ -2976,10 +3037,11 @@ describe("NotificationBackground", () => {
             folder: "folder-id",
           };
           const queueMessage = mock<AddChangePasswordNotificationQueueMessage>({
+            userId,
             type: NotificationType.ChangePassword,
             tab,
             domain: "example.com",
-            data: { newPassword: "newPassword" },
+            data: { newPassword: "newPassword", cipherIds: [], cipherRefs: [] },
           });
           notificationBackground["notificationQueue"] = [queueMessage];
           const cipherView = mock<CipherView>({ reprompt: CipherRepromptType.None });
@@ -3016,6 +3078,7 @@ describe("NotificationBackground", () => {
         sender = mock<chrome.runtime.MessageSender>({ tab });
         notificationBackground["notificationQueue"] = [
           mock<AddLoginQueueMessage>({
+            userId,
             type: NotificationType.AddLogin,
             tab,
             domain: "example.com",
@@ -3067,9 +3130,11 @@ describe("NotificationBackground", () => {
         const message: NotificationBackgroundExtensionMessage = { command: "bgNeverSave" };
         notificationBackground["notificationQueue"] = [
           mock<AddLoginQueueMessage>({
+            userId,
             tab: createChromeTabMock({ id: 1 }),
           }),
           mock<AddLoginQueueMessage>({
+            userId,
             tab: createChromeTabMock({ id: 3 }),
           }),
         ];
@@ -3101,6 +3166,7 @@ describe("NotificationBackground", () => {
         const sender = mock<chrome.runtime.MessageSender>({ tab: secondaryTab });
         notificationBackground["notificationQueue"] = [
           mock<AddLoginQueueMessage>({
+            userId,
             type: NotificationType.AddLogin,
             tab,
             domain: "another.com",
@@ -3118,6 +3184,7 @@ describe("NotificationBackground", () => {
         const sender = mock<chrome.runtime.MessageSender>({ tab });
         const message: NotificationBackgroundExtensionMessage = { command: "bgNeverSave" };
         const firstNotification = mock<AddLoginQueueMessage>({
+          userId,
           type: NotificationType.AddLogin,
           tab,
           domain: "example.com",
@@ -3125,6 +3192,7 @@ describe("NotificationBackground", () => {
           data: { uri: "https://login.example.com/sign-in" },
         });
         const secondNotification = mock<AddLoginQueueMessage>({
+          userId,
           type: NotificationType.AddLogin,
           tab: createChromeTabMock({ id: 3 }),
           domain: "another.com",
@@ -3338,6 +3406,653 @@ describe("NotificationBackground", () => {
 
         expect(tabsQuerySpy).not.toHaveBeenCalled();
         expect(messagingService.send).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe("several accounts serving autofill", () => {
+    const otherUserId = "otherUserId" as UserId;
+    const url = "https://example.com/login";
+    let tab: chrome.tabs.Tab;
+    let sender: chrome.runtime.MessageSender;
+    let vaults: Record<string, CipherView[]>;
+    let tabSendMessageDataSpy: jest.SpyInstance;
+    let openUnlockPopoutSpy: jest.SpyInstance;
+    let openAddEditVaultItemPopoutSpy: jest.SpyInstance;
+
+    const login = (id: string, username: string, password: string) =>
+      ({
+        id,
+        name: id,
+        type: CipherType.Login,
+        edit: true,
+        reprompt: CipherRepromptType.None,
+        deletedDate: null,
+        login: { username, password },
+      }) as unknown as CipherView;
+
+    const formData = (
+      username: string,
+      password: string,
+      newPassword = "",
+    ): ModifyLoginCipherFormData => ({ uri: url, username, password, newPassword });
+
+    const queue = () => notificationBackground["notificationQueue"];
+
+    const saveCipher = async (message: Partial<NotificationBackgroundExtensionMessage> = {}) => {
+      sendMockExtensionMessage({ command: "bgSaveCipher", edit: false, ...message }, sender);
+      await flushPromises();
+    };
+
+    beforeEach(() => {
+      notificationBackground.init();
+      activeAccountStatusMock$.next(AuthenticationStatus.Unlocked);
+      otherAutofillUserIds$.next([otherUserId]);
+      vaults = { [userId]: [], [otherUserId]: [] };
+      cipherService.getAllDecryptedForUrl.mockImplementation(async (_url, id) => vaults[id]);
+      cipherService.getAllDecryptedForIds.mockImplementation(async (id, ids) =>
+        vaults[id].filter((cipher) => ids.includes(cipher.id)),
+      );
+      accountService.accounts$ = of({
+        [userId]: mockAccountInfoWith({ email: "test@example.com" }),
+        [otherUserId]: mockAccountInfoWith({ email: "other@example.com" }),
+      });
+      organizationService.organizations$.mockReturnValue(of([]));
+      environmentService.getEnvironment$.mockReturnValue(
+        of(new SelfHostedEnvironment({ base: "https://vault.example.org" })),
+      );
+      domainSettingsService.showFavicons$ = of(false);
+      taskService.tasksEnabled$.mockReturnValue(of(false));
+      tab = createChromeTabMock({ id: 1, url });
+      sender = mock<chrome.runtime.MessageSender>({ tab });
+      tabSendMessageDataSpy = jest.spyOn(BrowserApi, "tabSendMessageData").mockImplementation();
+      jest.spyOn(BrowserApi, "tabSendMessage").mockImplementation();
+      jest.spyOn(BrowserApi, "getTabFromCurrentWindow").mockResolvedValue(tab);
+      openUnlockPopoutSpy = jest
+        .spyOn(notificationBackground as any, "openUnlockPopout")
+        .mockImplementation();
+      openAddEditVaultItemPopoutSpy = jest
+        .spyOn(notificationBackground as any, "openAddEditVaultItemPopout")
+        .mockImplementation();
+    });
+
+    afterEach(() => {
+      cipherService.getAllDecryptedForUrl.mockReset();
+      cipherService.getAllDecryptedForIds.mockReset();
+      fillCipherPolicy.canOfferSave.mockReset();
+      policyService.policyAppliesToUser$.mockReturnValue(policyAppliesToUser$);
+    });
+
+    describe("a submitted login", () => {
+      it("gets no prompt when a non-active account holds it with the same password", async () => {
+        vaults[otherUserId] = [login("other-cipher", "frodo", "ring")];
+
+        const triggered = await notificationBackground.triggerCipherNotification(
+          formData("frodo", "ring"),
+          tab,
+        );
+
+        expect(triggered).toBe(false);
+        expect(queue()).toHaveLength(0);
+      });
+
+      it("gets no prompt when it is in both accounts and only one holds the same password", async () => {
+        vaults[userId] = [login("active-cipher", "frodo", "old")];
+        vaults[otherUserId] = [login("other-cipher", "frodo", "ring")];
+
+        const triggered = await notificationBackground.triggerCipherNotification(
+          formData("frodo", "ring"),
+          tab,
+        );
+
+        expect(triggered).toBe(false);
+        expect(queue()).toHaveLength(0);
+      });
+
+      it("gets a save prompt for the active account when no account holds it", async () => {
+        await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+
+        expect(queue()).toEqual([
+          expect.objectContaining({ type: NotificationType.AddLogin, userId }),
+        ]);
+      });
+    });
+
+    describe("a changed password", () => {
+      it("is queued for and saved to the non-active account that owns the cipher", async () => {
+        vaults[otherUserId] = [login("other-cipher", "frodo", "old")];
+
+        await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+
+        expect(queue()).toEqual([
+          expect.objectContaining({
+            type: NotificationType.ChangePassword,
+            userId: otherUserId,
+            data: {
+              cipherIds: ["other-cipher"],
+              cipherRefs: [{ userId: otherUserId, cipherId: "other-cipher" }],
+              newPassword: "ring",
+            },
+          }),
+        ]);
+
+        await saveCipher({ cipherId: "other-cipher" });
+
+        expect(cipherService.updateWithServer).toHaveBeenCalledTimes(1);
+        expect(cipherService.updateWithServer).toHaveBeenCalledWith(
+          expect.objectContaining({
+            id: "other-cipher",
+            login: { username: "frodo", password: "ring" },
+          }),
+          otherUserId,
+        );
+        expect(cipherService.createWithServer).not.toHaveBeenCalled();
+      });
+
+      it("offers the ciphers of both accounts, labelled, when the username is in both", async () => {
+        vaults[userId] = [login("active-cipher", "frodo", "old")];
+        vaults[otherUserId] = [login("other-cipher", "frodo", "older")];
+
+        await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+
+        expect(queue()[0].data).toEqual(
+          expect.objectContaining({
+            cipherRefs: [
+              { userId, cipherId: "active-cipher" },
+              { userId: otherUserId, cipherId: "other-cipher" },
+            ],
+          }),
+        );
+        await expect(notificationBackground.getNotificationCipherData()).resolves.toEqual([
+          expect.objectContaining({
+            id: "active-cipher",
+            userId,
+            accountLabel: "test@example.com",
+          }),
+          expect.objectContaining({
+            id: "other-cipher",
+            userId: otherUserId,
+            accountLabel: "other@example.com",
+          }),
+        ]);
+
+        await saveCipher({ cipherId: "other-cipher", userId: otherUserId });
+
+        expect(cipherService.updateWithServer).toHaveBeenCalledTimes(1);
+        expect(cipherService.updateWithServer).toHaveBeenCalledWith(
+          expect.objectContaining({ id: "other-cipher" }),
+          otherUserId,
+        );
+      });
+
+      it("refuses a cipher named with an account that does not hold it", async () => {
+        vaults[userId] = [login("active-cipher", "frodo", "old")];
+        vaults[otherUserId] = [login("other-cipher", "frodo", "older")];
+        await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+
+        await saveCipher({ cipherId: "other-cipher", userId });
+
+        expect(cipherService.updateWithServer).not.toHaveBeenCalled();
+      });
+
+      it("updates a shared item both accounts hold only in the account named with it", async () => {
+        vaults[userId] = [login("shared-cipher", "frodo", "old")];
+        vaults[otherUserId] = [login("shared-cipher", "frodo", "old")];
+        await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+
+        // The id alone names two ciphers. Neither is updated on a guess.
+        await saveCipher({ cipherId: "shared-cipher" });
+        expect(cipherService.updateWithServer).not.toHaveBeenCalled();
+
+        await saveCipher({ cipherId: "shared-cipher", userId: otherUserId });
+        expect(cipherService.updateWithServer).toHaveBeenCalledTimes(1);
+        expect(cipherService.updateWithServer).toHaveBeenCalledWith(
+          vaults[otherUserId][0],
+          otherUserId,
+        );
+        expect(vaults[userId][0].login.password).toBe("old");
+      });
+
+      it("offers only ciphers of accounts whose policy takes the update", async () => {
+        vaults[userId] = [login("active-cipher", "frodo", "old")];
+        vaults[otherUserId] = [login("other-cipher", "frodo", "older")];
+        fillCipherPolicy.canOfferSave.mockImplementation(async (_form, id) => id === userId);
+
+        await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+
+        expect(queue()[0].data).toEqual(
+          expect.objectContaining({ cipherRefs: [{ userId, cipherId: "active-cipher" }] }),
+        );
+      });
+
+      it("saves nothing when the owning account locks before the user updates", async () => {
+        vaults[otherUserId] = [login("other-cipher", "frodo", "old")];
+        await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+
+        otherAutofillUserIds$.next([]);
+        await saveCipher({ cipherId: "other-cipher" });
+
+        expect(cipherService.updateWithServer).not.toHaveBeenCalled();
+        expect(cipherService.createWithServer).not.toHaveBeenCalled();
+        expect(openUnlockPopoutSpy).not.toHaveBeenCalled();
+        expect(queue()).toHaveLength(0);
+        expect(tabSendMessageDataSpy).toHaveBeenCalledWith(tab, "closeNotificationBar", {
+          closedByUser: false,
+        });
+      });
+
+      it("updates the non-active account's cipher without unlocking the locked active account", async () => {
+        activeAccountStatusMock$.next(AuthenticationStatus.Locked);
+        vaults[otherUserId] = [login("other-cipher", "frodo", "old")];
+
+        await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+        expect(queue()).toEqual([
+          expect.objectContaining({
+            type: NotificationType.ChangePassword,
+            userId: otherUserId,
+            wasVaultLocked: false,
+          }),
+        ]);
+
+        await saveCipher({ cipherId: "other-cipher" });
+
+        expect(openUnlockPopoutSpy).not.toHaveBeenCalled();
+        expect(cipherService.updateWithServer).toHaveBeenCalledWith(
+          expect.objectContaining({ id: "other-cipher" }),
+          otherUserId,
+        );
+      });
+
+      it("makes the owning account the active one for a master password reprompt", async () => {
+        vaults[otherUserId] = [
+          { ...login("other-cipher", "frodo", "old"), reprompt: CipherRepromptType.Password },
+        ] as CipherView[];
+        await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+
+        await saveCipher({ cipherId: "other-cipher" });
+
+        expect(switchAccount).toHaveBeenCalledWith(otherUserId);
+        expect(autofillService.isPasswordRepromptRequired).toHaveBeenCalledWith(
+          expect.objectContaining({ id: "other-cipher" }),
+          tab,
+          otherUserId,
+          "update-password",
+        );
+        expect(cipherService.updateWithServer).not.toHaveBeenCalled();
+
+        await notificationBackground.handleCipherUpdateRepromptResponse({
+          command: "bgHandleReprompt",
+          tab,
+          cipherId: "other-cipher",
+          success: true,
+        });
+
+        expect(cipherService.updateWithServer).toHaveBeenCalledWith(
+          expect.objectContaining({ id: "other-cipher" }),
+          otherUserId,
+        );
+      });
+    });
+
+    describe("the unlock prompt", () => {
+      beforeEach(() => {
+        activeAccountStatusMock$.next(AuthenticationStatus.Locked);
+      });
+
+      it("stays with the locked active account when no serving account holds the login", async () => {
+        vaults[otherUserId] = [login("other-cipher", "sam", "potatoes")];
+
+        await notificationBackground.triggerCipherNotification(
+          formData("frodo", "old", "ring"),
+          tab,
+        );
+
+        expect(queue()).toEqual([
+          expect.objectContaining({
+            type: NotificationType.ChangePassword,
+            userId,
+            wasVaultLocked: true,
+            data: { cipherIds: [], cipherRefs: [], newPassword: "ring" },
+          }),
+        ]);
+      });
+
+      it("never offers a serving account a new login meant for the locked active account", async () => {
+        await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+
+        expect(queue()).toHaveLength(0);
+      });
+    });
+
+    describe("a save prompt", () => {
+      const activeFolder = { id: "active-folder", name: "Active" } as FolderView;
+      const otherFolder = { id: "other-folder", name: "Other" } as FolderView;
+
+      beforeEach(async () => {
+        folderService.folderViews$.mockImplementation((id) =>
+          of(id === otherUserId ? [otherFolder] : [activeFolder]),
+        );
+        policyService.policyAppliesToUser$.mockImplementation((_policy, id) =>
+          of(id === otherUserId),
+        );
+        await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+      });
+
+      it("offers the accounts that serve autofill, the active account selected", async () => {
+        await expect(notificationBackground["getAccountData"](sender)).resolves.toEqual([
+          { id: userId, email: "test@example.com", selected: true, removeIndividualVault: false },
+          {
+            id: otherUserId,
+            email: "other@example.com",
+            selected: false,
+            removeIndividualVault: true,
+          },
+        ]);
+      });
+
+      it("offers no choice while a single account serves autofill", async () => {
+        otherAutofillUserIds$.next([]);
+
+        await expect(notificationBackground["getAccountData"](sender)).resolves.toEqual([]);
+      });
+
+      it("does not offer an account whose policy does not take the login", async () => {
+        fillCipherPolicy.canOfferSave.mockImplementation(async (_form, id) => id === userId);
+
+        await expect(notificationBackground["getAccountData"](sender)).resolves.toEqual([]);
+        await expect(
+          notificationBackground["selectAccount"](
+            { command: "bgSelectAccount", userId: otherUserId },
+            sender,
+          ),
+        ).resolves.toBe(false);
+        expect(queue()[0].userId).toBe(userId);
+      });
+
+      it("defaults to the first account whose policy takes the login", async () => {
+        fillCipherPolicy.canOfferSave.mockImplementation(async (_form, id) => id === otherUserId);
+
+        await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+
+        expect(queue()).toEqual([
+          expect.objectContaining({ type: NotificationType.AddLogin, userId: otherUserId }),
+        ]);
+      });
+
+      it("saves to the active account unless another is picked", async () => {
+        await saveCipher({ folder: "active-folder" });
+
+        expect(cipherService.createWithServer).toHaveBeenCalledTimes(1);
+        expect(cipherService.createWithServer).toHaveBeenCalledWith(
+          expect.objectContaining({ folderId: "active-folder" }),
+          userId,
+        );
+      });
+
+      it("reads the folders of, and saves to, the account the user picks", async () => {
+        await expect(
+          notificationBackground["selectAccount"](
+            { command: "bgSelectAccount", userId: otherUserId },
+            sender,
+          ),
+        ).resolves.toBe(true);
+
+        await expect(
+          notificationBackground["getFolderData"](
+            await notificationBackground["dataAccountFor"](sender),
+          ),
+        ).resolves.toEqual([otherFolder]);
+        await expect(notificationBackground["getAccountData"](sender)).resolves.toEqual([
+          expect.objectContaining({ id: userId, selected: false }),
+          expect.objectContaining({ id: otherUserId, selected: true }),
+        ]);
+
+        // A folder of the account that was left does not exist in the picked one.
+        await saveCipher({ folder: "active-folder" });
+
+        expect(cipherService.createWithServer).toHaveBeenCalledTimes(1);
+        expect(cipherService.createWithServer).toHaveBeenCalledWith(
+          expect.objectContaining({ folderId: undefined }),
+          otherUserId,
+        );
+      });
+
+      it("refuses an account that is not one of the offered", async () => {
+        await expect(
+          notificationBackground["selectAccount"](
+            { command: "bgSelectAccount", userId: "strangerId" },
+            sender,
+          ),
+        ).resolves.toBe(false);
+        expect(queue()[0].userId).toBe(userId);
+      });
+
+      it("saves nothing when the picked account locks before the user saves", async () => {
+        await notificationBackground["selectAccount"](
+          { command: "bgSelectAccount", userId: otherUserId },
+          sender,
+        );
+
+        otherAutofillUserIds$.next([]);
+        await saveCipher();
+
+        expect(cipherService.createWithServer).not.toHaveBeenCalled();
+        expect(openUnlockPopoutSpy).not.toHaveBeenCalled();
+        expect(queue()).toHaveLength(0);
+        expect(tabSendMessageDataSpy).toHaveBeenCalledWith(tab, "closeNotificationBar", {
+          closedByUser: false,
+        });
+      });
+
+      it("is not shown again once its account stopped serving autofill", async () => {
+        await notificationBackground["selectAccount"](
+          { command: "bgSelectAccount", userId: otherUserId },
+          sender,
+        );
+        otherAutofillUserIds$.next([]);
+        tabSendMessageDataSpy.mockClear();
+
+        await notificationBackground.checkNotificationQueue(tab);
+
+        expect(queue()).toHaveLength(0);
+        expect(tabSendMessageDataSpy).not.toHaveBeenCalledWith(
+          tab,
+          "openNotificationBar",
+          expect.anything(),
+        );
+      });
+
+      it("makes the picked account the active one before the edit popout opens", async () => {
+        await notificationBackground["selectAccount"](
+          { command: "bgSelectAccount", userId: otherUserId },
+          sender,
+        );
+
+        await saveCipher({ edit: true });
+
+        expect(switchAccount).toHaveBeenCalledWith(otherUserId);
+        expect(cipherService.setAddEditCipherInfo).toHaveBeenCalledWith(
+          expect.anything(),
+          otherUserId,
+        );
+        expect(openAddEditVaultItemPopoutSpy).toHaveBeenCalled();
+        expect(cipherService.createWithServer).not.toHaveBeenCalled();
+      });
+
+      it("does not switch accounts for a save to the active account", async () => {
+        await saveCipher({ edit: true });
+
+        expect(switchAccount).not.toHaveBeenCalled();
+        expect(cipherService.setAddEditCipherInfo).toHaveBeenCalledWith(expect.anything(), userId);
+      });
+    });
+
+    describe("a login saved from the inline menu", () => {
+      const activeAccount = activeAccountSubject.value;
+      let openViewVaultItemPopoutSpy: jest.SpyInstance;
+
+      const showSaved = async (message: Partial<NotificationBackgroundExtensionMessage> = {}) => {
+        sendMockExtensionMessage({
+          command: "showLoginSavedNotification",
+          senderTabId: tab.id,
+          cipherId: "saved-cipher",
+          itemName: "Saved",
+          userId,
+          ...message,
+        });
+        await flushPromises();
+      };
+
+      const view = async () => {
+        sendMockExtensionMessage(
+          { command: "bgOpenViewVaultItemPopout", cipherId: "saved-cipher" },
+          sender,
+        );
+        await flushPromises();
+      };
+
+      beforeEach(() => {
+        jest.spyOn(BrowserApi, "getTab").mockResolvedValue(tab);
+        openViewVaultItemPopoutSpy = jest
+          .spyOn(notificationBackground as any, "openViewVaultItemPopout")
+          .mockImplementation();
+      });
+
+      afterEach(() => {
+        activeAccountSubject.next(activeAccount);
+      });
+
+      it("confirms the save on the tab it was made from", async () => {
+        await showSaved();
+
+        expect(tabSendMessageDataSpy).toHaveBeenCalledWith(
+          tab,
+          "openNotificationBar",
+          expect.objectContaining({
+            isConfirmation: true,
+            confirmationData: { cipherId: "saved-cipher", itemName: "Saved" },
+          }),
+        );
+      });
+
+      it("is not confirmed without the account it was saved to", async () => {
+        await showSaved({ userId: undefined });
+
+        expect(tabSendMessageDataSpy).not.toHaveBeenCalledWith(
+          tab,
+          "openNotificationBar",
+          expect.anything(),
+        );
+      });
+
+      it("views the cipher without a switch while its account is still active", async () => {
+        await showSaved();
+
+        await view();
+
+        expect(switchAccount).not.toHaveBeenCalled();
+        expect(openViewVaultItemPopoutSpy).toHaveBeenCalledWith(tab, {
+          cipherId: "saved-cipher",
+          action: "",
+        });
+      });
+
+      it("views the cipher in the account it was saved to after the active account changed", async () => {
+        await showSaved();
+        activeAccountSubject.next({ ...activeAccount, id: otherUserId });
+        otherAutofillUserIds$.next([userId]);
+
+        await view();
+
+        expect(switchAccount).toHaveBeenCalledWith(userId);
+        expect(openViewVaultItemPopoutSpy).toHaveBeenCalled();
+      });
+
+      it("opens nothing once the account it was saved to no longer serves autofill", async () => {
+        await showSaved();
+        activeAccountSubject.next({ ...activeAccount, id: otherUserId });
+        otherAutofillUserIds$.next([]);
+
+        await view();
+
+        expect(switchAccount).not.toHaveBeenCalled();
+        expect(openViewVaultItemPopoutSpy).not.toHaveBeenCalled();
+        expect(tabSendMessageDataSpy).toHaveBeenCalledWith(tab, "closeNotificationBar", {
+          fadeOutNotification: false,
+        });
+      });
+    });
+
+    describe("an at-risk password", () => {
+      const task = {
+        id: "task-id",
+        cipherId: "other-cipher",
+        organizationId: "org-id",
+        type: SecurityTaskType.UpdateAtRiskCredential,
+        status: SecurityTaskStatus.Pending,
+      } as SecurityTask;
+
+      beforeEach(() => {
+        vaults[otherUserId] = [login("other-cipher", "frodo", "ring")];
+        taskService.tasksEnabled$.mockReturnValue(of(true));
+        taskService.pendingTasks$.mockImplementation((id) => of(id === otherUserId ? [task] : []));
+        organizationService.organizations$.mockImplementation((id) =>
+          of(id === otherUserId ? [{ id: "org-id", name: "The Shire" } as Organization] : []),
+        );
+        changeLoginPasswordService.getChangePasswordUrl.mockResolvedValue(
+          "https://example.com/.well-known/change-password",
+        );
+      });
+
+      it("is notified for the non-active account that owns the task", async () => {
+        const triggered = await notificationBackground.triggerAtRiskPasswordNotification(
+          formData("frodo", "ring"),
+          tab,
+        );
+
+        expect(triggered).toBe(true);
+        expect(queue()).toEqual([
+          expect.objectContaining({
+            type: NotificationType.AtRiskPassword,
+            userId: otherUserId,
+            data: { hasPasswordChangeUri: true, organizationName: "The Shire" },
+          }),
+        ]);
+      });
+
+      it("is not notified for a task of another account on the same shared item", async () => {
+        vaults[userId] = [login("other-cipher", "frodo", "ring")];
+        vaults[otherUserId] = [];
+
+        const triggered = await notificationBackground.triggerAtRiskPasswordNotification(
+          formData("frodo", "ring"),
+          tab,
+        );
+
+        expect(triggered).toBe(false);
+        expect(queue()).toHaveLength(0);
+      });
+
+      it("opens the change-password URL of the cipher in the account that owns the task", async () => {
+        vaults[userId] = [login("active-cipher", "frodo", "ring")];
+        const createNewTabSpy = jest
+          .spyOn(BrowserApi, "createNewTab")
+          .mockResolvedValue(null as any);
+        await notificationBackground.triggerAtRiskPasswordNotification(
+          formData("frodo", "ring"),
+          tab,
+        );
+        changeLoginPasswordService.getChangePasswordUrl.mockClear();
+
+        sendMockExtensionMessage({ command: "bgOpenChangePasswordUrl" }, sender);
+        await flushPromises();
+
+        expect(changeLoginPasswordService.getChangePasswordUrl).toHaveBeenCalledWith(
+          vaults[otherUserId][0],
+        );
+        expect(createNewTabSpy).toHaveBeenCalledWith(
+          "https://example.com/.well-known/change-password",
+        );
       });
     });
   });

@@ -39,6 +39,7 @@ describe("NoopAutofillLifecycleService", () => {
           0,
           "https://example.test",
           AutomationWorkflow.autoSubmitLogin,
+          [],
         ),
     ],
     ["reportAutoSubmitFlowComplete", () => service.reportAutoSubmitFlowComplete(1, "example.test")],

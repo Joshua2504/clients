@@ -54,20 +54,32 @@ export function feedTransitionBuffer(
 
 /**
  * The `enabled$` signal for a `TransitionBuffer`, from `accountEvents$`: `true` while the active
- * account is signed in, whether locked or unlocked; `false` otherwise.
+ * account is signed in, whether locked or unlocked, or autofill serves an account; `false`
+ * otherwise.
  *
  * Its first value comes at `bootstrapped` and is the starting state, `false` included, so the
  * buffer can tell a start with nobody signed in from a later sign-in. After that it emits only
- * when the value flips, or for a lock of the active account or a switch while enabled, which emit
- * `false` then `true` synchronously: the buffer discards what it gathered before and keeps
- * gathering after. Nothing between this operator and the buffer may collapse the pair with
- * `distinctUntilChanged`.
+ * when the value flips, or when an account that could have served what the buffer holds can no
+ * longer do so while it stays enabled. That emits `false` then `true` synchronously: the buffer
+ * discards what it gathered before and keeps gathering after. Nothing between this operator and
+ * the buffer may collapse the pair with `distinctUntilChanged`. The pair is emitted for:
+ *
+ * - a lock of the active account, or of another account autofill serves;
+ * - a logout of an account autofill serves, or of the active account while another serves;
+ * - a switch, unless the account it leaves keeps serving autofill;
+ * - an account that stops serving autofill for any other reason, such as opting out.
+ *
+ * A change the sources report separately, such as a lock and the `autofillStop` it causes,
+ * emits one pair, whichever arrives first. Without `autofillStart` and `autofillStop` events
+ * this follows the active account alone.
  */
 export function bufferEnabled(): OperatorFunction<AccountEvent, boolean> {
   return (event$) =>
     defer(() => {
       let active: UserId | null = null;
       const signedIn = new Set<UserId>();
+      // the accounts autofill serves, less those a lock or logout has already been handled for
+      const serving = new Set<UserId>();
       let bootstrapped = false;
       let enabled = false;
 
@@ -78,21 +90,30 @@ export function bufferEnabled(): OperatorFunction<AccountEvent, boolean> {
         }
 
         const wasEnabled = enabled;
+        // whether an account that could have served what the buffer holds no longer can
+        let cleared = false;
         if (event.kind === AccountEventKind.Login) {
           signedIn.add(event.userId);
         } else if (event.kind === AccountEventKind.Logout) {
           signedIn.delete(event.userId);
+          cleared = serving.delete(event.userId) || event.userId === active;
+        } else if (event.kind === AccountEventKind.Lock) {
+          cleared = serving.delete(event.userId) || event.userId === active;
         } else if (event.kind === AccountEventKind.Switch) {
+          // the account left behind keeps what it gathered while it keeps serving
+          cleared = event.from === null || !serving.has(event.from);
           active = event.to;
+        } else if (event.kind === AccountEventKind.AutofillStart) {
+          serving.add(event.userId);
+        } else if (event.kind === AccountEventKind.AutofillStop) {
+          // the active account stops serving by a lock or a logout, which report it themselves
+          cleared = serving.delete(event.userId) && event.userId !== active;
         }
-        enabled = active !== null && signedIn.has(active);
+        enabled = (active !== null && signedIn.has(active)) || serving.size > 0;
 
         if (!bootstrapped) {
           return [];
         }
-        const cleared =
-          event.kind === AccountEventKind.Switch ||
-          (event.kind === AccountEventKind.Lock && event.userId === active);
         if (cleared && wasEnabled && enabled) {
           return [false, true];
         }

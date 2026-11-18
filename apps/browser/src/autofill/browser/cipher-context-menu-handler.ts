@@ -1,15 +1,18 @@
 import { firstValueFrom } from "rxjs";
 
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
-import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
-import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
-import { getOptionalUserId } from "@bitwarden/common/auth/services/account.service";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
+import {
+  AccountCipher,
+  accountCipherKey,
+  accountCipherRef,
+} from "@bitwarden/common/autofill/types/account-cipher";
 import { Utils } from "@bitwarden/common/platform/misc/utils";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
 import { CipherType } from "@bitwarden/common/vault/enums";
-import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 
-import { CipherUse, FillCipherPolicy } from "../services/abstractions/fill-cipher-policy";
+import { CipherUse } from "../services/abstractions/fill-cipher-policy";
+import { MultiAccountFillCipherPolicy } from "../services/abstractions/multi-account-fill-cipher-policy";
 import { AutofillCipherTypeId } from "../types";
 
 import { MainContextMenuHandler } from "./main-context-menu-handler";
@@ -17,10 +20,10 @@ import { MainContextMenuHandler } from "./main-context-menu-handler";
 export class CipherContextMenuHandler {
   constructor(
     private mainContextMenuHandler: MainContextMenuHandler,
-    private authService: AuthService,
+    private autofillAccountsService: AutofillAccountsService,
     private cipherService: CipherService,
     private accountService: AccountService,
-    private fillCipherPolicy: FillCipherPolicy,
+    private fillCipherPolicy: MultiAccountFillCipherPolicy,
   ) {}
 
   async update(url: string, currentUriIsBlocked: boolean = false) {
@@ -28,9 +31,11 @@ export class CipherContextMenuHandler {
       return;
     }
 
-    const authStatus = await this.authService.getAuthStatus();
+    // The cipher entries depend on the accounts autofill serves. With none, the menu offers
+    // to unlock or log in instead.
+    const autofillUserIds = await firstValueFrom(this.autofillAccountsService.autofillUserIds$);
     await MainContextMenuHandler.removeAll();
-    if (authStatus !== AuthenticationStatus.Unlocked) {
+    if (autofillUserIds.length === 0) {
       // Should I pass in the auth status or even have two separate methods for this
       // on MainContextMenuHandler
       await this.mainContextMenuHandler.noAccess();
@@ -42,25 +47,14 @@ export class CipherContextMenuHandler {
       return;
     }
 
-    const activeUserId = await firstValueFrom(
-      this.accountService.activeAccount$.pipe(getOptionalUserId),
-    );
-    if (activeUserId == null) {
-      return;
-    }
+    const ciphers = await this.fillCipherPolicy.ciphersForUrl(url, CipherUse.UserFill, {
+      includeOtherTypes: [CipherType.Card, CipherType.Identity],
+    });
+    ciphers.sort((a, b) => this.cipherService.sortCiphersByLastUsedThenName(a.cipher, b.cipher));
 
-    const ciphers = await this.fillCipherPolicy.ciphersForUrl(
-      url,
-      activeUserId,
-      CipherUse.UserFill,
-      {
-        includeOtherTypes: [CipherType.Card, CipherType.Identity],
-      },
-    );
-    ciphers.sort((a, b) => this.cipherService.sortCiphersByLastUsedThenName(a, b));
-
-    const groupedCiphers: Record<AutofillCipherTypeId, CipherView[]> = ciphers.reduce(
-      (ciphersByType, cipher) => {
+    const groupedCiphers: Record<AutofillCipherTypeId, AccountCipher[]> = ciphers.reduce(
+      (ciphersByType, accountCipher) => {
+        const { cipher } = accountCipher;
         if (!cipher?.type) {
           return ciphersByType;
         }
@@ -69,7 +63,7 @@ export class CipherContextMenuHandler {
 
         return {
           ...ciphersByType,
-          [cipher.type]: [...existingCiphersOfType, cipher],
+          [cipher.type]: [...existingCiphersOfType, accountCipher],
         };
       },
       {
@@ -94,8 +88,11 @@ export class CipherContextMenuHandler {
       await this.mainContextMenuHandler.noCards();
     }
 
-    for (const cipher of ciphers) {
-      await this.updateForCipher(cipher);
+    // An entry shows its account once more than one account serves, so the user can tell
+    // which vault a cipher comes from.
+    const accountLabels = autofillUserIds.length > 1 ? await this.accountLabels() : undefined;
+    for (const accountCipher of ciphers) {
+      await this.updateForCipher(accountCipher, accountLabels?.get(accountCipher.userId));
     }
 
     if (currentUriIsBlocked) {
@@ -103,7 +100,20 @@ export class CipherContextMenuHandler {
     }
   }
 
-  private async updateForCipher(cipher: CipherView) {
+  /** What a menu entry shows for each account: its email. */
+  private async accountLabels(): Promise<Map<string, string>> {
+    const accounts = await firstValueFrom(this.accountService.accounts$);
+    return new Map(Object.entries(accounts).map(([userId, account]) => [userId, account.email]));
+  }
+
+  /**
+   * Adds the menu entries of one cipher. The entry id names the cipher and the account that
+   * owns it, since a shared item has the same cipher id in every member's vault.
+   *
+   * @param accountLabel Shown after the title when more than one account serves.
+   */
+  private async updateForCipher(accountCipher: AccountCipher, accountLabel?: string) {
+    const { cipher, userId } = accountCipher;
     if (
       cipher == null ||
       !new Set([CipherType.Login, CipherType.Card, CipherType.Identity] as CipherType[]).has(
@@ -123,6 +133,15 @@ export class CipherContextMenuHandler {
       title += ` ${cipher.card.subTitle}`;
     }
 
-    await this.mainContextMenuHandler.loadOptions(title, cipher.id, cipher);
+    if (accountLabel) {
+      title += ` \u2014 ${accountLabel}`;
+    }
+
+    await this.mainContextMenuHandler.loadOptions(
+      title,
+      accountCipherKey(accountCipherRef(accountCipher)),
+      cipher,
+      userId,
+    );
   }
 }

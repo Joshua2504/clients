@@ -171,7 +171,10 @@ export class AppComponent implements OnInit, OnDestroy {
           if (msg.command === "doneLoggingOut") {
             // TODO: PM-8544 - why do we call logout in the popup after receiving the doneLoggingOut message? Hasn't this already completed logout?
             this.authService.logOut(async () => {
-              if (msg.logoutReason) {
+              // An account other than the one the popup shows was logged out in the background
+              // (`loggedOutActiveAccount === false`): the "logged out" toast would read as if the
+              // account in view had been logged out, so it is not shown.
+              if (msg.logoutReason && msg.loggedOutActiveAccount !== false) {
                 await this.displayLogoutReason(msg.logoutReason);
               }
             });

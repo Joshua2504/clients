@@ -145,7 +145,7 @@ The browser's raw signals are noisier than the facts the events assert, so deliv
 - **Exactly one event per genuine change.** A signal that restates a fact autofill already holds produces no event. A redundant event carries no information, and the machine ignores one rather than letting it cancel a running settle or cool-down.
 - **Events reach only the tabs they concern.** A change of focused window is at most two events: blur for the previously focused window's active tab and focus for the newly focused window's active tab. Every other tab, in either window, receives nothing. A tab that is not its window's active tab has no focus to gain or lose.
 
-Login and logout read the extension as a whole, not the active account: the question is whether anyone is signed in. Locking, unlocking, switching between signed-in accounts, and the active account logging out while another stays signed in change no tab's state.
+Login and logout read the extension as a whole, not the active account: the question is whether anyone is signed in. An account that serves autofill is signed in, so the autofill accounts never extend this reduction. Locking, unlocking, switching between signed-in accounts, and the active account logging out while another stays signed in change no tab's state.
 
 When autofill receives a signal it cannot interpret against what it knows, such as a window it has no record of, it asks the browser for the current windows and their active tabs rather than guessing. A report that no window is focused is confirmed this way before it becomes a blur, because some platforms report it spuriously in the middle of a switch between two windows.
 
@@ -162,13 +162,13 @@ A resolved transition leaves the module as a signal that this frame has reached 
 
 A page-lifecycle monitor watches for the moments a page becomes ready to act on — its load, and the navigations that follow — and reports each as a transition. It does not examine field data and is **not** an `AutofillMonitor`. The autofiller is the monitor of this lifecycle. The browser surfaces no reliable signal for single-page-app navigation, so the autofiller synthesizes these transitions itself: it polls for URL changes, and each change it sees is a transition. Like the tab lifecycle's thermal states, a page transition is a virtual state autofill maintains, not a fact the browser hands it.
 
-The autofiller reports each transition to the autofill lifecycle module with the `pageTransitionDetected` message. That message is the contract between the page-lifecycle monitor and the background, and it asserts one thing: the document that sent it has markedly changed or replaced its content. **A transition belongs to the document that sent it.** The background identifies that document by the identity the browser assigns it, never by a URL the page reports. A URL change is how the autofiller notices a transition; it is not the transition's identity. Each transition is also attributed to the account that is active when the background receives it.
+The autofiller reports each transition to the autofill lifecycle module with the `pageTransitionDetected` message. That message is the contract between the page-lifecycle monitor and the background, and it asserts one thing: the document that sent it has markedly changed or replaced its content. **A transition belongs to the document that sent it.** The background identifies that document by the identity the browser assigns it, never by a URL the page reports. A URL change is how the autofiller notices a transition; it is not the transition's identity. Each transition is also attributed to the [autofill accounts](./multi-account.design.md#autofill-accounts) at the time the background receives it: the active account when it is unlocked, and every other unlocked account that has opted in.
 
 Reporting is one-directional. The monitor states that a transition happened; it does not consult monitoring state, settings, or auth status, and it does not decide whether a fill should follow. Those are the background's decisions, made at a single evaluation point (see [Buffering transitions](#buffering-transitions)). This keeps the page-lifecycle monitor simple and lets new transition producers feed the same point without each re-deriving policy.
 
 The autofiller's content-script lifecycle is asymmetric in the following respects:
 
-- **Injection-gated start.** A page load injects a fresh autofiller only when the autofill-on-page-load setting is enabled and the vault is unlocked. Locked or logged-out users get no fresh autofiller on a navigation; injection itself is the authorization gate.
+- **Injection-gated start.** A page load injects a fresh autofiller only when there is an autofill account and the autofill-on-page-load setting is enabled for every one of them: one autofiller serves them all, so the stricter setting wins. Locked or logged-out users get no fresh autofiller on a navigation; injection itself is the authorization gate.
 - **Survives lock and account switch.** When a lock or an account switch leaves the extension running, a running autofiller keeps polling through it, and the background keeps admitting its reports (see [Buffering transitions](#buffering-transitions)). When a lock reloads the extension, the reload ends the autofiller's extension context (see terminal teardown, below). Only the extension logging out disables a running autofiller.
 - **Message-driven disable on logout.** When the extension logs out, any running autofiller halts on receipt of the `disable autofiller` message. It stops polling and cancels any pending work through the same cleanup it runs on extension context loss, so disable and context-loss teardown share a single path.
 - **Terminal teardown on context loss.** On extension context loss the autofiller disposes permanently.
@@ -189,10 +189,13 @@ Reconciliation reads the reporting tab's lifecycle state (see [The tab lifecycle
 
 A transition stays actionable for a bounded time from its report, a tuned value. One that outlives the bound is dropped wherever it is: buffered, restored after a restart, or resolved and waiting to fill. A page loaded long ago therefore never fills when its tab is finally viewed.
 
-The buffer follows the active account:
+The buffer follows the accounts that can serve what it holds: the active account and the other autofill accounts.
 
-- **When the active account logs out,** the buffer is cleared and admission ends; reports that arrive afterwards are not kept. Clearing at logout keeps one session from leaking into another. Admission resumes once the active account is a signed-in account again, whether by a login or by a switch.
-- **When the active account locks, or the active account changes,** the buffer is cleared and admission continues. The user's session with the vault has ended, so nothing buffered before it carries forward. A transition reported afterwards is still a fact about the page, so it is kept, and whether it fills is autofill's decision when the opportunity resolves (see [`autofill.design.md`](./autofill.design.md#autofill-on-page-load)).
+- **When the active account logs out while no other account serves autofill,** the buffer is cleared and admission ends; reports that arrive afterwards are not kept. Clearing at logout keeps one session from leaking into another. Admission resumes once the active account is a signed-in account again, whether by a login or by a switch, or once an account serves autofill.
+- **When an account that could have served the buffer no longer can,** the buffer is cleared and admission continues. This is a lock or logout of the active account or of another autofill account, an autofill account opting out, and a switch that leaves behind an account that does not keep serving autofill. That account's session with the vault has ended, so nothing buffered before it carries forward. A transition reported afterwards is still a fact about the page, so it is kept, and whether it fills is autofill's decision when the opportunity resolves (see [`autofill.design.md`](./autofill.design.md#autofill-on-page-load)).
+- **A switch between two accounts that both keep serving autofill clears nothing.** Neither vault has left, and the opportunity can still be served by either.
+
+With no account opted in, the autofill accounts are the unlocked active account alone, and the buffer follows the active account: it is cleared when that account locks, and on every switch.
 
 > [!NOTE]
 > **Buffering tracks the path to hot**, independent of monitoring state. Cold and warm states track the difference: cold does not monitor but buffers (a _page loaded in the background_ waits for its first focus), while warm monitors but drops (_unfocused windows_ never fill).
@@ -206,8 +209,10 @@ An opportunity stays live only while the conditions that resolved it hold. It is
 - its tab leaves hot;
 - a newer transition from the same frame resolves, superseding it;
 - its frame is lost;
-- the active account locks or logs out;
-- the active account changes.
+- the account that owns the cipher being filled locks or logs out;
+- the active account changes and the cipher's account does not keep serving autofill.
+
+Before a cipher is chosen, the opportunity belongs to the autofill accounts as a whole, and it is retired when any of them stops serving autofill.
 
 Retirement is a single signal, whatever its cause. Once an opportunity is retired, nothing more is done on its behalf: execution in progress ends, and any pending re-attempt is abandoned (see [`orchestrator.design.md`](./orchestrator.design.md#each-opportunity-reaches-one-conclusion-on-its-own-merits)). A transition that was dropped never became an opportunity, so it needs no retirement.
 

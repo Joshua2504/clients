@@ -3,10 +3,11 @@ import { firstValueFrom, Subject, switchMap, timer } from "rxjs";
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { getOptionalUserId } from "@bitwarden/common/auth/services/account.service";
 import { CLEAR_NOTIFICATION_LOGIN_DATA_DURATION } from "@bitwarden/common/autofill/constants";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
 
 import { BrowserApi } from "../../platform/browser/browser-api";
-import { FillCipherPolicy } from "../services/abstractions/fill-cipher-policy";
+import { MultiAccountFillCipherPolicy } from "../services/abstractions/multi-account-fill-cipher-policy";
 import { generateDomainMatchPatterns, isInvalidResponseStatusCode } from "../utils";
 
 import {
@@ -40,7 +41,8 @@ export class OverlayNotificationsBackground implements OverlayNotificationsBackg
     private logService: LogService,
     private notificationBackground: NotificationBackground,
     private accountService: AccountService,
-    private fillCipherPolicy: FillCipherPolicy,
+    private multiAccountFillCipherPolicy: MultiAccountFillCipherPolicy,
+    private autofillAccountsService: AutofillAccountsService,
   ) {}
 
   /**
@@ -224,6 +226,12 @@ export class OverlayNotificationsBackground implements OverlayNotificationsBackg
       const serverConfig = await this.notificationBackground.getActiveUserServerConfig();
       const activeUserVault = serverConfig?.environment?.vault;
       if (activeUserVault && origins.includes(activeUserVault)) {
+        return true;
+      }
+
+      // Every account that serves autofill keeps its own web vault out of the prompts.
+      const otherVaults = await this.notificationBackground.getOtherAutofillAccountVaultOrigins();
+      if (otherVaults.some((vault) => origins.includes(vault))) {
         return true;
       }
 
@@ -532,12 +540,30 @@ export class OverlayNotificationsBackground implements OverlayNotificationsBackg
   };
 
   /**
-   * Asks the {@link FillCipherPolicy} whether the form may get an add or update prompt. With no
-   * active user, the prompt is not blocked.
+   * Asks the {@link MultiAccountFillCipherPolicy} whether the form may get an add or update
+   * prompt: whether any account a prompt could act for takes it. Those are the accounts that
+   * serve autofill and the active account, which gets the unlock prompt while it is locked.
+   * {@link NotificationBackground} then offers only the accounts that take it. With no such
+   * account, the prompt is not blocked.
    */
   private async canOfferSave(modifyLoginData: ModifyLoginCipherFormData): Promise<boolean> {
-    const userId = await firstValueFrom(this.accountService.activeAccount$.pipe(getOptionalUserId));
-    return userId == null || this.fillCipherPolicy.canOfferSave(modifyLoginData, userId);
+    const activeUserId = await firstValueFrom(
+      this.accountService.activeAccount$.pipe(getOptionalUserId),
+    );
+    const userIds = new Set(await firstValueFrom(this.autofillAccountsService.autofillUserIds$));
+    if (activeUserId != null) {
+      userIds.add(activeUserId);
+    }
+    if (userIds.size === 0) {
+      return true;
+    }
+
+    for (const userId of userIds) {
+      if (await this.multiAccountFillCipherPolicy.canOfferSave(modifyLoginData, userId)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**

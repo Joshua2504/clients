@@ -1,3 +1,4 @@
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherType } from "@bitwarden/common/vault/enums";
 import { CipherRepromptType } from "@bitwarden/common/vault/enums/cipher-reprompt-type";
 import { CipherIconDetails } from "@bitwarden/common/vault/icon/build-cipher-icon";
@@ -195,6 +196,16 @@ export type InlineMenuCipherData = {
   favorite: boolean;
   icon: CipherIconDetails;
   accountCreationFieldType?: string;
+  /**
+   * The email of the account the cipher belongs to. Set only while more than one account serves
+   * autofill, so the inline menu can tell their ciphers apart.
+   */
+  accountLabel?: string;
+  /**
+   * False when the vault item view cannot show the cipher, because it belongs to an account
+   * other than the active one. Absent otherwise.
+   */
+  canView?: false;
   login?: {
     totp?: string;
     totpField?: boolean;
@@ -212,9 +223,19 @@ export type InlineMenuCipherData = {
   };
 };
 
+/** What the inline menu list needs to attribute ciphers to their accounts. */
+export type InlineMenuAccountDisplay = {
+  activeUserId: UserId | null;
+  /** The label of each account. Empty while a single account serves autofill. */
+  labels: Map<UserId, string>;
+};
+
 export type BuildCipherDataParams = {
   inlineMenuCipherId: string;
   cipher: CipherView;
+  /** The account that owns `cipher`. */
+  userId: UserId;
+  accountDisplay: InlineMenuAccountDisplay;
   iconsServerUrl: string | null;
   showFavicons?: boolean;
   showInlineMenuAccountCreation?: boolean;

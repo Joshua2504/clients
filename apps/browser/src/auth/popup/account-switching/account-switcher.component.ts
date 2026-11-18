@@ -87,6 +87,7 @@ export class AccountSwitcherComponent implements OnInit, OnDestroy {
   }
 
   readonly availableAccounts$ = this.accountSwitcherService.availableAccounts$;
+  readonly autofillOptInOffered$ = this.accountSwitcherService.autofillOptInOffered$;
   readonly currentAccount$ = this.accountService.activeAccount$.pipe(
     switchMap((a) =>
       a == null

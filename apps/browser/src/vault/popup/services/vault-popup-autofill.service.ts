@@ -1,7 +1,7 @@
 // FIXME: Update this file to be type safe and remove this and next line
 // @ts-strict-ignore
 import { Injectable } from "@angular/core";
-import { ActivatedRoute } from "@angular/router";
+import { ActivatedRoute, Router } from "@angular/router";
 import {
   combineLatest,
   debounceTime,
@@ -18,8 +18,10 @@ import {
 } from "rxjs";
 
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
+import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
 import { getOptionalUserId } from "@bitwarden/common/auth/services/account.service";
 import { DomainSettingsService } from "@bitwarden/common/autofill/services/domain-settings.service";
+import { AccountCipher } from "@bitwarden/common/autofill/types/account-cipher";
 import { isUrlInList } from "@bitwarden/common/autofill/utils";
 import { matchTargetingRulesForUrl } from "@bitwarden/common/autofill/utils/targeting-rules";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
@@ -27,13 +29,19 @@ import { LogService } from "@bitwarden/common/platform/abstractions/log.service"
 import { MessagingService } from "@bitwarden/common/platform/abstractions/messaging.service";
 import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
 import { Utils } from "@bitwarden/common/platform/misc/utils";
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
 import { CipherRepromptType, CipherType } from "@bitwarden/common/vault/enums";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 import { LoginUriView } from "@bitwarden/common/vault/models/view/login-uri.view";
+import {
+  CipherViewLike,
+  CipherViewLikeUtils,
+} from "@bitwarden/common/vault/utils/cipher-view-like-utils";
 import { ToastService } from "@bitwarden/components";
 import { PasswordRepromptService } from "@bitwarden/vault";
 
+import { AccountSwitcherService } from "../../../auth/popup/account-switching/services/account-switcher.service";
 import { AutofillOutcome } from "../../../autofill/enums/autofill-outcome.enum";
 import { PageDetail } from "../../../autofill/services/abstractions/autofill.service";
 import { InlineMenuFieldQualificationService } from "../../../autofill/services/inline-menu-field-qualification.service";
@@ -283,21 +291,36 @@ export class VaultPopupAutofillService {
     private accountService: AccountService,
     private logService: LogService,
     private inlineMenuFieldQualificationService: InlineMenuFieldQualificationService,
+    private accountSwitcherService: AccountSwitcherService,
+    private router: Router,
   ) {
     this._currentPageDetails$.subscribe();
   }
 
+  private activeUserId(): Promise<UserId | undefined> {
+    return firstValueFrom(this.accountService.activeAccount$.pipe(getOptionalUserId));
+  }
+
+  /**
+   * @param userId The account that owns `cipher`. Every effect of the fill runs for it.
+   */
   private async _internalDoAutofill(
     cipher: CipherView,
+    userId: UserId | undefined,
     tab: chrome.tabs.Tab,
     skipPasswordReprompt = false,
   ): Promise<boolean> {
-    if (
-      !skipPasswordReprompt &&
-      cipher.reprompt !== CipherRepromptType.None &&
-      !(await this.passwordRepromptService.showPasswordPrompt())
-    ) {
-      return false;
+    if (!skipPasswordReprompt && cipher.reprompt !== CipherRepromptType.None) {
+      // The reprompt verifies the master password of the active account, so it cannot stand in
+      // for another account's: such a cipher is opened in its own account instead of filled.
+      if (userId !== (await this.activeUserId())) {
+        this._reportAutofillFailure();
+        return false;
+      }
+
+      if (!(await this.passwordRepromptService.showPasswordPrompt())) {
+        return false;
+      }
     }
 
     if (tab == null) {
@@ -310,10 +333,11 @@ export class VaultPopupAutofillService {
     }
 
     try {
-      // The cipher is sent by id so decrypted vault data stays off the message channel.
+      // The cipher is sent by reference so decrypted vault data stays off the message channel. The
+      // reference names the account as well: a cipher id alone does not identify one.
       const response = await BrowserApi.sendMessageWithResponse<{
         result?: FillResult;
-      }>("fillCipherForPopup", { tabId: tab.id, tabUrl: tab.url, cipherId: cipher.id });
+      }>("fillCipherForPopup", { tabId: tab.id, tabUrl: tab.url, cipherId: cipher.id, userId });
       const fillResult = response?.result;
       if (!fillResult || !didFillOccur(fillResult)) {
         this._reportAutofillFailure();
@@ -336,7 +360,7 @@ export class VaultPopupAutofillService {
       return false;
     }
 
-    await this.handleAutofillSuggestionUsed({ cipherId: cipher.id });
+    await this.handleAutofillSuggestionUsed({ cipherId: cipher.id, userId });
     return true;
   }
 
@@ -399,9 +423,31 @@ export class VaultPopupAutofillService {
     closePopup = true,
     skipPasswordReprompt = false,
   ): Promise<boolean> {
+    return this._doAutofill(cipher, await this.activeUserId(), closePopup, skipPasswordReprompt);
+  }
+
+  /**
+   * {@link doAutofill} for a cipher of any autofill account. The fill runs for the account that
+   * owns the cipher and leaves the active account as it is.
+   *
+   * A cipher of another account that requires a master password reprompt is not filled: the
+   * reprompt can only verify the active account. Open it with {@link viewAccountCipher} instead.
+   * @param accountCipher The cipher and the account whose vault it came from.
+   * @param closePopup If true, will close the popup window after successful autofill. Defaults to true.
+   */
+  async doAutofillForAccount(accountCipher: AccountCipher, closePopup = true): Promise<boolean> {
+    return this._doAutofill(accountCipher.cipher, accountCipher.userId, closePopup, false);
+  }
+
+  private async _doAutofill(
+    cipher: CipherView,
+    userId: UserId | undefined,
+    closePopup: boolean,
+    skipPasswordReprompt: boolean,
+  ): Promise<boolean> {
     const tab = await firstValueFrom(this.currentAutofillTab$);
 
-    const filled = await this._internalDoAutofill(cipher, tab, skipPasswordReprompt);
+    const filled = await this._internalDoAutofill(cipher, userId, tab, skipPasswordReprompt);
 
     if (filled && closePopup) {
       await this._closePopup(cipher, tab);
@@ -411,17 +457,42 @@ export class VaultPopupAutofillService {
   }
 
   /**
+   * Opens a cipher in the account that owns it. The vault pages show the active account only, so
+   * another account's cipher makes its account the active one first. The master password reprompt
+   * then runs for that account.
+   *
+   * @returns False when the account could not be made active (it locked or logged out in the
+   * meantime) or the reprompt was declined.
+   */
+  async viewAccountCipher({ userId, cipher }: AccountCipher<CipherViewLike>): Promise<boolean> {
+    if (userId !== (await this.activeUserId())) {
+      const switched = await this.accountSwitcherService.selectAccount(userId);
+      // A locked or logged-out account is routed by the background and the app component.
+      if (switched?.authenticationStatus !== AuthenticationStatus.Unlocked) {
+        return false;
+      }
+    }
+
+    if (!(await this.passwordRepromptService.passwordRepromptCheck(cipher))) {
+      return false;
+    }
+
+    return await this.router.navigate(["/view-cipher"], {
+      queryParams: { cipherId: cipher.id, type: CipherViewLikeUtils.getType(cipher) },
+    });
+  }
+
+  /**
    * When a user autofills with an autofill suggestion outside of the inline menu,
    * update the cipher's last used date.
    *
-   * @param message - The message containing the cipher ID that was used
+   * @param message - The cipher ID that was used and the account that owns the cipher. Without an
+   * account, the active account.
    */
-  async handleAutofillSuggestionUsed(message: { cipherId: string }) {
-    const activeUserId = await firstValueFrom(
-      this.accountService.activeAccount$.pipe(getOptionalUserId),
-    );
-    if (activeUserId) {
-      await this.cipherService.updateLastUsedDate(message.cipherId, activeUserId);
+  async handleAutofillSuggestionUsed(message: { cipherId: string; userId?: UserId }) {
+    const userId = message.userId ?? (await this.activeUserId());
+    if (userId) {
+      await this.cipherService.updateLastUsedDate(message.cipherId, userId);
     }
   }
 
@@ -444,7 +515,13 @@ export class VaultPopupAutofillService {
 
     const tab = await firstValueFrom(this.currentAutofillTab$);
 
-    const filled = await this._internalDoAutofill(cipher, tab, skipPasswordReprompt);
+    // Saving the URI writes to the active account's vault, so this serves its ciphers only.
+    const filled = await this._internalDoAutofill(
+      cipher,
+      await this.activeUserId(),
+      tab,
+      skipPasswordReprompt,
+    );
 
     if (!filled) {
       return false;

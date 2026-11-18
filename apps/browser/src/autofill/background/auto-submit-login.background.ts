@@ -1,15 +1,13 @@
-import { filter, firstValueFrom, of, switchMap } from "rxjs";
+import { filter, firstValueFrom, map, merge, switchMap } from "rxjs";
 
 import { PolicyService } from "@bitwarden/common/admin-console/abstractions/policy/policy.service.abstraction";
 import { PolicyType } from "@bitwarden/common/admin-console/enums";
 import { Policy } from "@bitwarden/common/admin-console/models/domain/policy";
 import { getFirstPolicy } from "@bitwarden/common/admin-console/services/policy/default-policy.service";
-import { Account, AccountService } from "@bitwarden/common/auth/abstractions/account.service";
-import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
-import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
-import { getUserId } from "@bitwarden/common/auth/services/account.service";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
 import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
+import { UserId } from "@bitwarden/common/types/guid";
 
 import { BrowserApi } from "../../platform/browser/browser-api";
 import { ScriptInjectorService } from "../../platform/services/abstractions/script-injector.service";
@@ -25,8 +23,16 @@ import {
 } from "./abstractions/auto-submit-login.background";
 
 export class AutoSubmitLoginBackground implements AutoSubmitLoginBackgroundAbstraction {
-  private validIdpHosts: Set<string> = new Set();
-  private validAutoSubmitHosts: Set<string> = new Set();
+  /**
+   * The IdP hosts each account's policy approves. An account is listed only while its policy is
+   * enabled and applies to it.
+   */
+  private validIdpHosts: Map<UserId, Set<string>> = new Map();
+  /**
+   * The hosts of the active workflow, each with the accounts whose policy approved the IdP host
+   * the workflow came from. A step on a host submits a cipher of those accounts only.
+   */
+  private validAutoSubmitHosts: Map<string, Set<UserId>> = new Map();
   private mostRecentIdpHost: { url?: string; tabId?: number } = {};
   private currentAutoSubmitHostData: { url?: string; tabId?: number } = {};
   private readonly isSafariBrowser: boolean = false;
@@ -40,85 +46,98 @@ export class AutoSubmitLoginBackground implements AutoSubmitLoginBackgroundAbstr
     private logService: LogService,
     private autofillLifecycleService: AutofillLifecycleService,
     private scriptInjectorService: ScriptInjectorService,
-    private authService: AuthService,
+    private autofillAccountsService: AutofillAccountsService,
     private platformUtilsService: PlatformUtilsService,
     private policyService: PolicyService,
-    private accountService: AccountService,
   ) {
     this.isSafariBrowser = this.platformUtilsService.isSafari();
   }
 
   /**
-   * Initializes the auto-submit login policy. If the policy is not enabled, it
-   * will trigger a removal of any established listeners.
+   * Initializes the auto-submit login policy of every account autofill serves. An account whose
+   * policy is not enabled has its approval removed; when no account approves a host, the
+   * established listeners are removed.
    */
 
   async init() {
-    this.authService.activeAccountStatus$
+    this.autofillAccountsService.autofillUserIds$
       .pipe(
-        switchMap((value) =>
-          value === AuthenticationStatus.Unlocked ? this.accountService.activeAccount$ : of(null),
+        switchMap((userIds) =>
+          merge(
+            ...userIds.map((userId) =>
+              this.policyService.policiesByType$(PolicyType.AutomaticAppLogIn, userId).pipe(
+                getFirstPolicy,
+                filter((policy): policy is Policy => policy !== undefined),
+                map((policy) => ({ policy, userId })),
+              ),
+            ),
+          ),
         ),
-        filter((account): account is Account => account !== null),
-        getUserId,
-        switchMap((userId) =>
-          this.policyService.policiesByType$(PolicyType.AutomaticAppLogIn, userId),
-        ),
-        getFirstPolicy,
-        filter((policy): policy is Policy => policy !== undefined),
       )
-      .subscribe(this.handleAutoSubmitLoginPolicySubscription.bind(this));
+      .subscribe(({ policy, userId }) =>
+        this.handleAutoSubmitLoginPolicySubscription(policy, userId),
+      );
   }
 
   /**
-   * Handles changes to the AutomaticAppLogIn policy. If the policy is not enabled, trigger
-   * a removal of any established listeners. If the policy is enabled, apply the policy to
-   * the active user.
+   * Handles changes to an account's AutomaticAppLogIn policy. If the policy is not enabled,
+   * the account's approval is removed. If the policy is enabled, apply the policy to the account.
    *
    * @param policy - The AutomaticAppLogIn policy details.
+   * @param userId - The account the policy was read for.
    */
-  private handleAutoSubmitLoginPolicySubscription = (policy: Policy) => {
+  private handleAutoSubmitLoginPolicySubscription = (policy: Policy, userId: UserId) => {
     if (!policy?.enabled) {
-      this.destroy();
+      this.revokePolicy(userId);
       return;
     }
 
-    this.applyPolicyToActiveUser(policy).catch((error) => this.logService.error(error));
+    this.applyPolicyToUser(policy, userId).catch((error) => this.logService.error(error));
   };
 
   /**
-   * Verifies if the policy applies to the active user. If so, the event listeners
+   * Verifies if the policy applies to the account. If so, the event listeners
    * used to trigger auto-submission of login forms will be established.
    *
    * @param policy - The AutomaticAppLogIn policy details.
+   * @param userId - The account the policy was read for.
    */
-  private applyPolicyToActiveUser = async (policy: Policy) => {
+  private applyPolicyToUser = async (policy: Policy, userId: UserId) => {
     const policyAppliesToUser = await firstValueFrom(
-      this.accountService.activeAccount$.pipe(
-        getUserId,
-        switchMap((userId) =>
-          this.policyService.policyAppliesToUser$(PolicyType.AutomaticAppLogIn, userId),
-        ),
-      ),
+      this.policyService.policyAppliesToUser$(PolicyType.AutomaticAppLogIn, userId),
     );
 
     if (!policyAppliesToUser) {
-      this.destroy();
+      this.revokePolicy(userId);
       return;
     }
 
-    await this.setupAutoSubmitLoginListeners(policy);
+    await this.setupAutoSubmitLoginListeners(policy, userId);
   };
+
+  /**
+   * Removes an account's approved IdP hosts. Tears the listeners down when no account approves
+   * a host any more.
+   *
+   * @param userId - The account whose policy no longer approves any host.
+   */
+  private revokePolicy(userId: UserId) {
+    this.validIdpHosts.delete(userId);
+    if (!this.validIdpHosts.size) {
+      this.destroy();
+    }
+  }
 
   /**
    * Sets up the event listeners used to trigger auto-submission of login forms.
    *
    * @param policy - The AutomaticAppLogIn policy details.
+   * @param userId - The account the policy applies to.
    */
-  private setupAutoSubmitLoginListeners = async (policy: Policy) => {
-    this.parseIpdHostsFromPolicy(policy?.data.idpHost);
-    if (!this.validIdpHosts.size) {
-      this.destroy();
+  private setupAutoSubmitLoginListeners = async (policy: Policy, userId: UserId) => {
+    this.parseIpdHostsFromPolicy(policy?.data.idpHost, userId);
+    if (!this.validIdpHosts.get(userId)?.size) {
+      this.revokePolicy(userId);
       return;
     }
 
@@ -138,22 +157,27 @@ export class AutoSubmitLoginBackground implements AutoSubmitLoginBackgroundAbstr
   };
 
   /**
-   * Parses the comma-separated list of IDP hosts from the AutomaticAppLogIn policy.
+   * Parses the comma-separated list of IDP hosts from an account's AutomaticAppLogIn policy.
    *
    * @param idpHost - The comma-separated list of IDP hosts.
+   * @param userId - The account whose policy approves the hosts.
    */
-  private parseIpdHostsFromPolicy = (idpHost?: string) => {
+  private parseIpdHostsFromPolicy = (idpHost: string | undefined, userId: UserId) => {
     if (!idpHost) {
       return;
     }
 
+    const hosts = this.validIdpHosts.get(userId) ?? new Set<string>();
     const urls = idpHost.split(",");
     urls.forEach((url) => {
       const host = this.getUrlHost(url?.trim());
       if (host) {
-        this.validIdpHosts.add(host);
+        hosts.add(host);
       }
     });
+    if (hosts.size) {
+      this.validIdpHosts.set(userId, hosts);
+    }
   };
 
   /**
@@ -186,7 +210,7 @@ export class AutoSubmitLoginBackground implements AutoSubmitLoginBackgroundAbstr
       isValidInitiator &&
       this.shouldRouteTriggerAutoSubmit(details, requestInitiator)
     ) {
-      this.setupAutoSubmitFlow(details);
+      this.setupAutoSubmitFlow(details, requestInitiator);
       return;
     }
 
@@ -231,11 +255,15 @@ export class AutoSubmitLoginBackground implements AutoSubmitLoginBackgroundAbstr
 
   /**
    * Initializes the auto-submit flow for the given request, and adds the routed-to URL
-   *  to the list of valid auto-submit hosts.
+   *  to the list of valid auto-submit hosts, approved by the accounts that approve the initiator.
    *
    * @param details - The details of the request.
+   * @param initiator - The valid initiator of the request.
    */
-  private setupAutoSubmitFlow = (details: chrome.webRequest.OnBeforeRequestDetails) => {
+  private setupAutoSubmitFlow = (
+    details: chrome.webRequest.OnBeforeRequestDetails,
+    initiator: string,
+  ) => {
     if (this.isRequestInMainFrame(details)) {
       this.currentAutoSubmitHostData = {
         url: details.url,
@@ -244,7 +272,7 @@ export class AutoSubmitLoginBackground implements AutoSubmitLoginBackgroundAbstr
     }
 
     const autoSubmitHost = this.getUrlHost(details.url);
-    this.validAutoSubmitHosts.add(autoSubmitHost);
+    this.validAutoSubmitHosts.set(autoSubmitHost, this.approversOf(initiator));
     chrome.webNavigation.onCompleted.removeListener(this.handleAutoSubmitHostNavigationCompleted);
     chrome.webNavigation.onCompleted.addListener(this.handleAutoSubmitHostNavigationCompleted, {
       url: [{ hostEquals: autoSubmitHost }],
@@ -271,12 +299,14 @@ export class AutoSubmitLoginBackground implements AutoSubmitLoginBackgroundAbstr
   };
 
   /**
-   * Triggers the injection of the auto-submit login script if the user is authenticated.
+   * Triggers the injection of the auto-submit login script if autofill serves an account, which
+   * is then unlocked.
    *
    * @param tabId - The ID of the tab to inject the script into.
    */
   private injectAutoSubmitLoginScript = async (tabId: number) => {
-    if ((await this.getAuthStatus()) === AuthenticationStatus.Unlocked) {
+    const autofillUserIds = await firstValueFrom(this.autofillAccountsService.autofillUserIds$);
+    if (autofillUserIds.length > 0) {
       await this.scriptInjectorService.inject({
         tabId: tabId,
         injectDetails: {
@@ -286,13 +316,6 @@ export class AutoSubmitLoginBackground implements AutoSubmitLoginBackgroundAbstr
         },
       });
     }
-  };
-
-  /**
-   * Retrieves the authentication status of the active user.
-   */
-  private getAuthStatus = async () => {
-    return firstValueFrom(this.authService.activeAccountStatus$);
   };
 
   /**
@@ -318,8 +341,10 @@ export class AutoSubmitLoginBackground implements AutoSubmitLoginBackgroundAbstr
       return;
     }
 
-    this.validAutoSubmitHosts.add(this.getUrlHost(details.redirectUrl));
-    this.validAutoSubmitHosts.add(this.getUrlHost(details.url));
+    // The redirect target is approved by the accounts that approve the host redirecting to it.
+    const approvers = this.approversOf(details.url);
+    this.validAutoSubmitHosts.set(this.getUrlHost(details.redirectUrl), approvers);
+    this.validAutoSubmitHosts.set(this.getUrlHost(details.url), approvers);
   };
 
   /**
@@ -342,7 +367,24 @@ export class AutoSubmitLoginBackground implements AutoSubmitLoginBackgroundAbstr
       return false;
     }
 
-    return this.validIdpHosts.has(host);
+    return [...this.validIdpHosts.values()].some((hosts) => hosts.has(host));
+  };
+
+  /**
+   * The accounts that approve a workflow initiated from the provided URL: those whose policy
+   * lists its host as an IdP host, and those that approved the workflow it is already part of.
+   *
+   * @param url - The URL of a valid initiator.
+   */
+  private approversOf = (url: string): Set<UserId> => {
+    const host = this.getUrlHost(url);
+    const approvers = new Set<UserId>(this.validAutoSubmitHosts.get(host));
+    for (const [userId, hosts] of this.validIdpHosts) {
+      if (hosts.has(host)) {
+        approvers.add(userId);
+      }
+    }
+    return approvers;
   };
 
   /**
@@ -547,7 +589,7 @@ export class AutoSubmitLoginBackground implements AutoSubmitLoginBackgroundAbstr
 
   /**
    * Reports the sender frame's auto-submit-login step-ready fact to the autofill
-   * lifecycle.
+   * lifecycle, with the accounts whose policy approved the workflow on the frame's host.
    *
    * @param sender - The message sender. This should be the frame running the auto-submit workflow.
    */
@@ -556,11 +598,13 @@ export class AutoSubmitLoginBackground implements AutoSubmitLoginBackgroundAbstr
       return;
     }
 
+    const approvers = this.validAutoSubmitHosts.get(this.getUrlHost(sender.url ?? ""));
     this.autofillLifecycleService.reportAutomatedLoginStepReady(
       sender.tab,
       sender.frameId,
       sender.url,
       AutomationWorkflow.autoSubmitLogin,
+      [...(approvers ?? [])],
     );
   };
 

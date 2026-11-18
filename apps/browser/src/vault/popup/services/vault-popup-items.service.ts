@@ -5,6 +5,7 @@ import {
   debounceTime,
   distinctUntilChanged,
   filter,
+  firstValueFrom,
   map,
   merge,
   MonoTypeOperatorFunction,
@@ -22,8 +23,9 @@ import {
 import { CollectionService } from "@bitwarden/admin-console/common";
 import { OrganizationService } from "@bitwarden/common/admin-console/abstractions/organization/organization.service.abstraction";
 import { Organization } from "@bitwarden/common/admin-console/models/domain/organization";
-import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
+import { AccountInfo, AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { getUserId } from "@bitwarden/common/auth/services/account.service";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { FeatureFlag } from "@bitwarden/common/enums/feature-flag.enum";
 import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
 import { SyncService } from "@bitwarden/common/platform/sync";
@@ -41,6 +43,8 @@ import {
 } from "@bitwarden/common/vault/utils/cipher-view-like-utils";
 import { RestrictedCipherPolicy } from "@bitwarden/common/vault/utils/restricted-cipher-policy";
 
+import { CipherUse } from "../../../autofill/services/abstractions/fill-cipher-policy";
+import { MultiAccountFillCipherPolicy } from "../../../autofill/services/abstractions/multi-account-fill-cipher-policy";
 import { runInsideAngular } from "../../../platform/browser/run-inside-angular.operator";
 import { PopupViewCacheService } from "../../../platform/popup/view-cache/popup-view-cache.service";
 import { waitUntil } from "../../util";
@@ -50,6 +54,14 @@ import { VaultPopupAutofillService } from "./vault-popup-autofill.service";
 import { MY_VAULT_ID, VaultPopupListFiltersService } from "./vault-popup-list-filters.service";
 import { VaultPopupListTableFiltersService } from "./vault-popup-list-table-filters.service";
 
+/** The ciphers of one autofill account, other than the active one, that match the current tab. */
+export type AccountAutofillCiphers = {
+  /** The account whose vault the ciphers came from. Every action on them runs for it. */
+  userId: UserId;
+  email: string;
+  ciphers: PopupCipherViewLike[];
+};
+
 /**
  * Service for managing the various item lists on the new Vault tab in the browser popup.
  */
@@ -58,6 +70,8 @@ import { VaultPopupListTableFiltersService } from "./vault-popup-list-table-filt
 })
 export class VaultPopupItemsService {
   private readonly revealedCipherService = inject(RevealedCipherService);
+  private readonly autofillAccountsService = inject(AutofillAccountsService);
+  private readonly multiAccountFillCipherPolicy = inject(MultiAccountFillCipherPolicy);
 
   /** The legacy (VFO1 off) search text. It lives in the popup view cache, never on disk. */
   private cachedSearchText = inject(PopupViewCacheService).signal<string>({
@@ -262,6 +276,53 @@ export class VaultPopupItemsService {
   );
 
   /**
+   * The autofill accounts besides the active one: the unlocked accounts that have opted in to
+   * serving autofill while another account is active. Empty while no account has opted in.
+   * @private
+   */
+  private _otherAutofillUserIds$: Observable<UserId[]> = combineLatest([
+    this.autofillAccountsService.autofillUserIds$,
+    this.accountService.activeAccount$.pipe(map((a) => a?.id)),
+  ]).pipe(
+    map(([userIds, activeUserId]) =>
+      // The unlocked active account leads the list. While it does not, a switch is under way and
+      // the two sources disagree about which account is the active one.
+      userIds[0] === activeUserId ? userIds.slice(1) : [],
+    ),
+    distinctUntilChanged((a, b) => a.length === b.length && a.every((v, i) => v === b[i])),
+  );
+
+  /**
+   * The ciphers of every further autofill account that can be used for autofill on the current
+   * tab, one entry per account that has a match, in the order of the autofill accounts. Empty
+   * while no account has opted in. Each account's ciphers are sorted as {@link autoFillCiphers$}.
+   *
+   * The search text and the filters describe the active account's vault and do not apply. Cards
+   * and identities are included when the page has fields for them.
+   */
+  otherAccountAutoFillCiphers$: Observable<AccountAutofillCiphers[]> =
+    this._otherAutofillUserIds$.pipe(
+      switchMap((userIds) => {
+        if (userIds.length === 0) {
+          return of([]);
+        }
+
+        return combineLatest([
+          this.vaultPopupAutofillService.currentAutofillTab$,
+          this.vaultPopupAutofillService.nonLoginCipherTypesOnPage$,
+          this.accountService.accounts$,
+          this.multiAccountFillCipherPolicy.changed$,
+        ]).pipe(
+          switchMap(([tab, typesOnPage, accounts]) =>
+            this.autofillCiphersOfAccounts(userIds, tab, typesOnPage, accounts),
+          ),
+          runInsideAngular(this.ngZone),
+        );
+      }),
+      shareReplay({ refCount: true, bufferSize: 1 }),
+    );
+
+  /**
    * List of favorite ciphers that are not currently suggested for autofill.
    * Ciphers are sorted by name.
    */
@@ -420,6 +481,79 @@ export class VaultPopupItemsService {
   /** Sets the search text for the vault in view, stored per user and vault (VFO1). */
   applyScopedFilter(newSearchText: string) {
     void this.vaultPopupListTableFiltersService.setSearchText(newSearchText);
+  }
+
+  /**
+   * Looks up the ciphers of `userIds` that match the tab. Each cipher is governed by its own
+   * account: its restricted item types, organizations and collections.
+   * @private
+   */
+  private async autofillCiphersOfAccounts(
+    userIds: UserId[],
+    tab: chrome.tabs.Tab | null,
+    typesOnPage: { [CipherType.Card]: boolean; [CipherType.Identity]: boolean },
+    accounts: Record<UserId, AccountInfo>,
+  ): Promise<AccountAutofillCiphers[]> {
+    if (!tab?.url) {
+      return [];
+    }
+
+    try {
+      // The policy reads the autofill accounts as the lookup runs, so an account that locked in
+      // the meantime contributes nothing.
+      const matches = await this.multiAccountFillCipherPolicy.ciphersForUrl(
+        tab.url,
+        CipherUse.UserFill,
+        {
+          includeOtherTypes: [CipherType.Card, CipherType.Identity].filter(
+            (type) => typesOnPage[type],
+          ),
+        },
+      );
+
+      const result: AccountAutofillCiphers[] = [];
+      for (const userId of userIds) {
+        const ownCiphers = matches.filter((match) => match.userId === userId);
+        if (ownCiphers.length === 0) {
+          continue;
+        }
+
+        const [restrictions, organizations, collections] = await Promise.all([
+          firstValueFrom(this.restrictedItemTypesService.restrictedFor$(userId)),
+          firstValueFrom(this.organizationService.organizations$(userId)),
+          firstValueFrom(this.collectionService.decryptedCollections$(userId)),
+        ]);
+        const orgMap = Object.fromEntries(organizations.map((org) => [org.id, org]));
+        const collectionMap = Object.fromEntries(collections.map((col) => [col.id, col]));
+
+        const ciphers = ownCiphers
+          .map(({ cipher }) => cipher)
+          .filter(
+            (cipher) =>
+              !cipher.decryptionFailure &&
+              !this.restrictedItemTypesService.isCipherRestricted(cipher, restrictions) &&
+              hasAccessibleOrganization(cipher, orgMap),
+          )
+          .map((cipher): PopupCipherViewLike => {
+            (cipher as PopupCipherViewLike).collections = cipher.collectionIds?.map(
+              (colId) => collectionMap[colId as CollectionId],
+            );
+            (cipher as PopupCipherViewLike).organization =
+              orgMap[cipher.organizationId as OrganizationId];
+            return cipher;
+          })
+          .sort(this.sortCiphersForAutofill.bind(this));
+
+        if (ciphers.length > 0) {
+          result.push({ userId, email: accounts[userId]?.email ?? "", ciphers });
+        }
+      }
+      return result;
+    } catch {
+      // An account can lock while its ciphers are read. Its section then goes away with the next
+      // change of the autofill accounts.
+      return [];
+    }
   }
 
   /**

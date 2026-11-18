@@ -28,6 +28,10 @@ const events: Record<string, AccountEvent> = {
   s: { kind: AccountEventKind.Switch, from: null, to: A },
   t: { kind: AccountEventKind.Switch, from: A, to: B },
   b: { kind: AccountEventKind.Bootstrapped },
+  f: { kind: AccountEventKind.AutofillStart, userId: A },
+  g: { kind: AccountEventKind.AutofillStart, userId: B },
+  x: { kind: AccountEventKind.AutofillStop, userId: A },
+  y: { kind: AccountEventKind.AutofillStop, userId: B },
 };
 
 describe("accountEvents$", () => {
@@ -204,6 +208,66 @@ describe("accountEvents$", () => {
       );
 
       expectObservable(event$).toBe("(isb) 5ms j 9ms p", events);
+    });
+  });
+
+  describe("the accounts autofill serves", () => {
+    const bothUnlocked = { [A]: Unlocked, [B]: Unlocked };
+
+    it("reports none when their source is not given", () => {
+      scheduler.run(({ cold, expectObservable }) => {
+        const event$ = accountEvents$(cold("a", accounts), cold("s", { s: bothUnlocked }));
+
+        expectObservable(event$).toBe("(ijsb)", events);
+      });
+    });
+
+    it("reports each account autofill serves at the start, before bootstrapped", () => {
+      scheduler.run(({ cold, expectObservable }) => {
+        const event$ = accountEvents$(
+          cold("a", accounts),
+          cold("s", { s: bothUnlocked }),
+          cold("u", { u: [A, B] }),
+        );
+
+        expectObservable(event$).toBe("(ijsfgb)", events);
+      });
+    });
+
+    it("reports an account that starts and stops serving autofill", () => {
+      scheduler.run(({ cold, expectObservable }) => {
+        const event$ = accountEvents$(
+          cold("a", accounts),
+          cold("s", { s: bothUnlocked }),
+          cold("u 9ms v 9ms u", { u: [A], v: [A, B] }),
+        );
+
+        expectObservable(event$).toBe("(ijsfb) 3ms g 9ms y", events);
+      });
+    });
+
+    it("reports the end of an account's service and its lock as each source reports them", () => {
+      scheduler.run(({ cold, expectObservable }) => {
+        const event$ = accountEvents$(
+          cold("a", accounts),
+          cold("s 19ms t", { s: bothUnlocked, t: { [A]: Unlocked, [B]: Locked } }),
+          cold("u 14ms v", { u: [A, B], v: [A] }),
+        );
+
+        expectObservable(event$).toBe("(ijsfgb) 7ms y 4ms m", events);
+      });
+    });
+
+    it("reports a switch that leaves both accounts serving as a switch alone", () => {
+      scheduler.run(({ cold, expectObservable }) => {
+        const event$ = accountEvents$(
+          cold("a 9ms b", accounts),
+          cold("s", { s: bothUnlocked }),
+          cold("u 9ms v", { u: [A, B], v: [B, A] }),
+        );
+
+        expectObservable(event$).toBe("(ijsfgb) 2ms t", events);
+      });
     });
   });
 });

@@ -125,6 +125,11 @@ describe("bufferEnabled", () => {
     s: { kind: AccountEventKind.Switch, from: null, to: A },
     t: { kind: AccountEventKind.Switch, from: A, to: B },
     b: { kind: AccountEventKind.Bootstrapped },
+    // the accounts autofill serves
+    A: { kind: AccountEventKind.AutofillStart, userId: A },
+    B: { kind: AccountEventKind.AutofillStart, userId: B },
+    X: { kind: AccountEventKind.AutofillStop, userId: A },
+    Y: { kind: AccountEventKind.AutofillStop, userId: B },
   };
   const signals = { t: true, f: false };
 
@@ -206,6 +211,89 @@ describe("bufferEnabled", () => {
   ])("ends true, passing through false, for %s", (_name, input, expected) => {
     scheduler.run(({ cold, expectObservable }) => {
       expectObservable(cold(input, events).pipe(bufferEnabled())).toBe(expected, signals);
+    });
+  });
+
+  describe("with accounts serving autofill", () => {
+    it("pulses once for a lock of the active account, whichever of lock and stop comes first", () => {
+      scheduler.run(({ cold, expectObservable }) => {
+        expectObservable(cold("isAb-lX", events).pipe(bufferEnabled())).toBe("---t-(ft)", signals);
+        expectObservable(cold("isAb-Xl", events).pipe(bufferEnabled())).toBe("---t--(ft)", signals);
+      });
+    });
+
+    it("pulses once when another serving account locks, whichever of lock and stop comes first", () => {
+      scheduler.run(({ cold, expectObservable }) => {
+        expectObservable(cold("ijsABb-mY", events).pipe(bufferEnabled())).toBe(
+          "-----t-(ft)",
+          signals,
+        );
+        expectObservable(cold("ijsABb-Ym", events).pipe(bufferEnabled())).toBe(
+          "-----t-(ft)",
+          signals,
+        );
+      });
+    });
+
+    it("does not pulse on a switch that leaves the account behind serving", () => {
+      scheduler.run(({ cold, expectObservable }) => {
+        expectObservable(cold("ijsABb-t", events).pipe(bufferEnabled())).toBe("-----t", signals);
+      });
+    });
+
+    it("pulses once on a switch away from an account that stops serving, in either order", () => {
+      scheduler.run(({ cold, expectObservable }) => {
+        expectObservable(cold("ijsAb-tBX", events).pipe(bufferEnabled())).toBe(
+          "----t---(ft)",
+          signals,
+        );
+        expectObservable(cold("ijsAb-XBt", events).pipe(bufferEnabled())).toBe(
+          "----t---(ft)",
+          signals,
+        );
+      });
+    });
+
+    it("pulses when a serving account that is not active opts out", () => {
+      scheduler.run(({ cold, expectObservable }) => {
+        expectObservable(cold("ijsABb-Y", events).pipe(bufferEnabled())).toBe(
+          "-----t-(ft)",
+          signals,
+        );
+      });
+    });
+
+    it("pulses when a serving account that is not active logs out", () => {
+      scheduler.run(({ cold, expectObservable }) => {
+        expectObservable(cold("ijsABb-qY", events).pipe(bufferEnabled())).toBe(
+          "-----t-(ft)",
+          signals,
+        );
+      });
+    });
+
+    it("does not pulse when an account starts serving", () => {
+      scheduler.run(({ cold, expectObservable }) => {
+        expectObservable(cold("ijsAb-B", events).pipe(bufferEnabled())).toBe("----t", signals);
+      });
+    });
+
+    it("stays enabled, with a pulse, when the active account logs out while another serves", () => {
+      scheduler.run(({ cold, expectObservable }) => {
+        expectObservable(cold("ijsABb-o", events).pipe(bufferEnabled())).toBe(
+          "-----t-(ft)",
+          signals,
+        );
+      });
+    });
+
+    it("disables once the last serving account stops after the active account logged out", () => {
+      scheduler.run(({ cold, expectObservable }) => {
+        expectObservable(cold("ijsABb-o---XY", events).pipe(bufferEnabled())).toBe(
+          "-----t-(ft)-f",
+          signals,
+        );
+      });
     });
   });
 });

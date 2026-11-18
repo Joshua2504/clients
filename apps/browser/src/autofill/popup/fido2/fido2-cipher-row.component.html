@@ -1,7 +1,7 @@
 <bit-item>
   <button
     (click)="selectCipher(cipher)"
-    appA11yTitle="{{ title }} - {{ cipher.name }}"
+    appA11yTitle="{{ title }} - {{ cipher.name }}{{ accountLabel ? ' - ' + accountLabel : '' }}"
     bit-item-content
     tabindex="0"
     type="button"
@@ -23,6 +23,12 @@
       }
       @if (cipher.subTitle) {
         <div>{{ cipher.subTitle }}</div>
+      }
+      @if (accountLabel) {
+        <div data-testid="item-account">
+          <bit-icon class="tw-text-muted" name="bwi-user" aria-hidden="true" />
+          {{ accountLabel }}
+        </div>
       }
     </ng-container>
   </button>

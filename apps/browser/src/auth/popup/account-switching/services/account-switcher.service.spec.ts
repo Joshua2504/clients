@@ -155,6 +155,31 @@ describe("AccountSwitcherService", () => {
     });
   });
 
+  describe("autofillOptInOffered$", () => {
+    function seed(statuses: Record<string, AuthenticationStatus>) {
+      const accounts: Record<UserId, AccountInfo> = {};
+      for (const id of Object.keys(statuses)) {
+        accounts[id as UserId] = mockAccountInfoWith({ name: id, email: `${id}@email.com` });
+      }
+      avatarService.getUserAvatarColor$.mockReturnValue(of("#cccccc"));
+      accountsSubject.next(accounts);
+      authStatusSubject.next(statuses as Record<UserId, AuthenticationStatus>);
+      activeAccountSubject.next(Object.assign(accounts["1" as UserId], { id: "1" as UserId }));
+    }
+
+    it("is false while only one account is logged in", async () => {
+      seed({ "1": AuthenticationStatus.Unlocked, "2": AuthenticationStatus.LoggedOut });
+
+      expect(await firstValueFrom(accountSwitcherService.autofillOptInOffered$)).toBe(false);
+    });
+
+    it("is true while more than one account is logged in", async () => {
+      seed({ "1": AuthenticationStatus.Unlocked, "2": AuthenticationStatus.Locked });
+
+      expect(await firstValueFrom(accountSwitcherService.autofillOptInOffered$)).toBe(true);
+    });
+  });
+
   describe("selectAccount", () => {
     it("initiates an add account logic when add account is selected", async () => {
       let listener: (

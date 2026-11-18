@@ -29,11 +29,41 @@
         }}</span>
         <span class="tw-sr-only">)</span>
       </div>
+
+      <div
+        *ngIf="!account.isActive && (servesAutofill$ | async)"
+        class="tw-text-sm tw-text-muted"
+        data-testid="account-serving-autofill"
+      >
+        <bit-icon name="bwi-autofill" aria-hidden="true"></bit-icon>
+        {{ "accountServingAutofill" | i18n }}
+      </div>
     </ng-container>
 
     <bit-icon slot="end" [name]="status.icon" class="tw-text-lg"></bit-icon>
   </button>
 </bit-item>
+
+@if (offerAutofillOptIn() && account.id !== specialAccountAddId) {
+  <!-- Outside the row's button so that toggling never switches to the account -->
+  <bit-form-control class="tw-px-3 tw-pb-3" disableMargin>
+    <bit-switch
+      [formControl]="autofillOptIn"
+      [id]="'account-autofill-opt-in-' + account.id"
+      data-testid="account-autofill-opt-in"
+    ></bit-switch>
+    <bit-label>
+      {{ "useAccountForAutofill" | i18n }}
+      <span class="tw-sr-only">({{ account.email }})</span>
+    </bit-label>
+    <bit-hint>
+      {{ "useAccountForAutofillDesc" | i18n }}
+      @if (!isUnlocked) {
+        <span class="tw-block">{{ "unlockAccountToChangeAutofill" | i18n }}</span>
+      }
+    </bit-hint>
+  </bit-form-control>
+}
 
 <bit-item *ngIf="account.id === specialAccountAddId">
   <button type="button" bit-item-content (click)="selectAccount(account.id)">

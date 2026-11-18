@@ -17,6 +17,12 @@ export function CipherDetails({ cipher, theme }: CipherDetailsProps) {
   const name = html`
     <span title=${cipher.name} class=${primaryTextStyles(theme)}>${cipher.name}</span>
   `;
+  // Sent only while more than one account serves autofill.
+  const account = cipher.accountLabel
+    ? html`<span title=${cipher.accountLabel} class=${secondaryTextStyles(theme)}
+        >${cipher.accountLabel}</span
+      >`
+    : nothing;
 
   if (passkey) {
     const showRpName = cipher.name !== passkey.rpName;
@@ -41,6 +47,7 @@ export function CipherDetails({ cipher, theme }: CipherDetailsProps) {
               >`
             : nothing
         }
+        ${account}
       </div>
     `;
   }
@@ -60,6 +67,7 @@ export function CipherDetails({ cipher, theme }: CipherDetailsProps) {
           ? html`<span title=${subtitle} class=${secondaryTextStyles(theme)}>${subtitle}</span>`
           : nothing
       }
+      ${account}
     </div>
   `;
 }

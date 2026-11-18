@@ -1,16 +1,18 @@
 import { mock, MockProxy } from "jest-mock-extended";
-import { BehaviorSubject } from "rxjs";
+import { BehaviorSubject, combineLatest, map } from "rxjs";
 
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { CLEAR_NOTIFICATION_LOGIN_DATA_DURATION } from "@bitwarden/common/autofill/constants";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { ServerConfig } from "@bitwarden/common/platform/abstractions/config/server-config";
 import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
 import { EnvironmentServerConfigData } from "@bitwarden/common/platform/models/data/server-config.data";
+import { UserId } from "@bitwarden/common/types/guid";
 
 import { BrowserApi } from "../../platform/browser/browser-api";
 import AutofillField from "../models/autofill-field";
 import AutofillPageDetails from "../models/autofill-page-details";
-import { FillCipherPolicy } from "../services/abstractions/fill-cipher-policy";
+import { MultiAccountFillCipherPolicy } from "../services/abstractions/multi-account-fill-cipher-policy";
 import {
   flushPromises,
   sendMockExtensionMessage,
@@ -29,7 +31,9 @@ describe("OverlayNotificationsBackground", () => {
   let notificationBackground: NotificationBackground;
   let accountService: MockProxy<AccountService>;
   let activeAccount$: BehaviorSubject<{ id: string } | null>;
-  let fillCipherPolicy: MockProxy<FillCipherPolicy>;
+  let fillCipherPolicy: MockProxy<MultiAccountFillCipherPolicy>;
+  // The accounts that serve autofill besides the active one. Empty unless a test opts one in.
+  let otherAutofillUserIds$: BehaviorSubject<UserId[]>;
   let getEnableChangedPasswordPromptSpy: jest.SpyInstance;
   let getEnableAddedLoginPromptSpy: jest.SpyInstance;
   let overlayNotificationsBackground: OverlayNotificationsBackground;
@@ -47,13 +51,23 @@ describe("OverlayNotificationsBackground", () => {
     activeAccount$ = new BehaviorSubject<{ id: string } | null>({ id: "user-1" });
     accountService = mock<AccountService>();
     (accountService as any).activeAccount$ = activeAccount$;
-    fillCipherPolicy = mock<FillCipherPolicy>();
+    fillCipherPolicy = mock<MultiAccountFillCipherPolicy>();
     fillCipherPolicy.canOfferSave.mockResolvedValue(true);
+    otherAutofillUserIds$ = new BehaviorSubject<UserId[]>([]);
+    const autofillAccountsService = mock<AutofillAccountsService>();
+    (autofillAccountsService as any).autofillUserIds$ = combineLatest([
+      activeAccount$,
+      otherAutofillUserIds$,
+    ]).pipe(
+      map(([activeAccount, others]) => [...(activeAccount ? [activeAccount.id] : []), ...others]),
+    );
+    jest.spyOn(notificationBackground, "getOtherAutofillAccountVaultOrigins").mockResolvedValue([]);
     overlayNotificationsBackground = new OverlayNotificationsBackground(
       logService,
       notificationBackground,
       accountService,
       fillCipherPolicy,
+      autofillAccountsService,
     );
     await overlayNotificationsBackground.init();
   });
@@ -94,6 +108,19 @@ describe("OverlayNotificationsBackground", () => {
           jest.spyOn(notificationBackground, "getExcludedDomains").mockResolvedValue({
             [senderHost]: null,
           });
+        });
+
+        it("skips setting up listeners when the sender is the vault of another autofill account", async () => {
+          const vault = "https://vault.example.org";
+          const sender = mock<chrome.runtime.MessageSender>({ origin: vault });
+          jest
+            .spyOn(notificationBackground, "getOtherAutofillAccountVaultOrigins")
+            .mockResolvedValue([vault]);
+
+          sendMockExtensionMessage({ command: "collectPageDetailsResponse", details }, sender);
+          await flushPromises();
+
+          expect(chrome.webRequest.onCompleted.addListener).not.toHaveBeenCalled();
         });
 
         it("skips setting up listeners when the sender is the user's vault", async () => {
@@ -774,6 +801,48 @@ describe("OverlayNotificationsBackground", () => {
           expect.objectContaining({ username: "username", password: "password" }),
           "user-1",
         );
+        expect(cipherNotificationSpy).not.toHaveBeenCalled();
+      });
+
+      it("triggers the notification when another autofill account takes the form the active account does not", async () => {
+        otherAutofillUserIds$.next(["user-2" as UserId]);
+        fillCipherPolicy.canOfferSave.mockImplementation(
+          async (_form, userId) => userId === "user-2",
+        );
+        chrome.tabs.get = jest.fn().mockImplementationOnce((tabId, callback) => {
+          callback(mock<chrome.tabs.Tab>({ status: "complete", url: sender.url }));
+        });
+
+        triggerWebRequestOnCompletedEvent(
+          mock<chrome.webRequest.OnCompletedDetails>({
+            url: sender.url,
+            tabId: sender.tab.id,
+            requestId,
+          }),
+        );
+        await flushPromises();
+
+        expect(fillCipherPolicy.canOfferSave).toHaveBeenCalledWith(expect.anything(), "user-1");
+        expect(fillCipherPolicy.canOfferSave).toHaveBeenCalledWith(expect.anything(), "user-2");
+        expect(cipherNotificationSpy).toHaveBeenCalled();
+      });
+
+      it("triggers no notification for a form no autofill account takes", async () => {
+        otherAutofillUserIds$.next(["user-2" as UserId]);
+        fillCipherPolicy.canOfferSave.mockResolvedValue(false);
+        chrome.tabs.get = jest.fn().mockImplementationOnce((tabId, callback) => {
+          callback(mock<chrome.tabs.Tab>({ status: "complete", url: sender.url }));
+        });
+
+        triggerWebRequestOnCompletedEvent(
+          mock<chrome.webRequest.OnCompletedDetails>({
+            url: sender.url,
+            tabId: sender.tab.id,
+            requestId,
+          }),
+        );
+        await flushPromises();
+
         expect(cipherNotificationSpy).not.toHaveBeenCalled();
       });
 

@@ -16,6 +16,7 @@ import {
 
 import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
 import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
+import { AccountCipherRef } from "@bitwarden/common/autofill/types/account-cipher";
 import { UserRequestedFallbackAbortReason } from "@bitwarden/common/platform/abstractions/fido2/fido2-client.service.abstraction";
 import {
   Fido2UserInterfaceService as Fido2UserInterfaceServiceAbstraction,
@@ -24,6 +25,7 @@ import {
   PickCredentialParams,
 } from "@bitwarden/common/platform/abstractions/fido2/fido2-user-interface.service.abstraction";
 import { Utils } from "@bitwarden/common/platform/misc/utils";
+import { UserId } from "@bitwarden/common/types/guid";
 
 import { BrowserApi } from "../../../platform/browser/browser-api";
 import { fromChromeEvent } from "../../../platform/browser/from-chrome-event";
@@ -71,13 +73,17 @@ export type BrowserFido2Message = { sessionId: string } & (
     }
   | {
       type: typeof BrowserFido2MessageTypes.PickCredentialRequest;
-      cipherIds: string[];
+      /** The credentials to pick from, each with the account whose vault holds it. */
+      cipherRefs: AccountCipherRef[];
       userVerification: boolean;
       fallbackSupported: boolean;
     }
   | {
       type: typeof BrowserFido2MessageTypes.PickCredentialResponse;
+      /** The account of the picked cipher, as named in the request. */
+      userId: UserId;
       cipherId: string;
+      /** The result of verifying the user of `userId`. */
       userVerified: boolean;
     }
   | {
@@ -88,15 +94,24 @@ export type BrowserFido2Message = { sessionId: string } & (
       userVerification: boolean;
       fallbackSupported: boolean;
       rpId: string;
+      /** The accounts the passkey may be saved to, the default first. */
+      userIds: UserId[];
     }
   | {
       type: typeof BrowserFido2MessageTypes.ConfirmNewCredentialResponse;
+      /**
+       * The account whose vault holds the cipher. Left out by a sender that only ever saves to
+       * the active account; the cipher is then looked up there.
+       */
+      userId?: UserId;
       cipherId: string;
+      /** The result of verifying the user of that account. */
       userVerified: boolean;
     }
   | {
       type: typeof BrowserFido2MessageTypes.InformExcludedCredentialRequest;
-      existingCipherIds: string[];
+      /** The excluded credentials, each with the account whose vault holds it. */
+      existingCipherRefs: AccountCipherRef[];
       fallbackSupported: boolean;
     }
   | {
@@ -169,12 +184,22 @@ export class BrowserFido2UserInterfaceSession implements Fido2UserInterfaceSessi
     });
   }
 
-  static confirmNewCredentialResponse(sessionId: string, cipherId: string, userVerified: boolean) {
+  /**
+   * @param userId The account whose vault holds the cipher. Without it the cipher is looked up
+   * in the active account.
+   */
+  static confirmNewCredentialResponse(
+    sessionId: string,
+    cipherId: string,
+    userVerified: boolean,
+    userId?: UserId,
+  ) {
     this.sendMessage({
       sessionId: sessionId,
       type: BrowserFido2MessageTypes.ConfirmNewCredentialResponse,
       cipherId,
       userVerified,
+      ...(userId != undefined ? { userId } : {}),
     });
   }
 
@@ -239,22 +264,27 @@ export class BrowserFido2UserInterfaceSession implements Fido2UserInterfaceSessi
   }
 
   async pickCredential({
-    cipherIds,
+    cipherRefs,
     userVerification,
     assumeUserPresence,
     masterPasswordRepromptRequired,
-  }: PickCredentialParams): Promise<{ cipherId: string; userVerified: boolean }> {
+  }: PickCredentialParams): Promise<{ cipherId: string; userVerified: boolean; userId: UserId }> {
+    if (cipherRefs == undefined) {
+      // A cipher id does not say which account's credential would be shown to the user.
+      throw new Error("Cannot pick a credential without knowing the account of each cipher");
+    }
+
     // NOTE: For now, we are defaulting to a userVerified status of `true` when the request
     // is for a conditionally mediated authentication. This will allow for mediated conditional
     // authentication to function without requiring user interaction. This is a product
     // decision, rather than a decision based on the expected technical specifications.
-    if (assumeUserPresence && cipherIds.length === 1 && !masterPasswordRepromptRequired) {
-      return { cipherId: cipherIds[0], userVerified: userVerification };
+    if (assumeUserPresence && cipherRefs.length === 1 && !masterPasswordRepromptRequired) {
+      return { ...cipherRefs[0], userVerified: userVerification };
     }
 
     const data: BrowserFido2Message = {
       type: BrowserFido2MessageTypes.PickCredentialRequest,
-      cipherIds,
+      cipherRefs,
       sessionId: this.sessionId,
       userVerification,
       fallbackSupported: this.fallbackSupported,
@@ -263,7 +293,11 @@ export class BrowserFido2UserInterfaceSession implements Fido2UserInterfaceSessi
     await this.send(data);
     const response = await this.receive(BrowserFido2MessageTypes.PickCredentialResponse);
 
-    return { cipherId: response.cipherId, userVerified: response.userVerified };
+    return {
+      cipherId: response.cipherId,
+      userId: response.userId,
+      userVerified: response.userVerified,
+    };
   }
 
   async confirmNewCredential({
@@ -272,7 +306,8 @@ export class BrowserFido2UserInterfaceSession implements Fido2UserInterfaceSessi
     userHandle,
     userVerification,
     rpId,
-  }: NewCredentialParams): Promise<{ cipherId: string; userVerified: boolean }> {
+    userIds,
+  }: NewCredentialParams): Promise<{ cipherId: string; userVerified: boolean; userId?: UserId }> {
     const data: BrowserFido2Message = {
       type: BrowserFido2MessageTypes.ConfirmNewCredentialRequest,
       sessionId: this.sessionId,
@@ -282,19 +317,31 @@ export class BrowserFido2UserInterfaceSession implements Fido2UserInterfaceSessi
       userVerification,
       fallbackSupported: this.fallbackSupported,
       rpId,
+      userIds: userIds ?? [],
     };
 
     await this.send(data);
     const response = await this.receive(BrowserFido2MessageTypes.ConfirmNewCredentialResponse);
 
-    return { cipherId: response.cipherId, userVerified: response.userVerified };
+    return {
+      cipherId: response.cipherId,
+      userId: response.userId,
+      userVerified: response.userVerified,
+    };
   }
 
-  async informExcludedCredential(existingCipherIds: string[]): Promise<void> {
+  async informExcludedCredential(
+    existingCipherIds: string[],
+    existingCipherRefs?: AccountCipherRef[],
+  ): Promise<void> {
+    if (existingCipherRefs == undefined) {
+      throw new Error("Cannot show an excluded credential without knowing its account");
+    }
+
     const data: BrowserFido2Message = {
       type: BrowserFido2MessageTypes.InformExcludedCredentialRequest,
       sessionId: this.sessionId,
-      existingCipherIds,
+      existingCipherRefs,
       fallbackSupported: this.fallbackSupported,
     };
 

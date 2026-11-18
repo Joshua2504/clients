@@ -380,6 +380,7 @@ describe("AddEditComponent", () => {
         true,
       );
       expect(sendMessageSpy).toHaveBeenCalledWith("showLoginSavedNotification", {
+        userId: "UserId",
         cipherId: "123-456-789",
         itemName: "Test Cipher",
         senderTabId: 1,

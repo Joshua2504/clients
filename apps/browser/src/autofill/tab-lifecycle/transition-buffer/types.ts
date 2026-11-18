@@ -5,12 +5,14 @@ import type { UserId } from "@bitwarden/common/types/guid";
  * This is the persisted shape: it identifies a document without describing it, so a stored buffer
  * discloses no browsing activity. Do not add fields that describe the page (URL, title, origin).
  *
- * WARNING: These reports are shared across accounts. You must verify the active account
- * against a stored record's `userId` to avoid cross-account replays.
+ * WARNING: These reports are shared across accounts. You must verify that a stored record's
+ * `userId` is still the active account or an account autofill serves to avoid cross-account
+ * replays.
  */
 export type BufferedTransitionReport = Readonly<{
   /**
-   * The account active when the transition was reported.
+   * The account the transition is attributed to: the first of the accounts autofill served when
+   * it was reported, which is the active account when it is unlocked; else the active account.
    */
   userId: UserId;
   /** The reporting tab. */
@@ -45,7 +47,8 @@ export type LiveFrame = Readonly<{
 /**
  * Buffered reports, keyed by {@link transitionKey}.
  *
- * WARNING: These reports are shared across accounts. You must verify the active account
- * against stored records to avoid cross-account replays.
+ * WARNING: These reports are shared across accounts. You must verify that a stored record's
+ * account is still the active account or an account autofill serves to avoid cross-account
+ * replays.
  */
 export type BufferedTransitions = Record<string, BufferedTransitionReport>;

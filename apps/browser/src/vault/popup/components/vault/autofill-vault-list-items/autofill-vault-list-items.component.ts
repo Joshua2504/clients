@@ -42,26 +42,39 @@ export class AutofillVaultListItemsComponent {
    */
   protected showRefresh: boolean = BrowserPopupUtils.inSidebar(window);
 
+  /**
+   * The ciphers of the further autofill accounts that can be used to autofill the current page,
+   * one section per account. Empty while no account has opted in.
+   * @protected
+   */
+  protected readonly otherAccountCiphers = toSignal(
+    this.vaultPopupItemsService.otherAccountAutoFillCiphers$,
+    { initialValue: [] },
+  );
+
   protected readonly groupByType = toSignal(
     this.vaultPopupItemsService.hasFilterApplied$.pipe(map((hasFilter) => !hasFilter)),
   );
 
   /**
    * Observable that determines whether the empty autofill tip should be shown.
-   * The tip is shown when there are no login ciphers to autofill, no filter is applied, and autofill is allowed in
-   * the current context (e.g. not in a popout).
+   * The tip is shown when no autofill account has a login cipher to autofill, no filter is applied, and autofill is
+   * allowed in the current context (e.g. not in a popout).
    * @protected
    */
   protected showEmptyAutofillTip$: Observable<boolean> = combineLatest([
     this.vaultPopupItemsService.hasFilterApplied$,
     this.autofillCiphers$,
     this.vaultPopupAutofillService.autofillAllowed$,
+    this.vaultPopupItemsService.otherAccountAutoFillCiphers$,
   ]).pipe(
     map(
-      ([hasFilter, ciphers, canAutoFill]) =>
+      ([hasFilter, ciphers, canAutoFill, otherAccounts]) =>
         !hasFilter &&
         canAutoFill &&
-        ciphers.filter((c) => CipherViewLikeUtils.getType(c) == CipherType.Login).length === 0,
+        [...ciphers, ...otherAccounts.flatMap((account) => account.ciphers)].filter(
+          (c) => CipherViewLikeUtils.getType(c) == CipherType.Login,
+        ).length === 0,
     ),
   );
 

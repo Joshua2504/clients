@@ -1,13 +1,15 @@
 import { computed, signal, WritableSignal } from "@angular/core";
 import { TestBed } from "@angular/core/testing";
 import { mock } from "jest-mock-extended";
-import { BehaviorSubject, firstValueFrom, of, take, timeout } from "rxjs";
+import { BehaviorSubject, firstValueFrom, of, skip, take, timeout } from "rxjs";
 
 import { CollectionService } from "@bitwarden/admin-console/common";
 import { OrganizationService } from "@bitwarden/common/admin-console/abstractions/organization/organization.service.abstraction";
 import { CollectionView } from "@bitwarden/common/admin-console/models/collections";
 import { Organization } from "@bitwarden/common/admin-console/models/domain/organization";
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
+import { AccountCipher } from "@bitwarden/common/autofill/types/account-cipher";
 import { ProductTierType } from "@bitwarden/common/billing/enums";
 import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
 import { uuidAsString } from "@bitwarden/common/platform/abstractions/sdk/sdk.service";
@@ -15,6 +17,7 @@ import { Utils } from "@bitwarden/common/platform/misc/utils";
 import { SyncService } from "@bitwarden/common/platform/sync";
 import {
   FakeAccountService,
+  mockAccountInfoWith,
   mockAccountServiceWith,
   ObservableTracker,
 } from "@bitwarden/common/spec";
@@ -31,6 +34,8 @@ import {
 } from "@bitwarden/common/vault/services/restricted-item-types.service";
 import { CipherViewLikeUtils } from "@bitwarden/common/vault/utils/cipher-view-like-utils";
 
+import { CipherUse } from "../../../autofill/services/abstractions/fill-cipher-policy";
+import { MultiAccountFillCipherPolicy } from "../../../autofill/services/abstractions/multi-account-fill-cipher-policy";
 import { InlineMenuFieldQualificationService } from "../../../autofill/services/inline-menu-field-qualification.service";
 import { BrowserApi } from "../../../platform/browser/browser-api";
 import { PopupViewCacheService } from "../../../platform/popup/view-cache/popup-view-cache.service";
@@ -88,8 +93,16 @@ describe("VaultPopupItemsService", () => {
 
   const restrictedItemTypesService = {
     restricted$: new BehaviorSubject<RestrictedCipherType[]>([]),
+    restrictedFor$: jest.fn((_userId: UserId) => of<RestrictedCipherType[]>([])),
     isCipherRestricted: jest.fn().mockReturnValue(false),
   };
+
+  /** The active account of the service under test. */
+  const activeUserId = "UserId" as UserId;
+  const otherUserId = "OtherUserId" as UserId;
+  let autofillUserIds$: BehaviorSubject<UserId[]>;
+  let fillCipherPolicyChanged$: BehaviorSubject<void>;
+  const multiAccountFillCipherPolicy = mock<MultiAccountFillCipherPolicy>();
 
   beforeEach(() => {
     revealed$ = new BehaviorSubject<ReadonlyMap<CipherId, CipherView>>(new Map());
@@ -173,8 +186,16 @@ describe("VaultPopupItemsService", () => {
       signal: jest.fn((options) => testSearchSignal),
     };
 
+    // No account has opted in: the active account is the only autofill account.
+    autofillUserIds$ = new BehaviorSubject<UserId[]>([activeUserId]);
+    fillCipherPolicyChanged$ = new BehaviorSubject<void>(undefined);
+    (multiAccountFillCipherPolicy as { changed$: unknown }).changed$ = fillCipherPolicyChanged$;
+    multiAccountFillCipherPolicy.ciphersForUrl.mockResolvedValue([]);
+
     testBed = TestBed.configureTestingModule({
       providers: [
+        { provide: AutofillAccountsService, useValue: { autofillUserIds$ } },
+        { provide: MultiAccountFillCipherPolicy, useValue: multiAccountFillCipherPolicy },
         { provide: RevealedCipherService, useValue: revealedCipherService },
         { provide: CipherService, useValue: cipherServiceMock },
         { provide: VaultSettingsService, useValue: vaultSettingsServiceMock },
@@ -190,7 +211,7 @@ describe("VaultPopupItemsService", () => {
         },
         { provide: SyncService, useValue: syncServiceMock },
         { provide: ConfigService, useValue: configServiceMock },
-        { provide: AccountService, useValue: mockAccountServiceWith("UserId" as UserId) },
+        { provide: AccountService, useValue: mockAccountServiceWith(activeUserId) },
         {
           provide: InlineMenuFieldQualificationService,
           useValue: inlineMenuFieldQualificationServiceMock,
@@ -732,6 +753,184 @@ describe("VaultPopupItemsService", () => {
       });
 
       expect(viewCacheService.mockSignal()).toBe("some search text");
+    });
+  });
+
+  describe("otherAccountAutoFillCiphers$", () => {
+    const otherEmail = "other@example.com";
+    let otherLogin: CipherView;
+    let otherCard: CipherView;
+
+    /** The matches of the multi-account policy: the active account's first, as it returns them. */
+    const policyMatches = (...other: CipherView[]): AccountCipher[] => [
+      ...autoFillCiphers.map((cipher) => ({ userId: activeUserId, cipher })),
+      ...other.map((cipher) => ({ userId: otherUserId, cipher })),
+    ];
+
+    beforeEach(async () => {
+      otherLogin = { id: "other-login", type: CipherType.Login, name: "Other login" } as CipherView;
+      otherCard = { id: "other-card", type: CipherType.Card, name: "Other card" } as CipherView;
+      restrictedItemTypesService.isCipherRestricted.mockReturnValue(false);
+      cipherServiceMock.sortCiphersByLastUsedThenName.mockReturnValue(0);
+
+      await (testBed.inject(AccountService) as FakeAccountService).addAccount(
+        otherUserId,
+        mockAccountInfoWith({ email: otherEmail }),
+      );
+    });
+
+    it("is empty and reads no other vault while no account has opted in", async () => {
+      expect(await firstValueFrom(service.otherAccountAutoFillCiphers$)).toEqual([]);
+      expect(multiAccountFillCipherPolicy.ciphersForUrl).not.toHaveBeenCalled();
+    });
+
+    it("lists the matches of a second unlocked account that has opted in", async () => {
+      multiAccountFillCipherPolicy.ciphersForUrl.mockResolvedValue(
+        policyMatches(otherCard, otherLogin),
+      );
+      autofillUserIds$.next([activeUserId, otherUserId]);
+
+      const accounts = await firstValueFrom(service.otherAccountAutoFillCiphers$);
+
+      // The active account keeps its own section: none of its ciphers are repeated here.
+      expect(accounts).toEqual([
+        { userId: otherUserId, email: otherEmail, ciphers: [otherLogin, otherCard] },
+      ]);
+      expect(multiAccountFillCipherPolicy.ciphersForUrl).toHaveBeenCalledWith(
+        "https://example.com",
+        CipherUse.UserFill,
+        { includeOtherTypes: [CipherType.Card, CipherType.Identity] },
+      );
+    });
+
+    it("leaves the active account's suggestions as they are", async () => {
+      multiAccountFillCipherPolicy.ciphersForUrl.mockResolvedValue(policyMatches(otherLogin));
+      autofillUserIds$.next([activeUserId, otherUserId]);
+
+      await firstValueFrom(service.otherAccountAutoFillCiphers$);
+
+      expect(await firstValueFrom(service.autoFillCiphers$)).toEqual(autoFillCiphers);
+    });
+
+    it("lists no account that has no match", async () => {
+      multiAccountFillCipherPolicy.ciphersForUrl.mockResolvedValue(policyMatches());
+      autofillUserIds$.next([activeUserId, otherUserId]);
+
+      expect(await firstValueFrom(service.otherAccountAutoFillCiphers$)).toEqual([]);
+    });
+
+    it("drops the account's ciphers when it locks", async () => {
+      multiAccountFillCipherPolicy.ciphersForUrl.mockResolvedValue(policyMatches(otherLogin));
+      autofillUserIds$.next([activeUserId, otherUserId]);
+      const emissions: unknown[] = [];
+      const subscription = service.otherAccountAutoFillCiphers$.subscribe((value) =>
+        emissions.push(value),
+      );
+      await firstValueFrom(service.otherAccountAutoFillCiphers$);
+
+      // A locked account is no autofill account.
+      autofillUserIds$.next([activeUserId]);
+
+      expect(emissions).toEqual([
+        [{ userId: otherUserId, email: otherEmail, ciphers: [otherLogin] }],
+        [],
+      ]);
+      subscription.unsubscribe();
+    });
+
+    it("lists a shared item under each account that holds it", async () => {
+      const sharedId = autoFillCiphers[0].id;
+      const sharedInOther = {
+        id: sharedId,
+        type: CipherType.Login,
+        name: "Shared login",
+        organizationId: "org2",
+        collectionIds: ["col9"],
+      } as unknown as CipherView;
+      const otherOrg = { id: "org2", name: "Organization 2" } as Organization;
+      const otherCollection = { id: "col9", name: "Collection 9" } as CollectionView;
+      organizationServiceMock.organizations$.mockImplementation((id) =>
+        of(id === otherUserId ? [otherOrg] : [mockOrg]),
+      );
+      collectionService.decryptedCollections$.mockImplementation((id) =>
+        of(id === otherUserId ? [otherCollection] : mockCollections),
+      );
+      multiAccountFillCipherPolicy.ciphersForUrl.mockResolvedValue(policyMatches(sharedInOther));
+      autofillUserIds$.next([activeUserId, otherUserId]);
+
+      const [account] = await firstValueFrom(service.otherAccountAutoFillCiphers$);
+      const active = await firstValueFrom(service.autoFillCiphers$);
+
+      expect(active.map((cipher) => cipher.id)).toContain(sharedId);
+      expect(account.userId).toBe(otherUserId);
+      // The other account's copy, with the organization and collections of that account.
+      expect(account.ciphers).toEqual([sharedInOther]);
+      expect(account.ciphers[0].organization).toBe(otherOrg);
+      expect(account.ciphers[0].collections).toEqual([otherCollection]);
+    });
+
+    it("applies the restricted item types of the cipher's own account", async () => {
+      const restrictions: RestrictedCipherType[] = [
+        { cipherType: CipherType.Card, allowViewOrgIds: [] },
+      ];
+      restrictedItemTypesService.restrictedFor$.mockReturnValue(of(restrictions));
+      restrictedItemTypesService.isCipherRestricted.mockImplementation(
+        (cipher: CipherView, restricted: RestrictedCipherType[]) =>
+          restricted === restrictions && cipher.type === CipherType.Card,
+      );
+      multiAccountFillCipherPolicy.ciphersForUrl.mockResolvedValue(
+        policyMatches(otherLogin, otherCard),
+      );
+      autofillUserIds$.next([activeUserId, otherUserId]);
+
+      const [account] = await firstValueFrom(service.otherAccountAutoFillCiphers$);
+
+      expect(restrictedItemTypesService.restrictedFor$).toHaveBeenCalledWith(otherUserId);
+      expect(account.ciphers).toEqual([otherLogin]);
+    });
+
+    it("leaves out an item of an organization the account no longer belongs to", async () => {
+      const orphaned = { ...otherLogin, id: "orphaned", organizationId: "gone" } as CipherView;
+      multiAccountFillCipherPolicy.ciphersForUrl.mockResolvedValue(
+        policyMatches(orphaned, otherLogin),
+      );
+      autofillUserIds$.next([activeUserId, otherUserId]);
+
+      const [account] = await firstValueFrom(service.otherAccountAutoFillCiphers$);
+
+      expect(account.ciphers).toEqual([otherLogin]);
+    });
+
+    it("looks the ciphers up again when the policy reports a change", async () => {
+      multiAccountFillCipherPolicy.ciphersForUrl.mockResolvedValue(policyMatches());
+      autofillUserIds$.next([activeUserId, otherUserId]);
+      const subscription = service.otherAccountAutoFillCiphers$.subscribe();
+      await firstValueFrom(service.otherAccountAutoFillCiphers$);
+
+      multiAccountFillCipherPolicy.ciphersForUrl.mockResolvedValue(policyMatches(otherLogin));
+      const next = firstValueFrom(service.otherAccountAutoFillCiphers$.pipe(skip(1)));
+      fillCipherPolicyChanged$.next();
+
+      expect(await next).toEqual([
+        { userId: otherUserId, email: otherEmail, ciphers: [otherLogin] },
+      ]);
+      subscription.unsubscribe();
+    });
+
+    it("is empty while the autofill accounts do not lead with the active account", async () => {
+      // During a switch the previous active account can still lead the list.
+      multiAccountFillCipherPolicy.ciphersForUrl.mockResolvedValue(policyMatches(otherLogin));
+      autofillUserIds$.next([otherUserId, activeUserId]);
+
+      expect(await firstValueFrom(service.otherAccountAutoFillCiphers$)).toEqual([]);
+      expect(multiAccountFillCipherPolicy.ciphersForUrl).not.toHaveBeenCalled();
+    });
+
+    it("is empty when the lookup fails", async () => {
+      multiAccountFillCipherPolicy.ciphersForUrl.mockRejectedValue(new Error("locked"));
+      autofillUserIds$.next([activeUserId, otherUserId]);
+
+      expect(await firstValueFrom(service.otherAccountAutoFillCiphers$)).toEqual([]);
     });
   });
 });

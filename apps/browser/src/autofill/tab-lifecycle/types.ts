@@ -49,7 +49,11 @@ export type BufferAction = "resolve" | "drop" | "keep";
  * frame contributes the *fact of* a transition and nothing else.
  */
 export type TransitionReport = Readonly<{
-  /** The account active when the transition was reported, from the background's account state. */
+  /**
+   * The account the transition is attributed to, from the background's account state: the first
+   * of the accounts autofill serves when the transition was reported, which is the active account
+   * when it is unlocked; else the active account. See `multi-account.design.md`.
+   */
   userId: UserId | undefined;
   /** The reporting tab, from `chrome.runtime.MessageSender`. */
   tabId: number | undefined;

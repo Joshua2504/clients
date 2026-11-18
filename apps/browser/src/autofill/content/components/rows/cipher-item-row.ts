@@ -25,7 +25,7 @@ export function CipherItemRow({
   handleAction,
 }: CipherItemRowProps) {
   return html`
-    <div class=${cipherItemRowStyles({ theme })}>
+    <div class=${cipherItemRowStyles({ theme, hasAccountLabel: !!cipher.accountLabel })}>
       ${CipherItem({
         cipher,
         i18n,
@@ -37,7 +37,13 @@ export function CipherItemRow({
   `;
 }
 
-const cipherItemRowStyles = ({ theme }: { theme: Theme }) => css`
+const cipherItemRowStyles = ({
+  theme,
+  hasAccountLabel,
+}: {
+  theme: Theme;
+  hasAccountLabel: boolean;
+}) => css`
   ${typography.body1}
 
   gap: ${spacing["2"]};
@@ -52,7 +58,8 @@ const cipherItemRowStyles = ({ theme }: { theme: Theme }) => css`
   padding: ${spacing["2"]} ${spacing["3"]};
   min-height: min-content;
   min-height: 36px; /* fallback for Firefox, which doesn't support min-height: min-content on flex items */
-  max-height: 52px;
+  /* the account label is a third line of text */
+  max-height: ${hasAccountLabel ? "68px" : "52px"};
   overflow-x: hidden;
   white-space: nowrap;
   color: ${themes[theme].text.main};

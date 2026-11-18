@@ -1,3 +1,4 @@
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 import { SecurityTask } from "@bitwarden/common/vault/tasks";
 
@@ -17,6 +18,8 @@ export type LoginSecurityTaskInfo = {
   securityTask: SecurityTask;
   cipher: CipherView;
   uri: ModifyLoginCipherFormData["uri"];
+  /** The account that owns the task and the cipher. */
+  userId: UserId;
 };
 
 /**

@@ -533,7 +533,7 @@ const safeProviders: SafeProvider[] = [
       BillingAccountProfileStateService,
       ScriptInjectorService,
       AccountServiceAbstraction,
-      AuthService,
+      AutofillAccountsService,
       UserNotificationSettingsServiceAbstraction,
       MessageListener,
       AnimationControlService,

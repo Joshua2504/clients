@@ -1344,6 +1344,10 @@
   "notificationAddSave": {
     "message": "Save"
   },
+  "notificationAccount": {
+    "message": "Account",
+    "description": "Label of the selector in the save login notification that chooses which signed-in account the login is saved to. Also read by screen readers as the item type, as in 'Select Account, user@example.com'."
+  },
   "notificationViewAria": {
     "message": "View $ITEMNAME$, opens in new window",
     "placeholders": {
@@ -5206,6 +5210,10 @@
     "message": "Add new vault item",
     "description": "Screen reader text (aria-label) for new item button in overlay"
   },
+  "autofillSuggestionAccount": {
+    "message": "Account",
+    "description": "Screen reader text that precedes the email of the account an inline menu suggestion belongs to. Used when autofill suggests items from more than one account."
+  },
   "newLogin": {
     "message": "New login",
     "description": "Button text to display within inline menu when there are no matching items on a login field"
@@ -6077,6 +6085,20 @@
   "passkeyItem": {
     "message": "Passkey Item"
   },
+  "savePasskeyToAccount": {
+    "message": "Save passkey to account",
+    "description": "Label of the list that chooses which of the user's accounts a new passkey is saved to. Shown when more than one account can save passkeys."
+  },
+  "passkeyMasterPasswordForAccount": {
+    "message": "This passkey belongs to $ACCOUNT$. Enter the master password of that account to continue.",
+    "description": "Explains a master password prompt for a passkey that belongs to another account of the user than the one shown in the extension.",
+    "placeholders": {
+      "account": {
+        "content": "$1",
+        "example": "user@example.com"
+      }
+    }
+  },
   "overwritePasskey": {
     "message": "Overwrite passkey?"
   },
@@ -6536,6 +6558,22 @@
   "switchAccounts": {
     "message": "Switch accounts"
   },
+  "useAccountForAutofill": {
+    "message": "Use for autofill while another account is active",
+    "description": "Label of a toggle in the account switcher. When on, this account's logins are offered for autofill even while a different account is the active one."
+  },
+  "useAccountForAutofillDesc": {
+    "message": "Credentials from this account will be suggested and filled on websites even while another account is active.",
+    "description": "Explains the risk of the 'useAccountForAutofill' toggle."
+  },
+  "unlockAccountToChangeAutofill": {
+    "message": "Unlock this account to change this setting.",
+    "description": "Shown below the 'useAccountForAutofill' toggle while the account is locked and the toggle is read-only."
+  },
+  "accountServingAutofill": {
+    "message": "Used for autofill",
+    "description": "Indicator on an inactive account in the account switcher: autofill currently suggests this account's logins."
+  },
   "switchVault": {
     "message": "Switch vault"
   },
@@ -6741,6 +6779,24 @@
   },
   "autofillSuggestions": {
     "message": "Autofill suggestions"
+  },
+  "suggestionsForAccount": {
+    "message": "$TITLE$ — $ACCOUNT$",
+    "description": "Heading of a list of suggested vault items that belong to another account of the user than the one shown in the vault. $TITLE$ is the heading of the list for the shown account, e.g. 'Autofill suggestions'.",
+    "placeholders": {
+      "title": {
+        "content": "$1",
+        "example": "Autofill suggestions"
+      },
+      "account": {
+        "content": "$2",
+        "example": "user@example.com"
+      }
+    }
+  },
+  "switchAccountAndViewItem": {
+    "message": "Switch account and view",
+    "description": "Menu option of a suggested vault item that belongs to another account of the user. It makes that account the one shown in the vault and opens the item."
   },
   "itemSuggestions": {
     "message": "Suggested items"

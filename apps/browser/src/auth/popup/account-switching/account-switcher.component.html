@@ -13,7 +13,11 @@
           *ngIf="availableAccount.isActive"
           [ngClass]="{ 'tw-mb-6': enableAccountSwitching$ | async }"
         >
-          <auth-account [account]="availableAccount" (loading)="loading = $event"></auth-account>
+          <auth-account
+            [account]="availableAccount"
+            [offerAutofillOptIn]="autofillOptInOffered$ | async"
+            (loading)="loading = $event"
+          ></auth-account>
         </div>
 
         <ng-container *ngIf="enableAccountSwitching$ | async">
@@ -22,7 +26,11 @@
           </bit-section-header>
 
           <div *ngIf="!availableAccount.isActive">
-            <auth-account [account]="availableAccount" (loading)="loading = $event"></auth-account>
+            <auth-account
+              [account]="availableAccount"
+              [offerAutofillOptIn]="autofillOptInOffered$ | async"
+              (loading)="loading = $event"
+            ></auth-account>
           </div>
         </ng-container>
       </ng-container>

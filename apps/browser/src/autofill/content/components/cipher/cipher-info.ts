@@ -11,7 +11,7 @@ import { NotificationCipherData } from "./types";
 export type CipherInfoProps = { cipher: NotificationCipherData; theme: Theme };
 
 export function CipherInfo({ cipher, theme }: CipherInfoProps) {
-  const { name, login, organizationCategories } = cipher;
+  const { name, login, organizationCategories, accountLabel } = cipher;
   const hasIndicatorIcons = organizationCategories?.length;
 
   return html`
@@ -32,6 +32,16 @@ export function CipherInfo({ cipher, theme }: CipherInfoProps) {
         login?.username
           ? html`<span title=${login.username} class=${cipherInfoSecondaryTextStyles(theme)}
               >${login.username}</span
+            >`
+          : null
+      }
+      ${
+        accountLabel
+          ? html`<span
+              title=${accountLabel}
+              data-testid="cipher-account-label"
+              class=${cipherInfoSecondaryTextStyles(theme)}
+              >${accountLabel}</span
             >`
           : null
       }

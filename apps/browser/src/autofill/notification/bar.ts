@@ -1,15 +1,17 @@
-import { render } from "lit";
+import { nothing, render } from "lit";
 
 import { Theme, ThemeTypes } from "@bitwarden/common/platform/enums";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 import type { FolderView } from "@bitwarden/common/vault/models/view/folder.view";
 
 import { NotificationCipherData } from "../content/components/cipher/types";
-import { CollectionView, I18n, OrgView } from "../content/components/common-types";
+import { AccountView, CollectionView, I18n, OrgView } from "../content/components/common-types";
 import { AtRiskNotification } from "../content/components/notification/at-risk-password/container";
 import { NotificationConfirmationContainer } from "../content/components/notification/confirmation/container";
 import { NotificationContainer } from "../content/components/notification/container";
 import { selectedCipher as selectedCipherSignal } from "../content/components/signals/selected-cipher";
+import { selectedCipherAccount as selectedCipherAccountSignal } from "../content/components/signals/selected-cipher-account";
+import { selectedCollection as selectedCollectionSignal } from "../content/components/signals/selected-collection";
 import { selectedFolder as selectedFolderSignal } from "../content/components/signals/selected-folder";
 import { selectedVault as selectedVaultSignal } from "../content/components/signals/selected-vault";
 
@@ -61,6 +63,7 @@ function getI18n() {
     myVault: chrome.i18n.getMessage("myVault"),
     never: chrome.i18n.getMessage("never"),
     newItem: chrome.i18n.getMessage("newItem"),
+    notificationAccount: chrome.i18n.getMessage("notificationAccount"),
     nextSecurityTaskAction: chrome.i18n.getMessage("nextSecurityTaskAction"),
     notificationAddDesc: chrome.i18n.getMessage("notificationAddDesc"),
     notificationAddSave: chrome.i18n.getMessage("notificationAddSave"),
@@ -190,11 +193,8 @@ async function initNotificationBar(message: NotificationBarWindowMessage) {
     });
   }
 
-  const {
-    isVaultLocked,
-    removeIndividualVault: personalVaultDisallowed,
-    theme,
-  } = notificationBarIframeInitData;
+  const { isVaultLocked, theme } = notificationBarIframeInitData;
+  const personalVaultDisallowed = removeIndividualVault();
   const i18n = getI18n();
   const resolvedTheme = getResolvedTheme(theme ?? ThemeTypes.Light);
 
@@ -255,26 +255,44 @@ async function initNotificationBar(message: NotificationBarWindowMessage) {
   }
 
   // Default scenario: add or update password
-  const orgId = selectedVaultSignal.get();
+  await renderCipherNotification();
 
-  await Promise.all([
-    new Promise<OrgView[]>((resolve) => sendPlatformMessage({ command: "bgGetOrgData" }, resolve)),
-    new Promise<FolderView[]>((resolve) =>
-      sendPlatformMessage({ command: "bgGetFolderData" }, resolve),
-    ),
-    new Promise<NotificationCipherData[]>((resolve) =>
-      sendPlatformMessage({ command: "bgGetDecryptedCiphers" }, resolve),
-    ),
-    new Promise<CollectionView[]>((resolve) =>
-      sendPlatformMessage({ command: "bgGetCollectionData", orgId }, resolve),
-    ),
-  ]).then(([organizations, folders, ciphers, collections]) => {
+  /**
+   * Fetches what the notification shows and renders it. The folders, organizations and
+   * collections are those of the account the login is saved to, so this runs again whenever the
+   * user picks another account.
+   */
+  async function renderCipherNotification() {
+    const orgId = selectedVaultSignal.get();
+
+    const [organizations, folders, ciphers, collections, accounts] = await Promise.all([
+      new Promise<OrgView[]>((resolve) =>
+        sendPlatformMessage({ command: "bgGetOrgData" }, resolve),
+      ),
+      new Promise<FolderView[]>((resolve) =>
+        sendPlatformMessage({ command: "bgGetFolderData" }, resolve),
+      ),
+      new Promise<NotificationCipherData[]>((resolve) =>
+        sendPlatformMessage({ command: "bgGetDecryptedCiphers" }, resolve),
+      ),
+      new Promise<CollectionView[]>((resolve) =>
+        sendPlatformMessage({ command: "bgGetCollectionData", orgId }, resolve),
+      ),
+      new Promise<AccountView[]>((resolve) =>
+        sendPlatformMessage({ command: "bgGetAccountData" }, resolve),
+      ),
+    ]);
+
+    // Whether the individual vault may be saved to is the selected account's policy.
+    const selectedAccount = accounts?.find((account) => account.selected);
     notificationBarIframeInitData = {
       ...notificationBarIframeInitData,
       organizations,
       folders,
       ciphers,
       collections,
+      accounts: accounts ?? [],
+      ...(selectedAccount ? { removeIndividualVault: selectedAccount.removeIndividualVault } : {}),
     };
 
     // @TODO use context to avoid prop drilling
@@ -285,7 +303,8 @@ async function initNotificationBar(message: NotificationBarWindowMessage) {
         type: notificationType,
         theme: resolvedTheme,
         notificationTestId,
-        personalVaultIsAllowed: !personalVaultDisallowed,
+        personalVaultIsAllowed: !removeIndividualVault(),
+        handleAccountSelection,
         handleCloseNotification,
         handleSaveAction,
         handleEditOrUpdateAction,
@@ -293,11 +312,32 @@ async function initNotificationBar(message: NotificationBarWindowMessage) {
       }),
       document.body,
     );
-  });
+  }
+
+  /**
+   * Moves the save to the account the user picked, then starts the notification over: the vault,
+   * folder and collection that were selected belong to the account that was left.
+   */
+  function handleAccountSelection(userId: string) {
+    sendPlatformMessage({ command: "bgSelectAccount", userId }, () => {
+      selectedVaultSignal.set("0");
+      selectedFolderSignal.set("0");
+      selectedCollectionSignal.set("0");
+      render(nothing, document.body);
+      void renderCipherNotification().then(() =>
+        document.querySelector<HTMLElement>('[data-testid="account-option-selection"]')?.focus(),
+      );
+    });
+  }
 
   function handleEditOrUpdateAction(e: Event) {
     e.preventDefault();
-    sendSaveCipherMessage(selectedCipherSignal.get(), notificationType === NotificationTypes.Add);
+    sendSaveCipherMessage(
+      selectedCipherSignal.get(),
+      notificationType === NotificationTypes.Add,
+      undefined,
+      selectedCipherAccountSignal.get(),
+    );
   }
 }
 
@@ -339,12 +379,19 @@ function handleSaveAction(e: Event) {
   }
 }
 
-function sendSaveCipherMessage(cipherId: CipherView["id"] | null, edit: boolean, folder?: string) {
+function sendSaveCipherMessage(
+  cipherId: CipherView["id"] | null,
+  edit: boolean,
+  folder?: string,
+  userId?: string | null,
+) {
   sendPlatformMessage({
     command: "bgSaveCipher",
     cipherId,
     folder,
     edit,
+    // The account that owns `cipherId`. A cipher id alone does not name one.
+    ...(userId ? { userId } : {}),
   });
 }
 

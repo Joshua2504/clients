@@ -111,8 +111,12 @@ selecting a cipher will not re-attempt or commit the fill. A retired opportunity
 in flight.
 
 > [!IMPORTANT]
-> Cancellation keeps a fill begun with one account from completing after a switch to another.
-> It also prevents fill-after-lock.
+> Cancellation keeps a fill begun with one account from completing after that account stops
+> serving autofill, whether by a lock, a logout, or a switch that ends its service. The commit
+> upholds the same rule on its own: it confirms, as the credential is placed, that the account
+> that owns the cipher is still one autofill serves, and denies the fill otherwise. A cipher is
+> never filled on behalf of another account. See
+> [multi-account.design.md](./multi-account.design.md#attributing-a-cipher-to-its-account).
 
 ### Fills do not race
 
@@ -126,14 +130,18 @@ wrong page.
 
 ### Recorded activity reflects a real fill
 
-A fill records the account as recently active — which helps keep the extension unlocked — only when a
-credential is actually placed, never on a mere attempt. A page that offers no fillable target cannot,
+A fill records the account that owns the cipher as recently active — which helps keep that account
+unlocked — only when a credential is actually placed, never on a mere attempt. A page that offers no fillable target cannot,
 by asking to be filled, keep the vault unlocked. This bounds what a content script running outside an
 isolated world can achieve.
 
 ## Cipher selection
 
-The orchestrator, not the service, chooses which cipher a request fills. A page-load fill offers the
+The orchestrator, not the service, chooses which cipher a request fills, and with it the account
+whose vault the cipher comes from. Selection runs over the
+[autofill accounts](./multi-account.design.md#autofill-accounts), and the chosen cipher stays paired
+with its account through the commit; a request made while there is no autofill account is
+abandoned. A page-load fill offers the
 cipher the user most recently launched for the site, falling back to the last one used there. A
 user-initiated command instead walks a rotation, so pressing the shortcut repeatedly cycles through
 the ciphers that fit the page; card and identity requests walk their own rotations. A page-load fill
@@ -160,8 +168,8 @@ particular input method. This isolates the orchestrator from the plumbing that n
 
 ## The seam to the autofill service
 
-The orchestrator reaches the page through a single fill operation: given one concrete cipher and one
-target, it fills and reports whether it did. That operation makes no selection, targeting, or
+The orchestrator reaches the page through a single fill operation: given one concrete cipher, the
+account that owns it, and one target, it fills and reports whether it did. That operation makes no selection, targeting, or
 foreground decision — the orchestrator supplies the cipher and target and runs the checks above the
 seam. Keeping the fill contract this narrow is what lets the invariants live in one place rather than
 being re-derived at each entry point. (The autofill service also carries responsibilities that sit

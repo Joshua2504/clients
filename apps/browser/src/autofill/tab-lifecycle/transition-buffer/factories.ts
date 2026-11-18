@@ -14,8 +14,8 @@ import type { BufferedTransitionReport } from "./types";
  *
  * @param sources.now Epoch ms: the same clock `registerTransition` is stamped from.
  * @returns Each report that resolved into a fill opportunity. Resolution does not check that the
- * document is still live, nor that its account is the active one; the consumer checks both before
- * acting.
+ * document is still live, nor that its account is still the active account or one autofill
+ * serves; the consumer checks both before acting.
  */
 export function transitionBuffer$(
   sources: BufferSources & { now: () => number },
@@ -34,8 +34,8 @@ export function transitionBuffer$(
  * @param sources.stateProvider Where the buffer is stored.
  * @param sources.now Epoch ms: the same clock `registerTransition` is stamped from.
  * @returns Each report that resolved into a fill opportunity. Resolution does not check that the
- * document is still live, nor that its account is the active one; the consumer checks both before
- * acting. Errors when storage fails.
+ * document is still live, nor that its account is still the active account or one autofill
+ * serves; the consumer checks both before acting. Errors when storage fails.
  */
 export function persistentTransitionBuffer$(
   sources: BufferSources & { stateProvider: StateProvider; now: () => number },

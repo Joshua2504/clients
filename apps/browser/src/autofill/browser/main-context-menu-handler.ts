@@ -19,6 +19,7 @@ import {
   ROOT_ID,
   SEPARATOR_ID,
 } from "@bitwarden/common/autofill/constants";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { AutofillSettingsServiceAbstraction } from "@bitwarden/common/autofill/services/autofill-settings.service";
 import { BillingAccountProfileStateService } from "@bitwarden/common/billing/abstractions/account/billing-account-profile-state.service";
 import { FeatureFlag } from "@bitwarden/common/enums/feature-flag.enum";
@@ -26,6 +27,7 @@ import { ConfigService } from "@bitwarden/common/platform/abstractions/config/co
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
 import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
 import { Utils } from "@bitwarden/common/platform/misc/utils";
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherType } from "@bitwarden/common/vault/enums/cipher-type";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 import { RestrictedItemTypesService } from "@bitwarden/common/vault/services/restricted-item-types.service";
@@ -185,7 +187,42 @@ export class MainContextMenuHandler {
     private accountService: AccountService,
     private restrictedItemTypesService: RestrictedItemTypesService,
     private configService: ConfigService,
+    private autofillAccountsService: AutofillAccountsService,
   ) {}
+
+  /**
+   * The accounts the menu is built for: those autofill serves, or the active account alone when
+   * autofill serves none, which is when the menu offers to unlock or log in.
+   */
+  private async menuUserIds(): Promise<UserId[]> {
+    const autofillUserIds = await firstValueFrom(this.autofillAccountsService.autofillUserIds$);
+    if (autofillUserIds.length > 0) {
+      return autofillUserIds;
+    }
+    const account = await firstValueFrom(this.accountService.activeAccount$);
+    return account?.id ? [account.id] : [];
+  }
+
+  /** Whether any of `userIds` can access premium features. */
+  private async anyHasPremium(userIds: UserId[]): Promise<boolean> {
+    for (const userId of userIds) {
+      if (
+        await firstValueFrom(
+          this.billingAccountProfileStateService.hasPremiumFromAnySource$(userId),
+        )
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Whether card items are restricted for `userId`. */
+  private async isCardRestrictedFor(userId: UserId): Promise<boolean> {
+    return (await firstValueFrom(this.restrictedItemTypesService.restrictedFor$(userId))).some(
+      (rt) => rt.cipherType === CipherType.Card,
+    );
+  }
 
   /**
    *
@@ -204,16 +241,16 @@ export class MainContextMenuHandler {
     this.initRunning = true;
 
     try {
-      const account = await firstValueFrom(this.accountService.activeAccount$);
-      const hasPremium =
-        !!account?.id &&
-        (await firstValueFrom(
-          this.billingAccountProfileStateService.hasPremiumFromAnySource$(account.id),
-        ));
+      // The parent items serve every account in the menu: the verification code item is there
+      // when any account has premium, and the card item unless every account restricts cards.
+      // The cipher entries beneath them are decided per account.
+      const userIds = await this.menuUserIds();
+      const hasPremium = await this.anyHasPremium(userIds);
 
-      const isCardRestricted = (
-        await firstValueFrom(this.restrictedItemTypesService.restricted$)
-      ).some((rt) => rt.cipherType === CipherType.Card);
+      let isCardRestricted = userIds.length > 0;
+      for (const userId of userIds) {
+        isCardRestricted = isCardRestricted && (await this.isCardRestrictedFor(userId));
+      }
 
       const uniqueFlags = [
         ...new Set(
@@ -324,7 +361,13 @@ export class MainContextMenuHandler {
     });
   }
 
-  async loadOptions(title: string, optionId: string, cipher?: CipherView) {
+  /**
+   * Adds an option beneath each parent item it applies to.
+   *
+   * @param userId The account that owns `cipher`; its premium entitlement decides the
+   * verification code entry. Without it, the accounts the menu is built for decide.
+   */
+  async loadOptions(title: string, optionId: string, cipher?: CipherView, userId?: UserId) {
     try {
       const sanitizedTitle = MainContextMenuHandler.sanitizeContextMenuTitle(title);
 
@@ -371,12 +414,9 @@ export class MainContextMenuHandler {
         await createChildItem(COPY_USERNAME_ID);
       }
 
-      const account = await firstValueFrom(this.accountService.activeAccount$);
-      const canAccessPremium =
-        !!account?.id &&
-        (await firstValueFrom(
-          this.billingAccountProfileStateService.hasPremiumFromAnySource$(account.id),
-        ));
+      const canAccessPremium = await this.anyHasPremium(
+        userId != null ? [userId] : await this.menuUserIds(),
+      );
       if (canAccessPremium && (!cipher || !Utils.isNullOrEmpty(cipher.login?.totp))) {
         await createChildItem(COPY_VERIFICATION_CODE_ID);
       }

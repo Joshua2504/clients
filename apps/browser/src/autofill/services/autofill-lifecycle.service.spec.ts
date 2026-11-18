@@ -1,9 +1,11 @@
 import { mock, MockProxy } from "jest-mock-extended";
-import { BehaviorSubject, firstValueFrom, Subscription } from "rxjs";
+import { BehaviorSubject, combineLatest, defer, firstValueFrom, map, Subscription } from "rxjs";
 
 import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
 import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
+import { UserId } from "@bitwarden/common/types/guid";
 
 import { BrowserApi } from "../../platform/browser/browser-api";
 import { AutofillerCommand, AutofillLifecycleCommand } from "../enums/autofill-message.enums";
@@ -25,6 +27,11 @@ describe("DefaultAutofillLifecycleService", () => {
   let authService: MockProxy<AuthService>;
   const logService = mock<LogService>();
   let activeAccountStatusMock$: BehaviorSubject<AuthenticationStatus>;
+  let autofillAccountsService: MockProxy<AutofillAccountsService>;
+  // Unlocked accounts, other than the active one, that have opted in to serve autofill.
+  let otherAutofillUserIdsMock$: BehaviorSubject<UserId[]>;
+  const userId = "active-user" as UserId;
+  const otherUserId = "other-user" as UserId;
   let tabSendMessageSpy: jest.SpyInstance;
 
   const makePort = (frameId: number | undefined, name: string = AutofillPort.InjectedScript) => {
@@ -52,7 +59,19 @@ describe("DefaultAutofillLifecycleService", () => {
     // and no real chrome API is touched. Tests that exercise seeding override this.
     jest.spyOn(BrowserApi, "tabsQuery").mockResolvedValue([]);
 
-    service = new DefaultAutofillLifecycleService(authService, logService);
+    // The accounts autofill serves: the active account while it is unlocked, then the others.
+    // With none opted in, they follow the active account alone.
+    otherAutofillUserIdsMock$ = new BehaviorSubject<UserId[]>([]);
+    autofillAccountsService = mock<AutofillAccountsService>();
+    (autofillAccountsService as any).autofillUserIds$ = defer(() =>
+      combineLatest([authService.activeAccountStatus$, otherAutofillUserIdsMock$]),
+    ).pipe(
+      map(([status, others]) =>
+        status === AuthenticationStatus.Unlocked ? [userId, ...others] : others,
+      ),
+    );
+
+    service = new DefaultAutofillLifecycleService(authService, logService, autofillAccountsService);
   });
 
   afterEach(() => {
@@ -264,13 +283,67 @@ describe("DefaultAutofillLifecycleService", () => {
     });
   });
 
+  describe("accounts serving autofill beside the active account", () => {
+    const start = { command: AutofillLifecycleCommand.start };
+    const stop = { command: AutofillLifecycleCommand.stop };
+    const disable = { command: AutofillerCommand.disable };
+    const sentCommands = () => tabSendMessageSpy.mock.calls.map(([, message]) => message);
+
+    beforeEach(async () => {
+      service.init();
+      connectPort(makePort(0));
+      await flushPromises();
+      tabSendMessageSpy.mockClear();
+    });
+
+    it("keeps monitoring when the active account logs out while another account serves", () => {
+      otherAutofillUserIdsMock$.next([otherUserId]);
+
+      activeAccountStatusMock$.next(AuthenticationStatus.LoggedOut);
+
+      expect(sentCommands()).toEqual([]);
+    });
+
+    it("starts monitoring when an account starts serving while the active account is logged out", () => {
+      activeAccountStatusMock$.next(AuthenticationStatus.LoggedOut);
+      tabSendMessageSpy.mockClear();
+
+      otherAutofillUserIdsMock$.next([otherUserId]);
+
+      expect(sentCommands()).toEqual([start]);
+    });
+
+    it("stops monitoring when the last serving account locks while the active account is logged out", () => {
+      otherAutofillUserIdsMock$.next([otherUserId]);
+      activeAccountStatusMock$.next(AuthenticationStatus.LoggedOut);
+      tabSendMessageSpy.mockClear();
+
+      otherAutofillUserIdsMock$.next([]);
+
+      expect(sentCommands()).toEqual([stop, disable]);
+    });
+
+    it("sends nothing when one of two serving accounts locks", () => {
+      otherAutofillUserIdsMock$.next([otherUserId]);
+      tabSendMessageSpy.mockClear();
+
+      otherAutofillUserIdsMock$.next([]);
+
+      expect(sentCommands()).toEqual([]);
+    });
+  });
+
   describe("service-worker boot seed", () => {
     // The first auth emission is the seed, not a transition; a worker booting
     // into any auth state must be silent.
     const bootInto = (status: AuthenticationStatus) => {
       activeAccountStatusMock$ = new BehaviorSubject(status);
       authService.activeAccountStatus$ = activeAccountStatusMock$;
-      service = new DefaultAutofillLifecycleService(authService, logService);
+      service = new DefaultAutofillLifecycleService(
+        authService,
+        logService,
+        autofillAccountsService,
+      );
       service.init();
       connectPort(makePort(0));
     };
@@ -511,11 +584,20 @@ describe("DefaultAutofillLifecycleService", () => {
     afterEach(() => subscription?.unsubscribe());
 
     it("relays a reported step-ready fact, carrying the stamped workflow identity", async () => {
-      service.reportAutomatedLoginStepReady(tab, 0, url, AutomationWorkflow.autoSubmitLogin);
+      service.reportAutomatedLoginStepReady(tab, 0, url, AutomationWorkflow.autoSubmitLogin, [
+        userId,
+      ]);
       await flushPromises();
 
       expect(resolved).toEqual([
-        { tab, tabId: 1, frameId: 0, frameUrl: url, workflow: AutomationWorkflow.autoSubmitLogin },
+        {
+          tab,
+          tabId: 1,
+          frameId: 0,
+          frameUrl: url,
+          workflow: AutomationWorkflow.autoSubmitLogin,
+          userIds: [userId],
+        },
       ]);
     });
 
@@ -527,6 +609,7 @@ describe("DefaultAutofillLifecycleService", () => {
         0,
         url,
         AutomationWorkflow.autoSubmitLogin,
+        [userId],
       );
       await flushPromises();
 
@@ -534,7 +617,9 @@ describe("DefaultAutofillLifecycleService", () => {
     });
 
     it("drops a report without a url", async () => {
-      service.reportAutomatedLoginStepReady(tab, 0, undefined, AutomationWorkflow.autoSubmitLogin);
+      service.reportAutomatedLoginStepReady(tab, 0, undefined, AutomationWorkflow.autoSubmitLogin, [
+        userId,
+      ]);
       await flushPromises();
 
       expect(resolved).toEqual([]);

@@ -11,6 +11,8 @@ export type TotpCipherInfoProps = {
   totp: string;
   totpCodeAria?: string;
   username?: string;
+  /** The account the cipher belongs to, when more than one account serves autofill. */
+  accountLabel?: string;
   masked: boolean;
 };
 
@@ -20,6 +22,7 @@ export function TotpCipherInfo({
   totp,
   totpCodeAria,
   username,
+  accountLabel,
   masked,
 }: TotpCipherInfoProps) {
   const code = masked ? "●●●●●●" : `${totp.substring(0, 3)} ${totp.substring(3)}`;
@@ -39,6 +42,13 @@ export function TotpCipherInfo({
         aria-label=${totpCodeAria ?? nothing}
         >${code}</span
       >
+      ${
+        accountLabel
+          ? html`<span title=${accountLabel} class=${secondaryTextStyles(theme)}
+              >${accountLabel}</span
+            >`
+          : nothing
+      }
     </div>
   `;
 }
