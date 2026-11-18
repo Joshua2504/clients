@@ -51,6 +51,27 @@ export const AllowedMultiUserNotificationTypes = new Set<NotificationType>([
   NotificationType.AutoConfirmMember,
 ]);
 
+/**
+ * Vault sync notification types that are also processed for a non-active account, as long as
+ * that account is unlocked. A locked account cannot decrypt and syncs on unlock instead.
+ * {@link NotificationType.LogOut} only counts when its reason is a key rotation, which syncs.
+ */
+export const UnlockedMultiUserSyncNotificationTypes = new Set<NotificationType>([
+  NotificationType.SyncCipherCreate,
+  NotificationType.SyncCipherUpdate,
+  NotificationType.SyncCipherDelete,
+  NotificationType.SyncLoginDelete,
+  NotificationType.SyncFolderCreate,
+  NotificationType.SyncFolderUpdate,
+  NotificationType.SyncFolderDelete,
+  NotificationType.SyncVault,
+  NotificationType.SyncCiphers,
+  NotificationType.SyncSettings,
+  NotificationType.SyncOrganizations,
+  NotificationType.SyncOrgKeys,
+  NotificationType.LogOut,
+]);
+
 export class DefaultServerNotificationsService implements ServerNotificationsService {
   notifications$: Observable<readonly [NotificationResponse, UserId]>;
 
@@ -160,12 +181,46 @@ export class DefaultServerNotificationsService implements ServerNotificationsSer
         this.accountService.activeAccount$.pipe(map((a) => a?.id)),
       );
       if (activeAccountId !== userId) {
+        // A locked non-active account cannot decrypt; it syncs on unlock instead.
+        if (!(await this.isUnlocked(userId))) {
+          return;
+        }
+        await this.syncService.fullSync(false, { userId });
         return;
       }
       await this.syncService.fullSync(false);
     } catch (e) {
       this.logService.error("Failed to catch-up sync after notifications connected", e);
     }
+  }
+
+  private async isUnlocked(userId: UserId): Promise<boolean> {
+    const authStatus = await firstValueFrom(this.authService.authStatusFor$(userId));
+    return authStatus === AuthenticationStatus.Unlocked;
+  }
+
+  /**
+   * Whether a notification for a non-active account is processed: the allowed multi-user types
+   * always, vault sync types only while that account is unlocked.
+   */
+  private async processesForNonActiveUser(
+    notification: NotificationResponse,
+    userId: UserId,
+  ): Promise<boolean> {
+    if (AllowedMultiUserNotificationTypes.has(notification.type)) {
+      return true;
+    }
+    if (!UnlockedMultiUserSyncNotificationTypes.has(notification.type)) {
+      return false;
+    }
+    if (
+      notification.type === NotificationType.LogOut &&
+      (notification.payload as LogOutNotification)?.reason !==
+        PushNotificationLogOutReasonType.KeyRotation
+    ) {
+      return false;
+    }
+    return await this.isUnlocked(userId);
   }
 
   private hasAccessToken$(userId: UserId) {
@@ -195,7 +250,10 @@ export class DefaultServerNotificationsService implements ServerNotificationsSer
     );
 
     const notificationIsForActiveUser = activeAccountId === userId;
-    if (!notificationIsForActiveUser && !AllowedMultiUserNotificationTypes.has(notification.type)) {
+    if (
+      !notificationIsForActiveUser &&
+      !(await this.processesForNonActiveUser(notification, userId))
+    ) {
       return;
     }
 
@@ -232,14 +290,14 @@ export class DefaultServerNotificationsService implements ServerNotificationsSer
       case NotificationType.SyncVault:
       case NotificationType.SyncCiphers:
       case NotificationType.SyncSettings:
-        await this.syncService.fullSync(false);
+        await this.syncService.fullSync(false, { userId });
         break;
       case NotificationType.SyncOrganizations:
         // An organization update may not have bumped the user's account revision date, so force a sync
-        await this.syncService.fullSync(true);
+        await this.syncService.fullSync(true, { userId });
         break;
       case NotificationType.SyncOrgKeys:
-        await this.syncService.fullSync(true);
+        await this.syncService.fullSync(true, { userId });
         this.activitySubject.next("inactive"); // Force a disconnect
         this.activitySubject.next("active"); // Allow a reconnect
         break;
@@ -255,7 +313,7 @@ export class DefaultServerNotificationsService implements ServerNotificationsSer
           this.logService.info(
             "[Notifications Service] Skipping logout due to no logout key rotation. Performing full sync.",
           );
-          await this.syncService.fullSync(true);
+          await this.syncService.fullSync(true, { userId });
         } else {
           await this.logoutCallback("logoutNotification", userId);
         }

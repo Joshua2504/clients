@@ -82,6 +82,7 @@ export class ForegroundSyncService extends CoreSyncService {
           : {
               allowThrowOnError: allowThrowOnErrorOrOptions?.allowThrowOnError ?? false,
               skipTokenRefresh: allowThrowOnErrorOrOptions?.skipTokenRefresh ?? false,
+              userId: allowThrowOnErrorOrOptions?.userId,
             };
       const requestId = Utils.newGuid();
       const syncCompletedPromise = firstValueFrom(

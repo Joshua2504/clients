@@ -1,5 +1,12 @@
 import { mock, MockProxy } from "jest-mock-extended";
-import { BehaviorSubject, bufferCount, firstValueFrom, Subject, ObservedValueOf } from "rxjs";
+import {
+  BehaviorSubject,
+  bufferCount,
+  firstValueFrom,
+  Subject,
+  ObservedValueOf,
+  Subscription,
+} from "rxjs";
 
 import { AutomaticUserConfirmationService } from "@bitwarden/auto-confirm";
 import { Measurement } from "@bitwarden/logging";
@@ -11,7 +18,7 @@ import { AuthService } from "../../../auth/abstractions/auth.service";
 import { AuthenticationStatus } from "../../../auth/enums/authentication-status";
 import { LogoutReason } from "../../../auth/logout";
 import { BillingAccountProfileStateService } from "../../../billing/abstractions/account/billing-account-profile-state.service";
-import { NotificationType } from "../../../enums";
+import { NotificationType, PushNotificationLogOutReasonType } from "../../../enums";
 import { NotificationResponse } from "../../../models/response/notification.response";
 import { UserId } from "../../../types/guid";
 import { AppIdService } from "../../abstractions/app-id.service";
@@ -184,6 +191,16 @@ describe("DefaultServerNotificationsService (multi-user)", () => {
     authenticationStatusByUser.get(userId)!.next(AuthenticationStatus.Unlocked);
   }
 
+  function setUserLocked(userId: UserId) {
+    if (!authenticationStatusByUser.has(userId)) {
+      authenticationStatusByUser.set(
+        userId,
+        new BehaviorSubject<AuthenticationStatus>(AuthenticationStatus.LoggedOut),
+      );
+    }
+    authenticationStatusByUser.get(userId)!.next(AuthenticationStatus.Locked);
+  }
+
   function setWebPushConnectorForUser(userId: UserId) {
     const webPushConnector = mock<WebPushConnector>();
     const notificationSubject = new Subject<NotificationResponse>();
@@ -294,19 +311,154 @@ describe("DefaultServerNotificationsService (multi-user)", () => {
 
     const subscription = defaultServerNotificationsService.startListening();
 
-    // Emit a folder create for non-active user (should be ignored)
+    // Emit a send create for non-active user (should be ignored)
     user2WebPush.notificationSubject.next(
-      new NotificationResponse({ type: NotificationType.SyncFolderCreate }),
+      new NotificationResponse({ type: NotificationType.SyncSendCreate }),
     );
-    // Emit a folder create for active user (should be processed)
+    // Emit a send create for active user (should be processed)
     user1WebPush.notificationSubject.next(
-      new NotificationResponse({ type: NotificationType.SyncFolderCreate }),
+      new NotificationResponse({ type: NotificationType.SyncSendCreate }),
+    );
+    // A logout that is not a key rotation stays with the active user only
+    user2WebPush.notificationSubject.next(
+      new NotificationResponse({
+        type: NotificationType.LogOut,
+        payload: { UserId: mockUserId2 },
+      }),
     );
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(syncService.syncUpsertFolder).toHaveBeenCalledTimes(1);
+    expect(syncService.syncUpsertSend).toHaveBeenCalledTimes(1);
+    expect(userLogoutCallback).not.toHaveBeenCalled();
 
     subscription.unsubscribe();
+  });
+
+  describe("vault sync notifications for a non-active user", () => {
+    let user2WebPush: ReturnType<typeof setWebPushConnectorForUser>;
+    let subscription: Subscription;
+
+    const emitForUser2 = async (notification: NotificationResponse) => {
+      user2WebPush.notificationSubject.next(notification);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+
+    const startListening = (user2Unlocked: boolean) => {
+      addUserAccount(mockUserId1);
+      addUserAccount(mockUserId2);
+      setUserUnlocked(mockUserId1);
+      if (user2Unlocked) {
+        setUserUnlocked(mockUserId2);
+      } else {
+        setUserLocked(mockUserId2);
+      }
+      setActiveUserAccount(mockUserId1);
+      setWebPushConnectorForUser(mockUserId1);
+      user2WebPush = setWebPushConnectorForUser(mockUserId2);
+      subscription = defaultServerNotificationsService.startListening();
+    };
+
+    afterEach(() => subscription.unsubscribe());
+
+    it("processes cipher and folder changes for that user when it is unlocked", async () => {
+      startListening(true);
+
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.SyncCipherUpdate,
+          payload: { Id: "cipher-id", UserId: mockUserId2 },
+        }),
+      );
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.SyncCipherDelete,
+          payload: { Id: "cipher-id", UserId: mockUserId2 },
+        }),
+      );
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.SyncFolderCreate,
+          payload: { Id: "folder-id", UserId: mockUserId2 },
+        }),
+      );
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.SyncFolderDelete,
+          payload: { Id: "folder-id", UserId: mockUserId2 },
+        }),
+      );
+
+      expect(syncService.syncUpsertCipher).toHaveBeenCalledWith(
+        expect.anything(),
+        true,
+        mockUserId2,
+      );
+      expect(syncService.syncDeleteCipher).toHaveBeenCalledWith(expect.anything(), mockUserId2);
+      expect(syncService.syncUpsertFolder).toHaveBeenCalledWith(
+        expect.anything(),
+        false,
+        mockUserId2,
+      );
+      expect(syncService.syncDeleteFolder).toHaveBeenCalledWith(expect.anything(), mockUserId2);
+    });
+
+    it.each([
+      [NotificationType.SyncVault, false],
+      [NotificationType.SyncCiphers, false],
+      [NotificationType.SyncSettings, false],
+      [NotificationType.SyncOrganizations, true],
+      [NotificationType.SyncOrgKeys, true],
+    ])(
+      "runs a full sync of that user for notification type %s when it is unlocked",
+      async (type, forceSync) => {
+        startListening(true);
+        syncService.fullSync.mockClear();
+
+        await emitForUser2(new NotificationResponse({ type }));
+
+        expect(syncService.fullSync).toHaveBeenCalledWith(forceSync, { userId: mockUserId2 });
+      },
+    );
+
+    it("runs a full sync of that user for a key rotation logout when it is unlocked", async () => {
+      startListening(true);
+      syncService.fullSync.mockClear();
+
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.LogOut,
+          payload: { UserId: mockUserId2, Reason: PushNotificationLogOutReasonType.KeyRotation },
+        }),
+      );
+
+      expect(userLogoutCallback).not.toHaveBeenCalled();
+      expect(syncService.fullSync).toHaveBeenCalledWith(true, { userId: mockUserId2 });
+    });
+
+    it("drops vault sync notifications while that user is locked", async () => {
+      startListening(false);
+
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.SyncCipherUpdate,
+          payload: { Id: "cipher-id", UserId: mockUserId2 },
+        }),
+      );
+      await emitForUser2(new NotificationResponse({ type: NotificationType.SyncVault }));
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.LogOut,
+          payload: { UserId: mockUserId2, Reason: PushNotificationLogOutReasonType.KeyRotation },
+        }),
+      );
+
+      expect(syncService.syncUpsertCipher).not.toHaveBeenCalled();
+      expect(syncService.fullSync).not.toHaveBeenCalledWith(expect.anything(), {
+        userId: mockUserId2,
+      });
+      // The active user's catch-up sync on connect is unaffected
+      expect(syncService.fullSync).toHaveBeenCalledWith(false);
+    });
   });
 });

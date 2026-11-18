@@ -35,6 +35,7 @@ import { KeyConnectorService } from "../../key-management/key-connector/abstract
 import { InternalMasterPasswordServiceAbstraction } from "../../key-management/master-password/abstractions/master-password.service.abstraction";
 import {
   SyncCipherNotification,
+  SyncFolderNotification,
   SyncSendNotification,
 } from "../../models/response/notification.response";
 import { ProviderService } from "../../provider/abstractions/provider.service";
@@ -46,8 +47,10 @@ import { CipherService } from "../../vault/abstractions/cipher.service";
 import { FolderApiServiceAbstraction } from "../../vault/abstractions/folder/folder-api.service.abstraction";
 import { InternalFolderService } from "../../vault/abstractions/folder/folder.service.abstraction";
 import { CipherData } from "../../vault/models/data/cipher.data";
+import { FolderData } from "../../vault/models/data/folder.data";
 import { Cipher } from "../../vault/models/domain/cipher";
 import { CipherResponse } from "../../vault/models/response/cipher.response";
+import { FolderResponse } from "../../vault/models/response/folder.response";
 import { ConfigService } from "../abstractions/config/config.service";
 import { LogService } from "../abstractions/log.service";
 import { SdkService } from "../abstractions/sdk/sdk.service";
@@ -716,6 +719,88 @@ describe("DefaultSyncService", () => {
 
         expect(apiService.getSync).toHaveBeenCalledTimes(2);
       });
+
+      it("syncs the given user instead of the active account", async () => {
+        apiService.getSync.mockResolvedValueOnce(syncResponseFor(user2));
+
+        await expect(sut.fullSync(true, { userId: user2 })).resolves.toBe(true);
+
+        expect(authService.authStatusFor$).toHaveBeenCalledWith(user2);
+        expect(apiService.refreshIdentityToken).toHaveBeenCalledWith(user2);
+        expect(apiService.getSync).toHaveBeenCalledWith(user2);
+        expect(folderService.replace).toHaveBeenCalledWith({}, user2);
+        expect(folderService.replace).not.toHaveBeenCalledWith({}, user1);
+        expect(messageSender.send).toHaveBeenCalledWith("syncCompleted", {
+          successfully: true,
+          userId: user2,
+        });
+      });
+
+      it("checks the last sync and revision date of the given user", async () => {
+        lastSyncDates[user2] = new Date(2);
+        apiService.getAccountRevisionDate.mockResolvedValue(new Date(1).getTime());
+
+        await expect(sut.fullSync(false, { userId: user2 })).resolves.toBe(false);
+
+        expect(apiService.getAccountRevisionDate).toHaveBeenCalledWith(user2);
+        expect(apiService.getSync).not.toHaveBeenCalled();
+      });
+
+      it("syncs the active account and a given user separately when both are in flight", async () => {
+        const user1Sync = deferred<SyncResponse>();
+        apiService.getSync
+          .mockReturnValueOnce(user1Sync.promise)
+          .mockResolvedValueOnce(syncResponseFor(user2));
+
+        const user1FullSync = sut.fullSync(true);
+        await flushPromises();
+        const user2FullSync = sut.fullSync(true, { userId: user2 });
+        await flushPromises();
+        user1Sync.resolve(syncResponseFor(user1));
+        await expect(Promise.all([user1FullSync, user2FullSync])).resolves.toEqual([true, true]);
+
+        expect(apiService.getSync).toHaveBeenNthCalledWith(1, user1);
+        expect(apiService.getSync).toHaveBeenNthCalledWith(2, user2);
+        expect(folderService.replace).toHaveBeenCalledWith({}, user1);
+        expect(folderService.replace).toHaveBeenCalledWith({}, user2);
+        expect(sut["inFlightApiCalls"].size).toBe(0);
+      });
+
+      it("logs out the given user, not the active account, when their account was deleted", async () => {
+        lastSyncDates[user2] = new Date(1);
+        apiService.getAccountRevisionDate.mockResolvedValue(-1);
+
+        await sut.fullSync(false, { userId: user2 });
+
+        expect(logoutCallback).toHaveBeenCalledWith("accountDeleted", user2);
+      });
+
+      it("logs out the given user, not the active account, when their security stamp changed", async () => {
+        tokenService.getSecurityStamp.mockResolvedValue("old-stamp");
+        apiService.getSync.mockResolvedValueOnce(syncResponseFor(user2));
+
+        await expect(sut.fullSync(true, { userId: user2 })).resolves.toBe(false);
+
+        expect(logoutCallback).toHaveBeenCalledWith("invalidSecurityStamp", user2);
+      });
+
+      it("does not ask to convert the active account to Key Connector when syncing another user", async () => {
+        keyConnectorService.convertAccountRequired$ = of(true);
+        apiService.getSync.mockResolvedValueOnce(syncResponseFor(user2));
+
+        await sut.fullSync(true, { userId: user2 });
+
+        expect(messageSender.send).not.toHaveBeenCalledWith("convertAccountToKeyConnector");
+      });
+
+      it("asks to convert the active account to Key Connector when syncing it", async () => {
+        keyConnectorService.convertAccountRequired$ = of(true);
+        apiService.getSync.mockResolvedValueOnce(syncResponseFor(user1));
+
+        await sut.fullSync(true);
+
+        expect(messageSender.send).toHaveBeenCalledWith("convertAccountToKeyConnector");
+      });
     });
 
     describe("mutate 'last update time'", () => {
@@ -1175,7 +1260,7 @@ describe("DefaultSyncService", () => {
       const result = await sut.syncUpsertCipher(notification(), true, user1);
 
       expect(result).toBe(true);
-      expect(cipherService.upsert).toHaveBeenCalledWith(new CipherData(remote));
+      expect(cipherService.upsert).toHaveBeenCalledWith(new CipherData(remote), user1);
     });
 
     it.each([
@@ -1192,7 +1277,7 @@ describe("DefaultSyncService", () => {
         const result = await sut.syncUpsertCipher(notification(), true, user1);
 
         expect(result).toBe(true);
-        expect(cipherService.upsert).toHaveBeenCalledWith(new CipherData(remote));
+        expect(cipherService.upsert).toHaveBeenCalledWith(new CipherData(remote), user1);
         expect(messageSender.send).toHaveBeenCalledWith("syncedUpsertedCipher", { cipherId });
       },
     );
@@ -1204,7 +1289,20 @@ describe("DefaultSyncService", () => {
       const result = await sut.syncUpsertCipher(notification(), false, user1);
 
       expect(result).toBe(true);
-      expect(cipherService.upsert).toHaveBeenCalledWith(new CipherData(remote));
+      expect(cipherService.upsert).toHaveBeenCalledWith(new CipherData(remote), user1);
+    });
+
+    it("fetches and stores the cipher as the notified user when that user is not active", async () => {
+      const user2 = "user2" as UserId;
+      const remote = remoteCipher(false);
+      apiService.getFullCipherDetails.mockResolvedValue(remote);
+
+      const result = await sut.syncUpsertCipher(notification(), false, user2);
+
+      expect(result).toBe(true);
+      expect(cipherService.get).toHaveBeenCalledWith(cipherId, user2);
+      expect(apiService.getFullCipherDetails).toHaveBeenCalledWith(cipherId, user2);
+      expect(cipherService.upsert).toHaveBeenCalledWith(new CipherData(remote), user2);
     });
 
     // With no local copy, the client can't tell a shared cipher from one a lease made readable.
@@ -1219,7 +1317,7 @@ describe("DefaultSyncService", () => {
       const result = await sut.syncUpsertCipher(notification([collectionId]), true, user1);
 
       expect(result).toBe(true);
-      expect(cipherService.upsert).toHaveBeenCalledWith(new CipherData(remote));
+      expect(cipherService.upsert).toHaveBeenCalledWith(new CipherData(remote), user1);
     });
 
     it("does not fetch when the local copy is already at the pushed revision", async () => {
@@ -1251,6 +1349,33 @@ describe("DefaultSyncService", () => {
       expect(result).toBe(false);
       expect(cipherService.get).not.toHaveBeenCalled();
       expect(apiService.getFullCipherDetails).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("syncUpsertFolder", () => {
+    it("fetches and stores the folder as the notified user when that user is not active", async () => {
+      const user2 = "user2" as UserId;
+      const folderId = Utils.newGuid();
+      Matrix.autoMockMethod(authService.authStatusFor$, () => of(AuthenticationStatus.Unlocked));
+      folderService.get.mockResolvedValue(null);
+      // A fixed revision date: without one `FolderData` stamps the current time on each copy.
+      const remote = new FolderResponse({
+        Id: folderId,
+        Name: "name",
+        RevisionDate: "2026-01-01T00:00:00.000Z",
+      });
+      folderApiService.get.mockResolvedValue(remote);
+
+      const result = await sut.syncUpsertFolder(
+        new SyncFolderNotification({ Id: folderId, UserId: user2 }),
+        false,
+        user2,
+      );
+
+      expect(result).toBe(true);
+      expect(folderService.get).toHaveBeenCalledWith(folderId, user2);
+      expect(folderApiService.get).toHaveBeenCalledWith(folderId, user2);
+      expect(folderService.upsert).toHaveBeenCalledWith(new FolderData(remote), user2);
     });
   });
 

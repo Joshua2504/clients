@@ -127,12 +127,17 @@ export class DefaultSyncService extends CoreSyncService {
     forceSync: boolean,
     allowThrowOnErrorOrOptions?: boolean | SyncOptions,
   ): Promise<boolean> {
-    const { allowThrowOnError = false, skipTokenRefresh = false } =
-      typeof allowThrowOnErrorOrOptions === "boolean"
-        ? { allowThrowOnError: allowThrowOnErrorOrOptions }
-        : (allowThrowOnErrorOrOptions ?? {});
+    const {
+      allowThrowOnError = false,
+      skipTokenRefresh = false,
+      userId: targetUserId,
+    } = typeof allowThrowOnErrorOrOptions === "boolean"
+      ? { allowThrowOnError: allowThrowOnErrorOrOptions }
+      : (allowThrowOnErrorOrOptions ?? {});
 
-    const userId = await firstValueFrom(this.accountService.activeAccount$.pipe(map((a) => a?.id)));
+    const userId =
+      targetUserId ??
+      (await firstValueFrom(this.accountService.activeAccount$.pipe(map((a) => a?.id))));
     this.syncStarted();
     const authStatus = await firstValueFrom(this.authService.authStatusFor$(userId));
     if (authStatus === AuthenticationStatus.LoggedOut) {
@@ -265,7 +270,7 @@ export class DefaultSyncService extends CoreSyncService {
     const response = await this.apiService.getAccountRevisionDate(userId);
     if (response < 0 && this.logoutCallback) {
       // Account was deleted, log out now
-      await this.logoutCallback("accountDeleted");
+      await this.logoutCallback("accountDeleted", userId);
     }
 
     if (new Date(response) <= lastSync) {
@@ -278,7 +283,7 @@ export class DefaultSyncService extends CoreSyncService {
     const stamp = await this.tokenService.getSecurityStamp(response.id);
     if (stamp != null && stamp !== response.securityStamp) {
       if (this.logoutCallback != null) {
-        await this.logoutCallback("invalidSecurityStamp");
+        await this.logoutCallback("invalidSecurityStamp", response.id);
       }
 
       throw new Error("Stamp has changed");
@@ -321,7 +326,14 @@ export class DefaultSyncService extends CoreSyncService {
 
     await this.syncProfileOrganizations(response, response.id);
 
-    if (await firstValueFrom(this.keyConnectorService.convertAccountRequired$)) {
+    // convertAccountRequired$ describes the active account, so only its own sync may act on it.
+    const activeUserId = await firstValueFrom(
+      this.accountService.activeAccount$.pipe(map((a) => a?.id)),
+    );
+    if (
+      response.id === activeUserId &&
+      (await firstValueFrom(this.keyConnectorService.convertAccountRequired$))
+    ) {
       this.messageSender.send("convertAccountToKeyConnector");
     }
   }
@@ -365,10 +377,9 @@ export class DefaultSyncService extends CoreSyncService {
     ) {
       // TDE user w/out MP went from having no password reset permission to having it.
       // Must set the force password reset reason so the auth guard will redirect to the set password page.
-      const userId = (await firstValueFrom(this.accountService.activeAccount$))?.id;
       await this.masterPasswordService.setForceSetPasswordReason(
         ForceSetPasswordReason.TdeUserWithoutPasswordHasPasswordResetPermission,
-        userId,
+        profileResponse.id,
       );
     }
   }

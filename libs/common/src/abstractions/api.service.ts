@@ -155,7 +155,10 @@ export abstract class ApiService {
   abstract getUserBillingHistory(): Promise<BillingHistoryResponse>;
 
   abstract getCipher(id: string): Promise<CipherResponse>;
-  abstract getFullCipherDetails(id: string): Promise<CipherResponse>;
+  /**
+   * @param userId The user to make the request as. Defaults to the active account.
+   */
+  abstract getFullCipherDetails(id: string, userId?: UserId): Promise<CipherResponse>;
   abstract getCipherAdmin(id: string): Promise<CipherResponse>;
   abstract getAttachmentData(
     cipherId: string,

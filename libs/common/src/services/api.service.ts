@@ -349,8 +349,8 @@ export class ApiService implements ApiServiceAbstraction {
     return new CipherResponse(r);
   }
 
-  async getFullCipherDetails(id: string): Promise<CipherResponse> {
-    const r = await this.send("GET", "/ciphers/" + id + "/details", null, true, true);
+  async getFullCipherDetails(id: string, userId?: UserId): Promise<CipherResponse> {
+    const r = await this.send("GET", "/ciphers/" + id + "/details", null, userId ?? true, true);
     return new CipherResponse(r);
   }
 

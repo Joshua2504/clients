@@ -25,6 +25,12 @@ export type SyncOptions = {
    * @default false
    */
   skipTokenRefresh?: boolean;
+  /**
+   * The user to sync. The user does not need to be the active account.
+   *
+   * @default The active account.
+   */
+  userId?: UserId;
 };
 
 /**
@@ -64,9 +70,10 @@ export abstract class SyncService {
    * Optionally does a full sync operation including going to the server to gather the source
    * of truth and set that data to state.
    * @param forceSync A boolean dictating if a sync should be forced. If `true` a sync will happen
-   * as long as the current user is authenticated. If `false` it will only sync if either a sync
-   * has not happened before or the last sync date for the active user is before their account
-   * revision date. Try to always use `false` if possible.
+   * as long as the target user is authenticated. If `false` it will only sync if either a sync
+   * has not happened before or the last sync date for the target user is before their account
+   * revision date. Try to always use `false` if possible. The target user is
+   * {@link SyncOptions.userId}, or the active account when it is not given.
    * @param syncOptions Options for customizing how the sync call should behave.
    */
   abstract fullSync(forceSync: boolean, syncOptions?: SyncOptions): Promise<boolean>;

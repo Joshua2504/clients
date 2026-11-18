@@ -111,7 +111,7 @@ export abstract class CoreSyncService implements SyncService {
           (!isEdit && localFolder == null) ||
           (isEdit && localFolder != null && localFolder.revisionDate < notification.revisionDate)
         ) {
-          const remoteFolder = await this.folderApiService.get(notification.id);
+          const remoteFolder = await this.folderApiService.get(notification.id, userId);
           if (remoteFolder != null) {
             await this.folderService.upsert(new FolderData(remoteFolder), userId);
             this.messageSender.send("syncedUpsertedFolder", { folderId: notification.id });
@@ -193,9 +193,9 @@ export abstract class CoreSyncService implements SyncService {
         }
 
         if (shouldUpdate) {
-          const remoteCipher = await this.apiService.getFullCipherDetails(notification.id);
+          const remoteCipher = await this.apiService.getFullCipherDetails(notification.id, userId);
           if (remoteCipher != null) {
-            await this.cipherService.upsert(new CipherData(remoteCipher));
+            await this.cipherService.upsert(new CipherData(remoteCipher), userId);
             this.messageSender.send("syncedUpsertedCipher", { cipherId: notification.id });
             return this.syncCompleted(true, userId);
           }

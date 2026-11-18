@@ -10,6 +10,9 @@ export abstract class FolderApiServiceAbstraction {
    * Deletes several folders in one request.
    */
   abstract deleteMany(ids: string[], userId: UserId): Promise<any>;
-  abstract get(id: string): Promise<FolderResponse>;
+  /**
+   * @param userId The user to make the request as. Defaults to the active account.
+   */
+  abstract get(id: string, userId?: UserId): Promise<FolderResponse>;
   abstract deleteAll(userId: UserId): Promise<void>;
 }

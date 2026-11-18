@@ -103,7 +103,7 @@ describe("ForegroundSyncService", () => {
 
     const testData: {
       input: boolean | SyncOptions | undefined;
-      normalized: Required<SyncOptions>;
+      normalized: SyncOptions;
     }[] = [
       {
         input: undefined,
@@ -140,6 +140,14 @@ describe("ForegroundSyncService", () => {
       {
         input: { allowThrowOnError: false, skipTokenRefresh: true },
         normalized: { allowThrowOnError: false, skipTokenRefresh: true },
+      },
+      {
+        input: { userId: "user2" as UserId },
+        normalized: {
+          allowThrowOnError: false,
+          skipTokenRefresh: false,
+          userId: "user2" as UserId,
+        },
       },
     ];
 
