@@ -13,7 +13,6 @@ import {
 
 import { PolicyService } from "../../admin-console/abstractions/policy/policy.service.abstraction";
 import { PolicyType } from "../../admin-console/enums/policy-type.enum";
-import { Policy } from "../../admin-console/models/domain/policy";
 import { getFirstPolicy } from "../../admin-console/services/policy/default-policy.service";
 import { AccountService } from "../../auth/abstractions/account.service";
 import { AuthService } from "../../auth/abstractions/auth.service";
@@ -224,6 +223,26 @@ export abstract class DomainSettingsService {
   getTargetingRulesForUrl: (url: string) => Promise<FormContent[] | null>;
 }
 
+/** The fill assist org policy as it applies to an account: `null` when none does. */
+type FillAssistPolicy = { rulesUrl?: string } | null;
+
+/**
+ * The fill assist policy for accounts that are served together. One page is collected once for
+ * all of them, so the stricter reading wins: the policy applies only when it applies to every
+ * account, and its custom rules feed is used only when every account names the same one. Accounts
+ * that disagree on the feed get the policy without a custom feed, which resolves to the server's.
+ */
+function fillAssistPolicyAcross(policies: FillAssistPolicy[]): FillAssistPolicy {
+  if (policies.length === 0 || policies.some((policy) => policy == null)) {
+    return null;
+  }
+  const rulesUrl = policies[0]?.rulesUrl;
+  if (rulesUrl != null && policies.every((policy) => policy?.rulesUrl === rulesUrl)) {
+    return { rulesUrl };
+  }
+  return {};
+}
+
 export class DefaultDomainSettingsService implements DomainSettingsService {
   private showFaviconsState: GlobalState<boolean>;
   readonly showFavicons$: Observable<boolean>;
@@ -259,6 +278,14 @@ export class DefaultDomainSettingsService implements DomainSettingsService {
     private configService: ConfigService,
     private environmentService: EnvironmentService,
     private authService: AuthService,
+    /**
+     * The accounts whose vaults are served together on a page, in order of precedence. Fill
+     * assist is one behaviour for all of them, so its organization policy is resolved across
+     * them (see {@link fillAssistPolicyAcross}) and an unlocked one of them suffices for
+     * {@link getTargetingRulesForUrl}. While it is absent or emits none, the active account
+     * alone decides.
+     */
+    private servedUserIds$?: Observable<UserId[]>,
   ) {
     this.showFaviconsState = this.stateProvider.getGlobal(SHOW_FAVICONS);
     this.showFavicons$ = this.showFaviconsState.state$.pipe(map((x) => x ?? true));
@@ -283,34 +310,14 @@ export class DefaultDomainSettingsService implements DomainSettingsService {
     this.enableFillAssistState = this.stateProvider.getGlobal(ENABLE_FILL_ASSIST);
     this.enableFillAssist$ = this.enableFillAssistState.state$.pipe(map((x) => x ?? false));
 
-    this.fillAssistPolicy$ = this.accountService.activeAccount$.pipe(
-      switchMap((account) => {
-        if (account == null) {
-          // Logged-out or transient no-account state: no policy applies.
-          return of<Policy[]>([]);
-        }
-        return this.policyService.policiesByType$(PolicyType.FillAssist, account.id);
-      }),
-      getFirstPolicy,
-      map((policy) => {
-        if (!policy?.enabled) {
-          return null;
-        }
-        // URL is optional (enabled policy still applies without it). Validate
-        // https here as defense-in-depth against API-bypass paths.
-        const rulesUrl = policy.data?.rulesUrl;
-        if (typeof rulesUrl === "string" && rulesUrl) {
-          try {
-            const parsed = new URL(rulesUrl);
-            if (parsed.protocol === "https:") {
-              return { rulesUrl };
-            }
-          } catch {
-            // Malformed URL — fall through to "policy applies, no URL".
-          }
-        }
-        return {};
-      }),
+    this.fillAssistPolicy$ = this.fillAssistUserIds$().pipe(
+      switchMap((userIds) =>
+        userIds.length === 0
+          ? // Logged-out or transient no-account state: no policy applies.
+            of<FillAssistPolicy[]>([])
+          : combineLatest(userIds.map((userId) => this.fillAssistPolicyFor$(userId))),
+      ),
+      map((policies) => fillAssistPolicyAcross(policies)),
       shareReplay({ bufferSize: 1, refCount: true }),
     );
 
@@ -398,6 +405,50 @@ export class DefaultDomainSettingsService implements DomainSettingsService {
     ]).pipe(
       map(([userSettingValue, policySettingValue]) => policySettingValue || userSettingValue),
       shareReplay({ bufferSize: 1, refCount: true }),
+    );
+  }
+
+  /**
+   * The accounts fill assist is resolved for: the served accounts, or the active account alone
+   * while none is served.
+   */
+  private fillAssistUserIds$(): Observable<UserId[]> {
+    const activeUserIds$ = this.accountService.activeAccount$.pipe(
+      map((account) => (account == null ? [] : [account.id])),
+    );
+    if (this.servedUserIds$ == null) {
+      return activeUserIds$;
+    }
+    return combineLatest([this.servedUserIds$, activeUserIds$]).pipe(
+      map(([servedUserIds, activeUserIds]) =>
+        servedUserIds.length > 0 ? servedUserIds : activeUserIds,
+      ),
+    );
+  }
+
+  /** {@link fillAssistPolicy$} for `userId` alone. */
+  private fillAssistPolicyFor$(userId: UserId): Observable<FillAssistPolicy> {
+    return this.policyService.policiesByType$(PolicyType.FillAssist, userId).pipe(
+      getFirstPolicy,
+      map((policy) => {
+        if (!policy?.enabled) {
+          return null;
+        }
+        // URL is optional (enabled policy still applies without it). Validate
+        // https here as defense-in-depth against API-bypass paths.
+        const rulesUrl = policy.data?.rulesUrl;
+        if (typeof rulesUrl === "string" && rulesUrl) {
+          try {
+            const parsed = new URL(rulesUrl);
+            if (parsed.protocol === "https:") {
+              return { rulesUrl };
+            }
+          } catch {
+            // Malformed URL — fall through to "policy applies, no URL".
+          }
+        }
+        return {};
+      }),
     );
   }
 
@@ -498,7 +549,10 @@ export class DefaultDomainSettingsService implements DomainSettingsService {
       return null;
     }
 
-    // Fill assist requires an unlocked vault
+    // Fill assist requires an unlocked vault. A served account is unlocked.
+    if (this.servedUserIds$ != null && (await firstValueFrom(this.servedUserIds$)).length > 0) {
+      return matchTargetingRulesForUrl(await firstValueFrom(this.targetingRules$), url);
+    }
     const activeAccount = await firstValueFrom(this.accountService.activeAccount$);
     if (!activeAccount) {
       return null;

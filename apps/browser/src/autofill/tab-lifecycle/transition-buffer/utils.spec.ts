@@ -2,7 +2,12 @@ import { UserId } from "@bitwarden/common/types/guid";
 
 import { TransitionValidity } from "./enums";
 import type { BufferedTransitionReport } from "./types";
-import { registerTransition, transitionKey, validateTransition } from "./utils";
+import {
+  registerTransition,
+  servedTransitionAccounts,
+  transitionKey,
+  validateTransition,
+} from "./utils";
 
 const userId = "user-1" as UserId;
 
@@ -13,57 +18,97 @@ function report(
   expiresAt = Number.MAX_SAFE_INTEGER,
   stampedAt = 0,
 ): BufferedTransitionReport {
-  return { userId, tabId, frameId, documentId, stampedAt, expiresAt };
+  return { userIds: [userId], tabId, frameId, documentId, stampedAt, expiresAt };
 }
 
 describe("registerTransition", () => {
   const options = { now: 1_000, maxAgeMs: 500 };
 
-  it("rejects a report without a userId", () => {
+  const userIds = [userId];
+  const otherUserId = "user-2" as UserId;
+
+  it("rejects a report without accounts", () => {
     expect(
-      registerTransition({ userId: undefined, tabId: 1, frameId: 0, documentId: "d" }, options),
+      registerTransition({ userIds: undefined, tabId: 1, frameId: 0, documentId: "d" }, options),
     ).toBe(undefined);
+    expect(
+      registerTransition({ userIds: [], tabId: 1, frameId: 0, documentId: "d" }, options),
+    ).toBe(undefined);
+  });
+
+  it("attributes the report to every account it names, once each and in order", () => {
+    expect(
+      registerTransition(
+        { userIds: [otherUserId, userId, otherUserId], tabId: 1, frameId: 0, documentId: "d" },
+        options,
+      ),
+    ).toEqual(expect.objectContaining({ userIds: [otherUserId, userId] }));
   });
 
   it("rejects a report without a tabId", () => {
     expect(
-      registerTransition({ userId, tabId: undefined, frameId: 0, documentId: "d" }, options),
+      registerTransition({ userIds, tabId: undefined, frameId: 0, documentId: "d" }, options),
     ).toBe(undefined);
   });
 
   it("rejects a report without a documentId", () => {
     expect(
-      registerTransition({ userId, tabId: 1, frameId: 0, documentId: undefined }, options),
+      registerTransition({ userIds, tabId: 1, frameId: 0, documentId: undefined }, options),
     ).toBe(undefined);
   });
 
   it("rejects a report with an empty documentId", () => {
-    expect(registerTransition({ userId, tabId: 1, frameId: 0, documentId: "" }, options)).toBe(
+    expect(registerTransition({ userIds, tabId: 1, frameId: 0, documentId: "" }, options)).toBe(
       undefined,
     );
   });
 
   it("stamps tab 0 and frame 0", () => {
-    expect(registerTransition({ userId, tabId: 0, frameId: 0, documentId: "d" }, options)).toEqual(
+    expect(registerTransition({ userIds, tabId: 0, frameId: 0, documentId: "d" }, options)).toEqual(
       expect.objectContaining({ tabId: 0, frameId: 0 }),
     );
   });
 
   it("stamps the admission time and an absolute deadline", () => {
-    expect(registerTransition({ userId, tabId: 1, frameId: 2, documentId: "d" }, options)).toEqual({
-      userId,
-      tabId: 1,
-      frameId: 2,
-      documentId: "d",
-      stampedAt: 1_000,
-      expiresAt: 1_500,
-    });
+    expect(registerTransition({ userIds, tabId: 1, frameId: 2, documentId: "d" }, options)).toEqual(
+      {
+        userIds: [userId],
+        tabId: 1,
+        frameId: 2,
+        documentId: "d",
+        stampedAt: 1_000,
+        expiresAt: 1_500,
+      },
+    );
   });
 
   it("stamps a report from the top frame whose frameId is absent", () => {
     expect(
-      registerTransition({ userId, tabId: 1, frameId: undefined, documentId: "d" }, options),
+      registerTransition({ userIds, tabId: 1, frameId: undefined, documentId: "d" }, options),
     ).toEqual(expect.objectContaining({ tabId: 1, frameId: undefined }));
+  });
+});
+
+describe("servedTransitionAccounts", () => {
+  const A = "user-a" as UserId;
+  const B = "user-b" as UserId;
+  const C = "user-c" as UserId;
+  const attributed = { userIds: [A, B] };
+
+  it("keeps the accounts that still serve, in the report's order", () => {
+    expect(servedTransitionAccounts(attributed, [B, A])).toEqual([A, B]);
+  });
+
+  it("drops an account that stopped serving and keeps the others", () => {
+    expect(servedTransitionAccounts(attributed, [B])).toEqual([B]);
+  });
+
+  it("does not add an account that started serving after the report", () => {
+    expect(servedTransitionAccounts(attributed, [A, C])).toEqual([A]);
+  });
+
+  it("is empty when none of the report's accounts serves", () => {
+    expect(servedTransitionAccounts(attributed, [C])).toEqual([]);
   });
 });
 

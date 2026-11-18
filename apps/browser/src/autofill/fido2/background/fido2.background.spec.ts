@@ -15,6 +15,7 @@ import {
 } from "@bitwarden/common/platform/abstractions/fido2/fido2-client.service.abstraction";
 import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
 import { Fido2ClientService } from "@bitwarden/common/platform/services/fido2/fido2-client.service";
+import { UserId } from "@bitwarden/common/types/guid";
 import { VaultSettingsService } from "@bitwarden/common/vault/abstractions/vault-settings/vault-settings.service";
 import { Fido2CredentialView } from "@bitwarden/common/vault/models/view/fido2-credential.view";
 
@@ -161,6 +162,43 @@ describe("Fido2Background", () => {
       await flushPromises();
 
       expect(updateContentScriptRegistrationSpy).toHaveBeenCalled();
+    });
+
+    describe("with the accounts that serve passkeys", () => {
+      let servedUserIds$: BehaviorSubject<UserId[]>;
+
+      beforeEach(() => {
+        servedUserIds$ = new BehaviorSubject<UserId[]>([]);
+        fido2Background["servedUserIds$"] = servedUserIds$;
+        activeAccountStatusMock$.next(AuthenticationStatus.LoggedOut);
+      });
+
+      it("skips the passkeys setting update while no account is signed in or serves", async () => {
+        fido2Background.init();
+        await flushPromises();
+
+        expect(updateContentScriptRegistrationSpy).not.toHaveBeenCalled();
+      });
+
+      it("triggers the passkeys setting update for a serving account without an active one", async () => {
+        servedUserIds$.next(["other-user" as UserId]);
+
+        fido2Background.init();
+        await flushPromises();
+
+        expect(updateContentScriptRegistrationSpy).toHaveBeenCalled();
+      });
+
+      it("triggers the passkeys setting update once an account starts serving", async () => {
+        fido2Background.init();
+        await flushPromises();
+        expect(updateContentScriptRegistrationSpy).not.toHaveBeenCalled();
+
+        servedUserIds$.next(["other-user" as UserId]);
+        await flushPromises();
+
+        expect(updateContentScriptRegistrationSpy).toHaveBeenCalled();
+      });
     });
   });
 

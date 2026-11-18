@@ -50,11 +50,11 @@ export type BufferAction = "resolve" | "drop" | "keep";
  */
 export type TransitionReport = Readonly<{
   /**
-   * The account the transition is attributed to, from the background's account state: the first
-   * of the accounts autofill serves when the transition was reported, which is the active account
-   * when it is unlocked; else the active account. See `multi-account.design.md`.
+   * The accounts the transition is attributed to, from the background's account state: the
+   * accounts autofill serves when the transition was reported, in their order of precedence;
+   * the active account alone when autofill serves none. See `multi-account.design.md`.
    */
-  userId: UserId | undefined;
+  userIds: readonly UserId[] | undefined;
   /** The reporting tab, from `chrome.runtime.MessageSender`. */
   tabId: number | undefined;
   /** The reporting frame, from `chrome.runtime.MessageSender`. `undefined` for the top frame. */

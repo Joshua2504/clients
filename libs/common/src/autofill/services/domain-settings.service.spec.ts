@@ -959,6 +959,112 @@ describe("DefaultDomainSettingsService", () => {
     });
   });
 
+  describe("fill assist across the accounts served together", () => {
+    const otherUserId = "other-user-id" as UserId;
+    let servedUserIds$: BehaviorSubject<UserId[]>;
+    let policiesByUser: Map<UserId, BehaviorSubject<Policy[]>>;
+    let served: DomainSettingsService;
+
+    const customPolicy = (rulesUrl: string) => [makeFillAssistPolicy({ rulesUrl })];
+
+    beforeEach(() => {
+      accountService.activeAccountSubject.next({ id: mockUserId } as any);
+      fillAssistFeatureFlagMock$.next(true);
+      servedUserIds$ = new BehaviorSubject<UserId[]>([mockUserId, otherUserId]);
+      policiesByUser = new Map([
+        [mockUserId, new BehaviorSubject<Policy[]>([])],
+        [otherUserId, new BehaviorSubject<Policy[]>([])],
+      ]);
+      policyService.policiesByType$.mockImplementation(
+        (_type, userId) => policiesByUser.get(userId) ?? of([]),
+      );
+      served = new DefaultDomainSettingsService(
+        fakeStateProvider,
+        policyService,
+        accountService,
+        configService,
+        environmentService,
+        authService,
+        servedUserIds$,
+      );
+    });
+
+    afterEach(() => {
+      policyService.policiesByType$.mockReset();
+    });
+
+    it("applies the policy only when it applies to every served account", async () => {
+      policiesByUser.get(otherUserId)!.next([makeFillAssistPolicy({})]);
+      await expect(firstValueFrom(served.fillAssistPolicy$)).resolves.toBeNull();
+      await expect(firstValueFrom(served.resolvedEnableFillAssist$)).resolves.toBe(false);
+
+      policiesByUser.get(mockUserId)!.next([makeFillAssistPolicy({})]);
+      await expect(firstValueFrom(served.fillAssistPolicy$)).resolves.toEqual({});
+      await expect(firstValueFrom(served.resolvedEnableFillAssist$)).resolves.toBe(true);
+    });
+
+    it("uses a custom rules feed only when every served account names the same one", async () => {
+      policiesByUser.get(mockUserId)!.next(customPolicy("https://rules.example.com/a"));
+      policiesByUser.get(otherUserId)!.next(customPolicy("https://rules.example.com/a"));
+      await expect(firstValueFrom(served.fillAssistPolicy$)).resolves.toEqual({
+        rulesUrl: "https://rules.example.com/a",
+      });
+
+      policiesByUser.get(otherUserId)!.next(customPolicy("https://rules.example.com/b"));
+      await expect(firstValueFrom(served.fillAssistPolicy$)).resolves.toEqual({});
+      await expect(firstValueFrom(served.effectiveFillAssistRulesUrl$)).resolves.toBe(
+        "https://server.example.com/rules/",
+      );
+    });
+
+    it("follows the one account that still serves once the other locks", async () => {
+      policiesByUser.get(otherUserId)!.next(customPolicy("https://rules.example.com/b"));
+      servedUserIds$.next([otherUserId]);
+
+      await expect(firstValueFrom(served.fillAssistPolicy$)).resolves.toEqual({
+        rulesUrl: "https://rules.example.com/b",
+      });
+    });
+
+    it("follows the active account while no account is served", async () => {
+      policiesByUser.get(mockUserId)!.next(customPolicy("https://rules.example.com/a"));
+      servedUserIds$.next([]);
+
+      await expect(firstValueFrom(served.fillAssistPolicy$)).resolves.toEqual({
+        rulesUrl: "https://rules.example.com/a",
+      });
+    });
+
+    it("keeps the user's explicit choice whatever the accounts' policies", async () => {
+      policiesByUser.get(mockUserId)!.next([makeFillAssistPolicy({})]);
+      policiesByUser.get(otherUserId)!.next([makeFillAssistPolicy({})]);
+      await served.setEnableFillAssist(false);
+
+      await expect(firstValueFrom(served.resolvedEnableFillAssist$)).resolves.toBe(false);
+    });
+
+    it("matches targeting rules for a served account while the active account is locked", async () => {
+      const rules: TargetingRulesByDomain = {
+        "example.com": {
+          forms: [
+            { category: FormPurposeCategories.AccountLogin, fields: { username: ["input#u"] } },
+          ],
+        },
+      };
+      authService.authStatusFor$.mockReturnValue(of(AuthenticationStatus.Locked));
+      servedUserIds$.next([otherUserId]);
+      await served.setEnableFillAssist(true);
+      await served.setTargetingRules(rules);
+
+      await expect(
+        served.getTargetingRulesForUrl("https://example.com/login"),
+      ).resolves.not.toBeNull();
+
+      servedUserIds$.next([]);
+      await expect(served.getTargetingRulesForUrl("https://example.com/login")).resolves.toBeNull();
+    });
+  });
+
   describe("effectiveFillAssistRulesUrl$", () => {
     beforeEach(() => {
       accountService.activeAccountSubject.next({ id: mockUserId } as any);

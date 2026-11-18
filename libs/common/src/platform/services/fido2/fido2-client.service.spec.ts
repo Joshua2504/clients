@@ -860,6 +860,43 @@ describe("FidoAuthenticatorService", () => {
       expect(result).toBe(true);
     });
 
+    describe("with no account signed in as the active one", () => {
+      const servedClient = (candidateUserIds: UserId[]) =>
+        new Fido2ClientService(
+          authenticator,
+          configService,
+          authService,
+          vaultSettingsService,
+          domainSettingsService,
+          taskSchedulerService,
+          requestManager,
+          undefined,
+          of(candidateUserIds),
+        );
+
+      beforeEach(() => {
+        authService.getAuthStatus.mockResolvedValue(AuthenticationStatus.LoggedOut);
+        domainSettingsService.blockedInteractionsUris$ = of({});
+      });
+
+      it("returns true while an account is served", async () => {
+        const result = await servedClient(["other-user" as UserId]).isFido2FeatureEnabled(
+          hostname,
+          origin,
+        );
+
+        expect(result).toBe(true);
+      });
+
+      it("returns false while no account is served", async () => {
+        expect(await servedClient([]).isFido2FeatureEnabled(hostname, origin)).toBe(false);
+      });
+
+      it("returns false without the accounts served, as before", async () => {
+        expect(await client.isFido2FeatureEnabled(hostname, origin)).toBe(false);
+      });
+    });
+
     it("rejects via `blockedInteractionsUris` regardless of `neverDomains` state", async () => {
       domainSettingsService.blockedInteractionsUris$ = of({ "sub.example.com": null });
       domainSettingsService.neverDomains$ = of({});

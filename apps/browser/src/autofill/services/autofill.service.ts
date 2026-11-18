@@ -1,4 +1,6 @@
 import {
+  combineLatest,
+  distinctUntilChanged,
   filter,
   firstValueFrom,
   merge,
@@ -6,11 +8,12 @@ import {
   ReplaySubject,
   scan,
   startWith,
+  switchMap,
   timer,
 } from "rxjs";
 import { map, pairwise, share, takeUntil } from "rxjs/operators";
 
-import { AccountInfo, AccountService } from "@bitwarden/common/auth/abstractions/account.service";
+import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { UserVerificationService } from "@bitwarden/common/auth/abstractions/user-verification/user-verification.service.abstraction";
 import {
   AutofillOverlayVisibility,
@@ -223,17 +226,47 @@ export default class AutofillService implements AutofillServiceInterface {
         this.handleInlineMenuVisibilitySettingsChange(previousSetting, currentSetting),
       );
 
-    this.autofillSettingsService.showInlineMenuCards$
+    this.inlineMenuTypeShown$(
+      (userId) => this.autofillSettingsService.showInlineMenuCardsFor$(userId),
+      this.autofillSettingsService.showInlineMenuCards$,
+    )
       .pipe(startWith(undefined), pairwise())
       .subscribe(([previousSetting, currentSetting]) =>
         this.handleInlineMenuVisibilitySettingsChange(previousSetting, currentSetting),
       );
 
-    this.autofillSettingsService.showInlineMenuIdentities$
+    this.inlineMenuTypeShown$(
+      (userId) => this.autofillSettingsService.showInlineMenuIdentitiesFor$(userId),
+      this.autofillSettingsService.showInlineMenuIdentities$,
+    )
       .pipe(startWith(undefined), pairwise())
       .subscribe(([previousSetting, currentSetting]) =>
         this.handleInlineMenuVisibilitySettingsChange(previousSetting, currentSetting),
       );
+  }
+
+  /**
+   * Whether pages set up the inline menu on fields of a cipher type, as the overlay answers the
+   * content scripts: on when any account that serves autofill shows the type, and the active
+   * account's setting while none serves. A change reloads the scripts.
+   *
+   * @param settingFor$ - Reads the setting of one account
+   * @param activeAccountSetting$ - The setting of the active account
+   */
+  private inlineMenuTypeShown$(
+    settingFor$: (userId: UserId) => Observable<boolean>,
+    activeAccountSetting$: Observable<boolean>,
+  ): Observable<boolean> {
+    return this.autofillAccountsService.autofillUserIds$.pipe(
+      switchMap((userIds) =>
+        userIds.length === 0
+          ? activeAccountSetting$
+          : combineLatest(userIds.map((userId) => settingFor$(userId))).pipe(
+              map((settings) => settings.some((shown) => shown)),
+            ),
+      ),
+      distinctUntilChanged(),
+    );
   }
 
   /**
@@ -271,7 +304,13 @@ export default class AutofillService implements AutofillServiceInterface {
     // The accounts autofill serves are unlocked, so their settings can be read.
     const autofillUserIds = await firstValueFrom(this.autofillAccountsService.autofillUserIds$);
 
-    const injectedScripts = [await this.getBootstrapAutofillContentScript(activeAccount)];
+    // The inline menu is set up for a signed-in user: the active account, or an account that
+    // serves autofill while there is no active one.
+    const injectedScripts = [
+      await this.getBootstrapAutofillContentScript(
+        activeAccount != null || autofillUserIds.length > 0,
+      ),
+    ];
 
     const autoFillOnPageLoadIsEnabled =
       autofillUserIds.length > 0 && (await this.getAutofillOnPageLoad(autofillUserIds));
@@ -310,14 +349,14 @@ export default class AutofillService implements AutofillServiceInterface {
    * inline menu is enabled, and whether the user has the notification bar
    * enabled.
    *
-   * @param activeAccount - The active account
+   * Both are settings of the extension, not of an account.
+   *
+   * @param isSignedIn - Whether there is an active account or an account that serves autofill
    */
-  private async getBootstrapAutofillContentScript(
-    activeAccount: ({ id: UserId | undefined } & AccountInfo) | null | undefined,
-  ): Promise<string> {
+  private async getBootstrapAutofillContentScript(isSignedIn: boolean): Promise<string> {
     let inlineMenuVisibility: InlineMenuVisibilitySetting = AutofillOverlayVisibility.Off;
 
-    if (activeAccount) {
+    if (isSignedIn) {
       inlineMenuVisibility = await this.getInlineMenuVisibility();
     }
 
@@ -691,15 +730,25 @@ export default class AutofillService implements AutofillServiceInterface {
   }
 
   /**
-   * Activates the autofill on page load org policy.
+   * Activates the autofill on page load org policy. The policy is an account's: it turns autofill
+   * on page load on for the account whose organization has it, be that the active account or
+   * another account that serves autofill, and for no other.
    */
   async setAutoFillOnPageLoadOrgPolicy(): Promise<void> {
-    const autofillOnPageLoadOrgPolicy = await firstValueFrom(
-      this.autofillSettingsService.activateAutofillOnPageLoadFromPolicy$,
-    );
+    const activeAccount = await firstValueFrom(this.accountService.activeAccount$);
+    const userIds = new Set(await firstValueFrom(this.autofillAccountsService.autofillUserIds$));
+    if (activeAccount?.id != null) {
+      userIds.add(activeAccount.id);
+    }
 
-    if (autofillOnPageLoadOrgPolicy) {
-      await this.autofillSettingsService.setAutofillOnPageLoad(true);
+    for (const userId of userIds) {
+      const autofillOnPageLoadOrgPolicy = await firstValueFrom(
+        this.autofillSettingsService.activateAutofillOnPageLoadFromPolicyFor$(userId),
+      );
+
+      if (autofillOnPageLoadOrgPolicy) {
+        await this.autofillSettingsService.setAutofillOnPageLoadFor(true, userId);
+      }
     }
   }
 

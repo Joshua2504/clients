@@ -1,5 +1,6 @@
 import {
   BehaviorSubject,
+  combineLatest,
   concatMap,
   debounceTime,
   filter,
@@ -21,7 +22,7 @@ import { parse } from "tldts";
 import { Account, AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
 import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
-import { getOptionalUserId, getUserId } from "@bitwarden/common/auth/services/account.service";
+import { getOptionalUserId } from "@bitwarden/common/auth/services/account.service";
 import {
   AutofillOverlayVisibility,
   AutofillTargetingRuleTypes,
@@ -90,7 +91,7 @@ import {
 } from "../enums/autofill-overlay.enum";
 import AutofillField from "../models/autofill-field";
 import { AutofillService, PageDetail } from "../services/abstractions/autofill.service";
-import { CipherUse } from "../services/abstractions/fill-cipher-policy";
+import { CipherUse, SaveCandidate } from "../services/abstractions/fill-cipher-policy";
 import { InlineMenuFieldQualificationService } from "../services/abstractions/inline-menu-field-qualifications.service";
 import { MultiAccountFillCipherPolicy } from "../services/abstractions/multi-account-fill-cipher-policy";
 import { didFillOccur, shouldAutoCopyTotp } from "../types/fill-result";
@@ -103,6 +104,7 @@ import {
   specialCharacterToKeyMap,
 } from "../utils";
 import { trackGeneratedCredential } from "../utils/credential-history-utils";
+import { defaultSaveAccount, showsAccountLabels } from "../utils/save-target";
 import { getSubFrameUrlVariations } from "../utils/url-variations";
 
 import { AutofillOrchestrator } from "./abstractions/autofill-orchestrator";
@@ -166,6 +168,12 @@ export class OverlayBackground implements OverlayBackgroundInterface {
   private readonly requestGeneratedPassword$ = new Subject<GenerateRequest>();
   private readonly clearGeneratedPassword$ = new Subject<void>();
   private credential$ = new BehaviorSubject<string>("");
+  /** The account the inline menu generates passwords for. See {@link syncGeneratorAccount}. */
+  private readonly generatorAccount$ = new ReplaySubject<Account>(1);
+  private generatorUserId: UserId | null = null;
+  private generatorAccountSubscription?: Subscription;
+  /** The URL of the tab that holds the focused field, as the candidate of a save. */
+  private focusedFieldTabUrl?: string;
   private credentialPipelineSubscription: Subscription | undefined;
   private pageDetailsForTab: PageDetailsForTab = {};
   private subFrameOffsetsForTab: SubFrameOffsetsForTab = {};
@@ -299,6 +307,12 @@ export class OverlayBackground implements OverlayBackgroundInterface {
     private multiAccountFillCipherPolicy: MultiAccountFillCipherPolicy,
     private autofillAccountsService: AutofillAccountsService,
     private billingAccountProfileStateService: BillingAccountProfileStateService,
+    /**
+     * Makes an account the active one. The item form shows the active account's vault, so a new
+     * item for another account makes its account the active one first. Without it such an item
+     * is not opened.
+     */
+    private switchAccount?: (userId: UserId) => Promise<void>,
   ) {
     this.initOverlayEventObservables();
   }
@@ -316,10 +330,21 @@ export class OverlayBackground implements OverlayBackgroundInterface {
     const yieldedPassword$ = merge(
       this.generatorService.generate$({
         on$: this.requestGeneratedPassword$,
-        account$: this.accountService.activeAccount$.pipe(filter((a): a is Account => a !== null)),
+        account$: this.generatorAccount$,
       }),
       this.clearGeneratedPassword$.pipe(map((): null => null)),
     );
+
+    // The generator follows the account a new login would be saved to, whichever account is
+    // active. Both sources emit their current value on subscription.
+    if (!this.generatorAccountSubscription) {
+      this.generatorAccountSubscription = combineLatest([
+        this.accountService.activeAccount$,
+        this.autofillAccountsService.autofillUserIds$,
+      ])
+        .pipe(concatMap(() => this.syncGeneratorAccount()))
+        .subscribe();
+    }
 
     // init() is called exactly once; this guard is a defensive safeguard against
     // unexpected re-entry creating a duplicate subscription.
@@ -334,9 +359,10 @@ export class OverlayBackground implements OverlayBackgroundInterface {
             // are shown to the user. InlineMenuInit fires inside handlePortOnConnect,
             // so the password is rendered in the same async turn it is generated.
             try {
+              // The history is the generating account's, like the options it was made with.
               await trackGeneratedCredential(
                 this.generatorHistoryService,
-                this.accountService.activeAccount$,
+                this.generatorAccount$,
                 generated,
               );
             } catch (e) {
@@ -520,6 +546,60 @@ export class OverlayBackground implements OverlayBackgroundInterface {
     } catch (error) {
       this.logService.error(error);
     }
+  }
+
+  /**
+   * The account a new login made from the inline menu is saved to, and for which its password is
+   * generated: the active account while it serves autofill and may save, otherwise the first
+   * account serving autofill that may. With no account serving autofill it is the active account,
+   * which is asked to unlock first. See {@link defaultSaveAccount}.
+   *
+   * When no account's policy takes the login, the first account that serves autofill stands in:
+   * its generator still fills a password, and the item form opens without one.
+   *
+   * @param candidate - The login that would be saved. Defaults to one for the focused tab.
+   */
+  private async getSaveTargetUserId(candidate?: SaveCandidate): Promise<UserId | null> {
+    const [activeUserId, autofillUserIds] = await Promise.all([
+      firstValueFrom(this.accountService.activeAccount$.pipe(getOptionalUserId)),
+      this.getAutofillUserIds(),
+    ]);
+    const saveAccount = await defaultSaveAccount(
+      candidate ?? { uri: this.focusedFieldTabUrl ?? "" },
+      autofillUserIds,
+      activeUserId ?? null,
+      this.multiAccountFillCipherPolicy,
+    );
+    return saveAccount ?? autofillUserIds[0] ?? activeUserId ?? null;
+  }
+
+  /**
+   * Points the password generator at the account {@link getSaveTargetUserId} names, so the
+   * password is made with that account's generator options and policies. A password generated
+   * for another account is discarded.
+   *
+   * @returns The account the generator now generates for, null when there is none.
+   */
+  private async syncGeneratorAccount(): Promise<UserId | null> {
+    try {
+      const userId = await this.getSaveTargetUserId();
+      if (userId == null || userId === this.generatorUserId) {
+        return this.generatorUserId;
+      }
+      const accountInfo = (await firstValueFrom(this.accountService.accounts$))[userId];
+      if (accountInfo == null) {
+        return this.generatorUserId;
+      }
+
+      if (this.generatorUserId != null) {
+        this.clearGeneratedPassword$.next();
+      }
+      this.generatorUserId = userId;
+      this.generatorAccount$.next({ id: userId, ...accountInfo });
+    } catch (error) {
+      this.logService.error(error);
+    }
+    return this.generatorUserId;
   }
 
   /**
@@ -779,8 +859,9 @@ export class OverlayBackground implements OverlayBackgroundInterface {
 
   /**
    * What the inline menu needs to attribute its ciphers to their accounts: the active account,
-   * and a label per account when more than one account serves autofill. With a single account
-   * there is nothing to tell apart and no label is sent.
+   * the icons server of every other account, and a label per account when more than one account
+   * serves autofill or the one that does is not the active account. While the active account
+   * alone serves there is nothing to tell apart and no label is sent.
    */
   private async getInlineMenuAccountDisplay(): Promise<InlineMenuAccountDisplay> {
     const [activeUserId, autofillUserIds] = await Promise.all([
@@ -788,7 +869,7 @@ export class OverlayBackground implements OverlayBackgroundInterface {
       this.getAutofillUserIds(),
     ]);
     const labels = new Map<UserId, string>();
-    if (autofillUserIds.length > 1) {
+    if (showsAccountLabels(autofillUserIds, activeUserId ?? null)) {
       const accounts = await firstValueFrom(this.accountService.accounts$);
       for (const userId of autofillUserIds) {
         const email = accounts[userId]?.email;
@@ -798,7 +879,18 @@ export class OverlayBackground implements OverlayBackgroundInterface {
       }
     }
 
-    return { activeUserId: activeUserId ?? null, labels };
+    // An icon is served by the cipher's own server. The active account's is the environment in
+    // effect; any other account's is read for that account.
+    const iconsServerUrls = new Map<UserId, string | null>();
+    for (const userId of autofillUserIds) {
+      if (userId === activeUserId) {
+        continue;
+      }
+      const env = await firstValueFrom(this.environmentService.getEnvironment$(userId));
+      iconsServerUrls.set(userId, env?.getIconsUrl() ?? null);
+    }
+
+    return { activeUserId: activeUserId ?? null, labels, iconsServerUrls };
   }
 
   /**
@@ -1050,7 +1142,13 @@ export class OverlayBackground implements OverlayBackgroundInterface {
       type: cipher.type,
       reprompt: cipher.reprompt,
       favorite: cipher.favorite,
-      icon: buildCipherIcon(iconsServerUrl, cipher, showFavicons ?? false),
+      icon: buildCipherIcon(
+        userId === accountDisplay.activeUserId
+          ? iconsServerUrl
+          : (accountDisplay.iconsServerUrls.get(userId) ?? null),
+        cipher,
+        showFavicons ?? false,
+      ),
       accountCreationFieldType: this.focusedFieldData?.accountCreationFieldType,
     };
 
@@ -2318,6 +2416,7 @@ export class OverlayBackground implements OverlayBackgroundInterface {
       tabId: sender.tab.id,
       frameId,
     };
+    this.focusedFieldTabUrl = sender.tab.url;
     this.allFieldData = allFieldsRect ?? [];
     this.isFieldCurrentlyFocused = true;
 
@@ -2460,6 +2559,7 @@ export class OverlayBackground implements OverlayBackgroundInterface {
    * @param refreshPassword - Identifies whether the generated password should be refreshed
    */
   private async updateGeneratedPassword(refreshPassword: boolean = false) {
+    await this.syncGeneratorAccount();
     if (!this.credential$.value || refreshPassword) {
       this.requestGeneratedPassword$.next({
         source: PasswordGenerateRequestSource.InlineMenu,
@@ -2529,18 +2629,17 @@ export class OverlayBackground implements OverlayBackgroundInterface {
         uri: "",
       });
 
-      // The password was generated for the active account, so the fill is that account's.
-      const activeUserId = await firstValueFrom(
-        this.accountService.activeAccount$.pipe(getOptionalUserId),
-      );
-      if (!activeUserId) {
+      // The password was generated for the account a new login is saved to, so the fill is
+      // that account's.
+      const generatorUserId = this.generatorUserId;
+      if (!generatorUserId) {
         return;
       }
 
       const generatedPasswordFill = await this.autofillOrchestrator.fillCipher({
         tab: senderTab,
         cipher,
-        userId: activeUserId,
+        userId: generatorUserId,
         pageDetails,
         fillNewPassword: true,
         allowTotpAutofill: false,
@@ -3234,6 +3333,35 @@ export class OverlayBackground implements OverlayBackgroundInterface {
   }
 
   /**
+   * Makes `userId` the active account, so the item form shows its vault.
+   *
+   * @returns false when the account is not active and cannot become so; no item form may open.
+   */
+  private async activateAccount(userId: UserId): Promise<boolean> {
+    const activeUserId = await firstValueFrom(
+      this.accountService.activeAccount$.pipe(getOptionalUserId),
+    );
+    if (activeUserId === userId) {
+      return true;
+    }
+    if (
+      this.switchAccount == null ||
+      !(await firstValueFrom(this.autofillAccountsService.isAutofillUser$(userId)))
+    ) {
+      return false;
+    }
+    try {
+      await this.switchAccount(userId);
+    } catch (error) {
+      this.logService.error(error);
+      return false;
+    }
+    return (
+      (await firstValueFrom(this.accountService.activeAccount$.pipe(getOptionalUserId))) === userId
+    );
+  }
+
+  /**
    * Handles building a new cipher and opening the add/edit vault item popout.
    *
    * @param login - The login data captured from the extension message
@@ -3262,18 +3390,26 @@ export class OverlayBackground implements OverlayBackgroundInterface {
 
     try {
       this.closeInlineMenu(sender);
-      const activeUserId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+      // The item is added to the account a new login is saved to, which is the active account
+      // whenever it serves autofill and may save.
+      const saveCandidate: SaveCandidate | undefined =
+        login && cipherView.type === CipherType.Login
+          ? {
+              uri: login.uri || sender.tab?.url || "",
+              username: login.username,
+              password: login.password,
+            }
+          : undefined;
+      const targetUserId = await this.getSaveTargetUserId(
+        saveCandidate ?? { uri: sender.tab?.url || "" },
+      );
+      if (targetUserId == null) {
+        this.currentAddNewItemData = null;
+        return;
+      }
       if (
-        login &&
-        cipherView.type === CipherType.Login &&
-        !(await this.multiAccountFillCipherPolicy.canOfferSave(
-          {
-            uri: login.uri || sender.tab?.url || "",
-            username: login.username,
-            password: login.password,
-          },
-          activeUserId,
-        ))
+        saveCandidate &&
+        !(await this.multiAccountFillCipherPolicy.canOfferSave(saveCandidate, targetUserId))
       ) {
         cipherView.login.password = "";
       }
@@ -3282,8 +3418,14 @@ export class OverlayBackground implements OverlayBackgroundInterface {
           cipher: cipherView,
           collectionIds: cipherView.collectionIds,
         },
-        activeUserId,
+        targetUserId,
       );
+
+      // The item form shows and saves to the active account's vault.
+      if (!(await this.activateAccount(targetUserId))) {
+        this.currentAddNewItemData = null;
+        return;
+      }
 
       if (sender.tab) {
         await this.openAddEditVaultItemPopout(sender.tab, {
@@ -3954,9 +4096,13 @@ export class OverlayBackground implements OverlayBackgroundInterface {
       return false;
     }
 
+    if ((await this.syncGeneratorAccount()) == null) {
+      return false;
+    }
+
     const { capabilities } = await firstValueFrom(
       this.generatorService.preferredAlgorithm$("password", {
-        account$: this.accountService.activeAccount$.pipe(filter((a): a is Account => a !== null)),
+        account$: this.generatorAccount$,
       }),
     );
 

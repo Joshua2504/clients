@@ -38,7 +38,7 @@ export function AtRiskNotification({
   theme = ThemeTypes.Light,
   params,
 }: AtRiskNotificationProps) {
-  const { hasPasswordChangeUri, organizationName } = params;
+  const { hasPasswordChangeUri, organizationName, accountLabel } = params;
   const riskMessage = chrome.i18n.getMessage(
     hasPasswordChangeUri ? "atRiskChangePrompt" : "atRiskNavigatePromptV2",
     organizationName,
@@ -55,6 +55,7 @@ export function AtRiskNotification({
       ${AtRiskNotificationBody({
         theme,
         riskMessage,
+        accountLabel,
       })}
       ${
         handleChangePasswordClick

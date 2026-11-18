@@ -166,6 +166,13 @@ describe("AutofillService", () => {
     autofillSettingsService.inlineMenuVisibility$ = inlineMenuVisibilityMock$;
     autofillSettingsService.showInlineMenuCards$ = showInlineMenuCardsMock$;
     autofillSettingsService.showInlineMenuIdentities$ = showInlineMenuIdentitiesMock$;
+    // The per-account readers follow the active-account ones while one account serves.
+    autofillSettingsService.showInlineMenuCardsFor$.mockImplementation(
+      () => showInlineMenuCardsMock$,
+    );
+    autofillSettingsService.showInlineMenuIdentitiesFor$.mockImplementation(
+      () => showInlineMenuIdentitiesMock$,
+    );
     autofillSettingsService.autofillOnPageLoadFor$.mockReturnValue(of(true));
     autofillUserIdsMock$ = new BehaviorSubject([mockUserId]);
     autofillAccountsService = mock<AutofillAccountsService>();
@@ -475,6 +482,101 @@ describe("AutofillService", () => {
     });
   });
 
+  describe("setAutoFillOnPageLoadOrgPolicy", () => {
+    const otherUserId = Utils.newGuid() as UserId;
+
+    it("turns autofill on page load on for the active account its policy applies to", async () => {
+      autofillSettingsService.activateAutofillOnPageLoadFromPolicyFor$.mockReturnValue(of(true));
+
+      await autofillService.setAutoFillOnPageLoadOrgPolicy();
+
+      expect(autofillSettingsService.setAutofillOnPageLoadFor).toHaveBeenCalledTimes(1);
+      expect(autofillSettingsService.setAutofillOnPageLoadFor).toHaveBeenCalledWith(
+        true,
+        mockUserId,
+      );
+    });
+
+    it("leaves the setting alone without the policy", async () => {
+      autofillSettingsService.activateAutofillOnPageLoadFromPolicyFor$.mockReturnValue(of(false));
+
+      await autofillService.setAutoFillOnPageLoadOrgPolicy();
+
+      expect(autofillSettingsService.setAutofillOnPageLoadFor).not.toHaveBeenCalled();
+    });
+
+    it("applies the policy of each account to that account alone", async () => {
+      autofillUserIdsMock$.next([mockUserId, otherUserId]);
+      autofillSettingsService.activateAutofillOnPageLoadFromPolicyFor$.mockImplementation(
+        (userId) => of(userId === otherUserId),
+      );
+
+      await autofillService.setAutoFillOnPageLoadOrgPolicy();
+
+      expect(autofillSettingsService.setAutofillOnPageLoadFor).toHaveBeenCalledTimes(1);
+      expect(autofillSettingsService.setAutofillOnPageLoadFor).toHaveBeenCalledWith(
+        true,
+        otherUserId,
+      );
+    });
+
+    it("applies the policy of a serving account while the active account is locked", async () => {
+      autofillUserIdsMock$.next([otherUserId]);
+      autofillSettingsService.activateAutofillOnPageLoadFromPolicyFor$.mockImplementation(
+        (userId) => of(userId === otherUserId),
+      );
+
+      await autofillService.setAutoFillOnPageLoadOrgPolicy();
+
+      expect(autofillSettingsService.setAutofillOnPageLoadFor).toHaveBeenCalledWith(
+        true,
+        otherUserId,
+      );
+      expect(autofillSettingsService.setAutofillOnPageLoadFor).not.toHaveBeenCalledWith(
+        true,
+        mockUserId,
+      );
+    });
+  });
+
+  describe("the inline menu's card and identity settings", () => {
+    const otherUserId = Utils.newGuid() as UserId;
+
+    beforeEach(async () => {
+      jest.spyOn(BrowserApi, "tabsQuery").mockResolvedValue([]);
+      jest.spyOn(autofillService, "reloadAutofillScripts").mockImplementation();
+    });
+
+    it("reload the scripts when the first serving account starts showing cards", async () => {
+      const otherShowsCards$ = new BehaviorSubject(false);
+      autofillSettingsService.showInlineMenuCardsFor$.mockImplementation((userId) =>
+        userId === otherUserId ? otherShowsCards$ : showInlineMenuCardsMock$,
+      );
+      autofillUserIdsMock$.next([mockUserId, otherUserId]);
+      await autofillService.loadAutofillScriptsOnInstall();
+      await flushPromises();
+
+      otherShowsCards$.next(true);
+      await flushPromises();
+
+      expect(autofillService.reloadAutofillScripts).toHaveBeenCalledTimes(1);
+    });
+
+    it("do not reload the scripts while another serving account already shows cards", async () => {
+      autofillSettingsService.showInlineMenuCardsFor$.mockImplementation((userId) =>
+        userId === otherUserId ? of(true) : showInlineMenuCardsMock$,
+      );
+      autofillUserIdsMock$.next([mockUserId, otherUserId]);
+      await autofillService.loadAutofillScriptsOnInstall();
+      await flushPromises();
+
+      showInlineMenuCardsMock$.next(true);
+      await flushPromises();
+
+      expect(autofillService.reloadAutofillScripts).not.toHaveBeenCalled();
+    });
+  });
+
   describe("injectAutofillScripts", () => {
     const autofillBootstrapScript = "bootstrap-autofill.js";
     const autofillOverlayBootstrapScript = "bootstrap-autofill-overlay.js";
@@ -582,6 +684,39 @@ describe("AutofillService", () => {
         await autofillService.injectAutofillScripts(sender.tab, sender.frameId, true);
 
         expect(BrowserApi.executeScriptInTab).toHaveBeenCalledWith(tabMock.id, autofillerScript);
+      });
+    });
+
+    describe("with no active account", () => {
+      const otherUserId = Utils.newGuid() as UserId;
+      const overlayScript = {
+        file: `content/${autofillOverlayBootstrapScript}`,
+        frameId: 1,
+        ...defaultExecuteScriptOptions,
+      };
+
+      beforeEach(async () => {
+        await accountService.switchAccount(null);
+      });
+
+      afterEach(async () => {
+        await accountService.switchAccount(mockUserId);
+      });
+
+      it("sets the inline menu up while another account serves autofill", async () => {
+        autofillUserIdsMock$.next([otherUserId]);
+
+        await autofillService.injectAutofillScripts(sender.tab, sender.frameId);
+
+        expect(BrowserApi.executeScriptInTab).toHaveBeenCalledWith(tabMock.id, overlayScript);
+      });
+
+      it("leaves the inline menu out while no account serves autofill", async () => {
+        autofillUserIdsMock$.next([]);
+
+        await autofillService.injectAutofillScripts(sender.tab, sender.frameId);
+
+        expect(BrowserApi.executeScriptInTab).not.toHaveBeenCalledWith(tabMock.id, overlayScript);
       });
     });
 

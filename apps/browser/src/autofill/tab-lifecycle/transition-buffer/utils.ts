@@ -1,3 +1,5 @@
+import type { UserId } from "@bitwarden/common/types/guid";
+
 import type { TransitionReport } from "../types";
 
 import { TransitionValidity } from "./enums";
@@ -6,7 +8,7 @@ import type { BufferedTransitionReport, LiveFrame } from "./types";
 /**
  * Stamps a reported transition with the time it was reported and the deadline it expires at.
  *
- * Stamping fails closed: a report that belongs to no account (no `userId`), cannot be targeted
+ * Stamping fails closed: a report that belongs to no account (no `userIds`), cannot be targeted
  * (no `tabId`), or cannot be validated later (no `documentId`, or an empty one) is rejected.
  *
  * @param report The facts of the transition.
@@ -18,13 +20,14 @@ export function registerTransition(
   report: TransitionReport,
   options: { now: number; maxAgeMs: number },
 ): BufferedTransitionReport | undefined {
-  const { userId, tabId, frameId, documentId } = report;
-  if (!userId || tabId === undefined || !documentId) {
+  const { tabId, frameId, documentId } = report;
+  const userIds = [...new Set((report.userIds ?? []).filter((userId) => !!userId))];
+  if (userIds.length === 0 || tabId === undefined || !documentId) {
     return undefined;
   }
 
   return {
-    userId,
+    userIds,
     tabId,
     frameId,
     documentId,
@@ -59,6 +62,23 @@ export function validateTransition(
     return TransitionValidity.DocumentChanged;
   }
   return TransitionValidity.Valid;
+}
+
+/**
+ * The accounts a resolved transition may still be acted on for: those it was attributed to that
+ * are the active account or serve autofill now, in the report's order. Empty when none is left,
+ * and the transition must then not be acted on. An account that started serving after the
+ * transition was reported is not among them.
+ *
+ * @param report The resolved transition.
+ * @param currentUserIds The active account and the accounts autofill serves now.
+ */
+export function servedTransitionAccounts(
+  report: Pick<BufferedTransitionReport, "userIds">,
+  currentUserIds: Iterable<UserId>,
+): UserId[] {
+  const current = new Set(currentUserIds);
+  return report.userIds.filter((userId) => current.has(userId));
 }
 
 /**

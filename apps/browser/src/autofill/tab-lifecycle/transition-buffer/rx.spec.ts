@@ -27,7 +27,7 @@ function report(
   expiresAt = Number.MAX_SAFE_INTEGER,
   stampedAt = 0,
 ): BufferedTransitionReport {
-  return { userId, tabId, frameId, documentId, stampedAt, expiresAt };
+  return { userIds: [userId], tabId, frameId, documentId, stampedAt, expiresAt };
 }
 
 describe("feedTransitionBuffer", () => {

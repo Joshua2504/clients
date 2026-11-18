@@ -1,5 +1,5 @@
-import { firstValueFrom, startWith, Subscription } from "rxjs";
-import { pairwise } from "rxjs/operators";
+import { combineLatest, firstValueFrom, Observable, startWith, Subscription } from "rxjs";
+import { map, pairwise } from "rxjs/operators";
 
 import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
 import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
@@ -16,6 +16,7 @@ import {
 } from "@bitwarden/common/platform/abstractions/fido2/fido2-client.service.abstraction";
 import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
 import { Utils } from "@bitwarden/common/platform/misc/utils";
+import { UserId } from "@bitwarden/common/types/guid";
 import { VaultSettingsService } from "@bitwarden/common/vault/abstractions/vault-settings/vault-settings.service";
 
 import { BrowserApi } from "../../../platform/browser/browser-api";
@@ -67,6 +68,12 @@ export class Fido2Background implements Fido2BackgroundInterface {
     private authService: AuthService,
     private permissionsPolicy: PermissionsPolicyBackground,
     private domainSettingsService: DomainSettingsService,
+    /**
+     * The accounts whose vaults serve passkeys, as from `AutofillAccountsService.autofillUserIds$`.
+     * While any of them serves, the content scripts are set up as for a signed-in user, whatever
+     * the active account's status. Without it, the active account alone decides.
+     */
+    private servedUserIds$?: Observable<UserId[]>,
   ) {}
 
   /**
@@ -107,7 +114,7 @@ export class Fido2Background implements Fido2BackgroundInterface {
     this.vaultSettingsService.enablePasskeys$
       .pipe(startWith(undefined), pairwise())
       .subscribe(([previous, current]) => this.handleEnablePasskeysUpdate(previous, current));
-    this.currentAuthStatus$ = this.authService.activeAccountStatus$
+    this.currentAuthStatus$ = this.authStatus$()
       .pipe(startWith(undefined), pairwise())
       .subscribe(([_previous, current]) => {
         if (current !== undefined) {
@@ -153,10 +160,25 @@ export class Fido2Background implements Fido2BackgroundInterface {
   }
 
   /**
-   * Gets the user's authentication status from the auth service.
+   * The status the FIDO2 content scripts are set up for: unlocked while any account serves
+   * passkeys, and otherwise the status of the active account.
+   */
+  private authStatus$(): Observable<AuthenticationStatus> {
+    if (this.servedUserIds$ == null) {
+      return this.authService.activeAccountStatus$;
+    }
+    return combineLatest([this.authService.activeAccountStatus$, this.servedUserIds$]).pipe(
+      map(([activeAccountStatus, servedUserIds]) =>
+        servedUserIds.length > 0 ? AuthenticationStatus.Unlocked : activeAccountStatus,
+      ),
+    );
+  }
+
+  /**
+   * Gets the authentication status the FIDO2 content scripts are set up for.
    */
   private async getAuthStatus() {
-    return await firstValueFrom(this.authService.activeAccountStatus$);
+    return await firstValueFrom(this.authStatus$());
   }
 
   /**

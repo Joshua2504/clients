@@ -9,6 +9,7 @@ import {
   COPY_PASSWORD_ID,
   COPY_USERNAME_ID,
   COPY_VERIFICATION_CODE_ID,
+  CREATE_LOGIN_ID,
   GENERATE_PASSWORD_ID,
   NOOP_COMMAND_SUFFIX,
 } from "@bitwarden/common/autofill/constants";
@@ -516,6 +517,54 @@ describe("ContextMenuClickedHandler", () => {
 
           expect(switchAccount).not.toHaveBeenCalled();
           expect(copyToClipboard).not.toHaveBeenCalled();
+          expect(BrowserPopupUtils.openPopout).not.toHaveBeenCalled();
+        });
+      });
+
+      describe("creating a new item", () => {
+        const createLogin = () => createData(`${AUTOFILL_ID}_${CREATE_LOGIN_ID}`, AUTOFILL_ID);
+
+        beforeEach(async () => {
+          await accountService.addAccount(otherUserId, {
+            email: "other@example.com",
+            emailVerified: true,
+            name: "Other",
+          } as any);
+          await accountService.switchAccount(mockUserId as UserId);
+          switchAccount.mockImplementation((userId) => accountService.switchAccount(userId));
+          fillCipherPolicy.canOfferSave.mockResolvedValue(true);
+          jest.spyOn(BrowserApi, "tabsQuery").mockResolvedValue([]);
+        });
+
+        it("opens the item form for the active account while it serves autofill", async () => {
+          await sut.run(createLogin(), tab);
+
+          expect(switchAccount).not.toHaveBeenCalled();
+          expect(BrowserPopupUtils.openPopout).toHaveBeenCalledTimes(1);
+        });
+
+        it("makes the serving account the active one first while the active account is locked", async () => {
+          const activeAtPopout: (UserId | undefined)[] = [];
+          autofillUserIds$.next([otherUserId]);
+          jest.spyOn(BrowserPopupUtils, "openPopout").mockImplementation(async () => {
+            activeAtPopout.push((await firstValueFrom(accountService.activeAccount$))?.id);
+            return undefined as unknown as chrome.windows.Window;
+          });
+          const setAccountActivity = jest.spyOn(accountService, "setAccountActivity");
+
+          await sut.run(createLogin(), tab);
+
+          expect(switchAccount).toHaveBeenCalledWith(otherUserId);
+          expect(activeAtPopout).toEqual([otherUserId]);
+          expect(setAccountActivity).toHaveBeenCalledWith(otherUserId, expect.any(Date));
+        });
+
+        it("opens no item form when the serving account cannot become the active one", async () => {
+          autofillUserIds$.next([otherUserId]);
+          switchAccount.mockResolvedValue(undefined);
+
+          await sut.run(createLogin(), tab);
+
           expect(BrowserPopupUtils.openPopout).not.toHaveBeenCalled();
         });
       });

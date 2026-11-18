@@ -87,8 +87,11 @@ export class Fido2ClientService<
   }
 
   async isFido2FeatureEnabled(hostname: string, origin: string): Promise<boolean> {
+    // An account the authenticator serves is signed in, whatever the active account's status.
     const isUserLoggedIn =
-      (await this.authService.getAuthStatus()) !== AuthenticationStatus.LoggedOut;
+      (await this.authService.getAuthStatus()) !== AuthenticationStatus.LoggedOut ||
+      (this.candidateUserIds$ != undefined &&
+        (await firstValueFrom(this.candidateUserIds$)).length > 0);
     if (!isUserLoggedIn) {
       return false;
     }

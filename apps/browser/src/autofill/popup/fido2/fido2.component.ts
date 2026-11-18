@@ -20,7 +20,7 @@ import { JslibModule } from "@bitwarden/angular/jslib.module";
 import { NoResults } from "@bitwarden/assets/svg";
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { UserVerificationService } from "@bitwarden/common/auth/abstractions/user-verification/user-verification.service.abstraction";
-import { getUserId } from "@bitwarden/common/auth/services/account.service";
+import { getOptionalUserId } from "@bitwarden/common/auth/services/account.service";
 import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { DomainSettingsService } from "@bitwarden/common/autofill/services/domain-settings.service";
 import {
@@ -225,12 +225,17 @@ export class Fido2Component implements OnInit, OnDestroy {
             }
             const activeUserId = await this.loadAccounts();
             // A sender that names no account saves to the active account.
-            const userIds = message.userIds.length > 0 ? message.userIds : [activeUserId];
+            const userIds =
+              message.userIds.length > 0
+                ? message.userIds
+                : activeUserId != null
+                  ? [activeUserId]
+                  : [];
             this.accounts = userIds.map((userId) => ({
               userId,
               label: this.accountLabel(userId),
             }));
-            this.targetUserId = userIds[0];
+            this.targetUserId = userIds[0] ?? null;
             await this.loadLoginsOfTargetAccount(message.userHandle);
 
             this.passkeyAction = PasskeyActions.Register;
@@ -528,10 +533,12 @@ export class Fido2Component implements OnInit, OnDestroy {
    * Reads who the accounts are, and whether listed ciphers are shown with their account: they
    * are when more than one account serves passkeys.
    *
-   * @returns The active account.
+   * @returns The active account, null when there is none.
    */
-  private async loadAccounts(): Promise<UserId> {
-    const activeUserId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+  private async loadAccounts(): Promise<UserId | null> {
+    const activeUserId = await firstValueFrom(
+      this.accountService.activeAccount$.pipe(getOptionalUserId),
+    );
     const accounts = await firstValueFrom(this.accountService.accounts$);
     const servedUserIds = await firstValueFrom(this.autofillAccountsService.autofillUserIds$);
 
@@ -542,7 +549,9 @@ export class Fido2Component implements OnInit, OnDestroy {
         accounts[userId].email || accounts[userId].name || "",
       ]),
     );
-    this.showAccountLabels = servedUserIds.length > 1;
+    // A single account that is not the one the popup shows is named as well
+    this.showAccountLabels =
+      servedUserIds.length > 1 || (servedUserIds.length === 1 && servedUserIds[0] !== activeUserId);
 
     return activeUserId;
   }
@@ -633,7 +642,9 @@ export class Fido2Component implements OnInit, OnDestroy {
 
     if (masterPasswordRepromptRequired) {
       // The reprompt is answered with the master password of the account that owns the cipher
-      const activeUserId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+      const activeUserId = await firstValueFrom(
+        this.accountService.activeAccount$.pipe(getOptionalUserId),
+      );
       if (userId === activeUserId) {
         return await this.passwordRepromptService.showPasswordPrompt();
       }

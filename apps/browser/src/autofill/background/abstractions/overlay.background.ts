@@ -226,8 +226,10 @@ export type InlineMenuCipherData = {
 /** What the inline menu list needs to attribute ciphers to their accounts. */
 export type InlineMenuAccountDisplay = {
   activeUserId: UserId | null;
-  /** The label of each account. Empty while a single account serves autofill. */
+  /** The label of each account. Empty while the active account alone serves autofill. */
   labels: Map<UserId, string>;
+  /** The icons server of each account that serves autofill besides the active one. */
+  iconsServerUrls: Map<UserId, string | null>;
 };
 
 export type BuildCipherDataParams = {

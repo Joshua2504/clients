@@ -242,6 +242,25 @@ describe("CipherContextMenuHandler", () => {
         );
       });
 
+      it("keeps the label of the account that still serves once the active account has locked", async () => {
+        const work = login("2", "Work");
+        autofillUserIds$.next([otherUserId]);
+        fillCipherPolicy.ciphersForUrl.mockResolvedValue([
+          { userId: otherUserId, cipher: work },
+        ] as any[]);
+
+        await sut.update("https://test.com");
+
+        expect(mainContextMenuHandler.noAccess).not.toHaveBeenCalled();
+        expect(mainContextMenuHandler.loadOptions).toHaveBeenCalledTimes(1);
+        expect(mainContextMenuHandler.loadOptions).toHaveBeenCalledWith(
+          "Work (user) \u2014 work@example.com",
+          `${otherUserId}:2`,
+          work,
+          otherUserId,
+        );
+      });
+
       it("offers to unlock once both have locked", async () => {
         autofillUserIds$.next([]);
 

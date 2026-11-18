@@ -61,6 +61,8 @@ export type UnlockVaultNotificationData = never;
 export type AtRiskPasswordNotificationData = {
   organizationName: string;
   hasPasswordChangeUri: boolean;
+  /** The account the task belongs to. Absent while the active account alone serves autofill. */
+  accountLabel?: string;
 };
 
 // Notification queue message types using generic pattern

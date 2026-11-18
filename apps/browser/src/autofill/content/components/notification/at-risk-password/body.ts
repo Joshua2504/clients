@@ -14,16 +14,23 @@ const { css } = createEmotion({
 });
 
 export type AtRiskNotificationBodyProps = {
+  /** The account the at-risk login belongs to, shown when it is not plain which one it is. */
+  accountLabel?: string;
   riskMessage: string;
   theme: Theme;
 };
 
-export function AtRiskNotificationBody({ riskMessage, theme }: AtRiskNotificationBodyProps) {
+export function AtRiskNotificationBody({
+  accountLabel,
+  riskMessage,
+  theme,
+}: AtRiskNotificationBodyProps) {
   return html`
     <div class=${atRiskNotificationBodyStyles({ theme })}>
       ${
         riskMessage
           ? AtRiskNotificationMessage({
+              accountLabel,
               message: riskMessage,
               theme,
             })

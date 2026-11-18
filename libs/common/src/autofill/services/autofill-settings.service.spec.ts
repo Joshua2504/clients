@@ -3,6 +3,7 @@ import { BehaviorSubject, firstValueFrom, Observable, Subject } from "rxjs";
 
 import { FakeAccountService, FakeStateProvider, mockAccountServiceWith } from "../../../spec";
 import { PolicyService } from "../../admin-console/abstractions/policy/policy.service.abstraction";
+import { PolicyType } from "../../admin-console/enums";
 import { FeatureFlag } from "../../enums/feature-flag.enum";
 import { ConfigService } from "../../platform/abstractions/config/config.service";
 import { SingleUserState } from "../../platform/state";
@@ -12,6 +13,7 @@ import {
   RestrictedCipherType,
   RestrictedItemTypesService,
 } from "../../vault/services/restricted-item-types.service";
+import { ClearClipboardDelay } from "../constants";
 
 import { AutofillSettingsService } from "./autofill-settings.service";
 
@@ -25,6 +27,7 @@ describe("AutofillSettingsService", () => {
   let featureFlag$: BehaviorSubject<boolean>;
   let enableBasicAuthResponseByUser: Map<UserId, Observable<boolean | null>>;
   let restrictedItemTypesService: MockProxy<RestrictedItemTypesService>;
+  let policyService: MockProxy<PolicyService>;
   let autofillSettingsService: AutofillSettingsService;
 
   const collectEmissions = (observable$: Observable<boolean>) => {
@@ -58,9 +61,10 @@ describe("AutofillSettingsService", () => {
 
     restrictedItemTypesService = mock<RestrictedItemTypesService>();
 
+    policyService = mock<PolicyService>();
     autofillSettingsService = new AutofillSettingsService(
       stateProvider,
-      mock<PolicyService>(),
+      policyService,
       accountService,
       restrictedItemTypesService,
       configService,
@@ -95,6 +99,80 @@ describe("AutofillSettingsService", () => {
       await expect(
         firstValueFrom(autofillSettingsService.autofillOnPageLoadDefaultFor$(otherUserId)),
       ).resolves.toBe(true);
+    });
+  });
+
+  describe("readers and writers for a user other than the active one", () => {
+    it("clearClipboardDelayFor$ reads the given user's delay, five minutes when never set", async () => {
+      const getUser = jest.spyOn(stateProvider, "getUser");
+      getUser.mockReturnValue({
+        state$: new BehaviorSubject(ClearClipboardDelay.TenSeconds),
+      } as unknown as SingleUserState<any>);
+
+      await expect(
+        firstValueFrom(autofillSettingsService.clearClipboardDelayFor$(otherUserId)),
+      ).resolves.toBe(ClearClipboardDelay.TenSeconds);
+      expect(getUser).toHaveBeenCalledWith(
+        otherUserId,
+        expect.objectContaining({ key: "clearClipboardDelay" }),
+      );
+
+      getUser.mockReturnValue({
+        state$: new BehaviorSubject(null),
+      } as unknown as SingleUserState<any>);
+      await expect(
+        firstValueFrom(autofillSettingsService.clearClipboardDelayFor$(otherUserId)),
+      ).resolves.toBe(ClearClipboardDelay.FiveMinutes);
+    });
+
+    it("activateAutofillOnPageLoadFromPolicyFor$ asks the policy of the given user", async () => {
+      policyService.policyAppliesToUser$.mockImplementation(
+        (_type, id) => new BehaviorSubject(id === otherUserId),
+      );
+
+      await expect(
+        firstValueFrom(
+          autofillSettingsService.activateAutofillOnPageLoadFromPolicyFor$(otherUserId),
+        ),
+      ).resolves.toBe(true);
+      await expect(
+        firstValueFrom(autofillSettingsService.activateAutofillOnPageLoadFromPolicyFor$(userId)),
+      ).resolves.toBe(false);
+      expect(policyService.policyAppliesToUser$).toHaveBeenCalledWith(
+        PolicyType.ActivateAutofill,
+        otherUserId,
+      );
+    });
+
+    it("setAutofillOnPageLoadFor writes the given user's setting, not the active user's", async () => {
+      const update = jest.fn().mockResolvedValue(undefined);
+      const getUser = jest
+        .spyOn(stateProvider, "getUser")
+        .mockReturnValue({ update } as unknown as SingleUserState<any>);
+
+      await autofillSettingsService.setAutofillOnPageLoadFor(true, otherUserId);
+
+      expect(getUser).toHaveBeenCalledWith(
+        otherUserId,
+        expect.objectContaining({ key: "autofillOnPageLoad" }),
+      );
+      expect(update.mock.calls[0][0]()).toBe(true);
+    });
+
+    it("httpAuthenticationAvailableFor$ follows the feature flag without an active user", async () => {
+      accountService.activeAccountSubject.next(null);
+
+      await expect(
+        firstValueFrom(autofillSettingsService.httpAuthenticationAvailableFor$(otherUserId)),
+      ).resolves.toBe(true);
+      await expect(
+        firstValueFrom(autofillSettingsService.httpAuthenticationAvailable$),
+      ).resolves.toBe(false);
+
+      featureFlag$.next(false);
+      await expect(
+        firstValueFrom(autofillSettingsService.httpAuthenticationAvailableFor$(otherUserId)),
+      ).resolves.toBe(false);
     });
   });
 

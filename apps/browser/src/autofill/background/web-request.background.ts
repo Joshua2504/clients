@@ -319,7 +319,7 @@ export default class WebRequestBackground {
     return combineLatest([
       this.autofillSettingsService.resolvedEnableBasicAuthResponseFor$(userId),
       this.loginSettingHonored
-        ? this.autofillSettingsService.httpAuthenticationAvailable$
+        ? this.autofillSettingsService.httpAuthenticationAvailableFor$(userId)
         : of(false),
     ]).pipe(
       map(([globalSettingEnabled, loginSettingEnabled]): HTTPAuthenticationResponseSettings => ({

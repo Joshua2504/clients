@@ -4,4 +4,4 @@ export { resetTransitionBuffer } from "./persistent";
 export { bufferEnabled } from "./rx";
 export type { BufferSources } from "./rx";
 export type { BufferedTransitionReport, LiveFrame } from "./types";
-export { registerTransition, validateTransition } from "./utils";
+export { registerTransition, servedTransitionAccounts, validateTransition } from "./utils";

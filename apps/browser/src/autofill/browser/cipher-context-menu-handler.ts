@@ -1,4 +1,4 @@
-import { firstValueFrom } from "rxjs";
+import { firstValueFrom, map } from "rxjs";
 
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
@@ -14,6 +14,7 @@ import { CipherType } from "@bitwarden/common/vault/enums";
 import { CipherUse } from "../services/abstractions/fill-cipher-policy";
 import { MultiAccountFillCipherPolicy } from "../services/abstractions/multi-account-fill-cipher-policy";
 import { AutofillCipherTypeId } from "../types";
+import { showsAccountLabels } from "../utils/save-target";
 
 import { MainContextMenuHandler } from "./main-context-menu-handler";
 
@@ -88,9 +89,14 @@ export class CipherContextMenuHandler {
       await this.mainContextMenuHandler.noCards();
     }
 
-    // An entry shows its account once more than one account serves, so the user can tell
-    // which vault a cipher comes from.
-    const accountLabels = autofillUserIds.length > 1 ? await this.accountLabels() : undefined;
+    // An entry shows its account once more than one account serves, or the one that does is not
+    // the active account, so the user can tell which vault a cipher comes from.
+    const activeUserId = await firstValueFrom(
+      this.accountService.activeAccount$.pipe(map((account) => account?.id ?? null)),
+    );
+    const accountLabels = showsAccountLabels(autofillUserIds, activeUserId)
+      ? await this.accountLabels()
+      : undefined;
     for (const accountCipher of ciphers) {
       await this.updateForCipher(accountCipher, accountLabels?.get(accountCipher.userId));
     }

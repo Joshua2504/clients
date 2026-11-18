@@ -5,16 +5,18 @@ import type { UserId } from "@bitwarden/common/types/guid";
  * This is the persisted shape: it identifies a document without describing it, so a stored buffer
  * discloses no browsing activity. Do not add fields that describe the page (URL, title, origin).
  *
- * WARNING: These reports are shared across accounts. You must verify that a stored record's
- * `userId` is still the active account or an account autofill serves to avoid cross-account
+ * WARNING: These reports are shared across accounts. You must verify which of a stored record's
+ * `userIds` are still the active account or an account autofill serves to avoid cross-account
  * replays.
  */
 export type BufferedTransitionReport = Readonly<{
   /**
-   * The account the transition is attributed to: the first of the accounts autofill served when
-   * it was reported, which is the active account when it is unlocked; else the active account.
+   * The accounts the transition is attributed to: the accounts autofill served when it was
+   * reported, in their order of precedence; the active account alone when autofill served none.
+   * Never empty. An opportunity that resolves from it is offered to those of them that still
+   * serve, see `servedTransitionAccounts`.
    */
-  userId: UserId;
+  userIds: readonly UserId[];
   /** The reporting tab. */
   tabId: number;
   /** The reporting frame. `undefined` for the top frame. */

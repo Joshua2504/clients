@@ -818,6 +818,26 @@
   "viewItem": {
     "message": "View item"
   },
+  "itemAccountHint": {
+    "message": "Vault of $ACCOUNT$",
+    "description": "Shown at the top of a vault item page that shows, adds or edits an item of another account of the user than the one shown in the extension.",
+    "placeholders": {
+      "account": {
+        "content": "$1",
+        "example": "user@example.com"
+      }
+    }
+  },
+  "masterPasswordOfAccount": {
+    "message": "This item belongs to $ACCOUNT$. Enter the master password of that account.",
+    "description": "Added to the master password re-prompt when the item belongs to another account of the user than the one shown in the extension.",
+    "placeholders": {
+      "account": {
+        "content": "$1",
+        "example": "user@example.com"
+      }
+    }
+  },
   "launch": {
     "message": "Launch"
   },
@@ -1100,6 +1120,16 @@
   },
   "loggedOut": {
     "message": "Logged out"
+  },
+  "accountWasLoggedOut": {
+    "message": "$EMAIL$ was logged out",
+    "description": "Toast title when an account other than the one in view was logged out in the background.",
+    "placeholders": {
+      "email": {
+        "content": "$1",
+        "example": "user@example.com"
+      }
+    }
   },
   "loggedOutDesc": {
     "message": "You have been logged out of your account."

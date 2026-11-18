@@ -1,5 +1,6 @@
 import { firstValueFrom, Subject, Subscription } from "rxjs";
 
+import type { UserId } from "@bitwarden/common/types/guid";
 import {
   AUTOFILL_TAB_LIFECYCLE_MEMORY,
   GlobalState,
@@ -14,16 +15,32 @@ import { DefaultTransitionBuffer } from "./default";
 import type { BufferedTransitionReport, BufferedTransitions } from "./types";
 
 /**
- * Validates that an entry has the structure of a `BufferedTransitionReport`.
+ * Reads a stored entry as a `BufferedTransitionReport`. An entry in the shape stored before a
+ * transition was attributed to several accounts, with a single `userId`, is read as attributed
+ * to that account.
+ *
+ * @returns `undefined` for an entry that has neither structure.
  */
-function isBufferedTransitionReport(value: unknown): value is BufferedTransitionReport {
+function toBufferedTransitionReport(value: unknown): BufferedTransitionReport | undefined {
   if (typeof value !== "object" || value === null) {
-    return false;
+    return undefined;
   }
   const entry = value as Record<string, unknown>;
-  return (
-    typeof entry.userId === "string" &&
-    entry.userId.length > 0 &&
+  const isUserId = (userId: unknown): userId is UserId =>
+    typeof userId === "string" && userId.length > 0;
+  let userIds: UserId[];
+  if (Array.isArray(entry.userIds)) {
+    if (entry.userIds.length === 0 || !entry.userIds.every(isUserId)) {
+      return undefined;
+    }
+    userIds = [...entry.userIds];
+  } else if (isUserId(entry.userId)) {
+    userIds = [entry.userId];
+  } else {
+    return undefined;
+  }
+
+  if (
     typeof entry.tabId === "number" &&
     (entry.frameId === undefined || typeof entry.frameId === "number") &&
     typeof entry.documentId === "string" &&
@@ -32,12 +49,23 @@ function isBufferedTransitionReport(value: unknown): value is BufferedTransition
     Number.isFinite(entry.stampedAt) &&
     typeof entry.expiresAt === "number" &&
     Number.isFinite(entry.expiresAt)
-  );
+  ) {
+    return {
+      userIds,
+      tabId: entry.tabId,
+      frameId: entry.frameId as number | undefined,
+      documentId: entry.documentId,
+      stampedAt: entry.stampedAt,
+      expiresAt: entry.expiresAt,
+    };
+  }
+  return undefined;
 }
 
 /**
  * Stores buffered transitions across extension restarts; shared globally across users.
- * Entries that fail validation are dropped on load.
+ * Entries that fail validation are dropped on load. Entries are written with `userIds`; an entry
+ * stored with the single `userId` of an earlier version is read as attributed to that account.
  *
  * WARNING: These reports are shared across accounts. You must verify the active account
  * against stored records to avoid cross-account replays.
@@ -47,10 +75,14 @@ export const BUFFERED_TRANSITIONS = new KeyDefinition<BufferedTransitions>(
   "bufferedTransitions",
   {
     deserializer: (value) => {
-      const entries = Object.entries(value ?? {}).filter(([, entry]) =>
-        isBufferedTransitionReport(entry),
-      );
-      return Object.fromEntries(entries) as BufferedTransitions;
+      const entries: [string, BufferedTransitionReport][] = [];
+      for (const [key, entry] of Object.entries(value ?? {})) {
+        const report = toBufferedTransitionReport(entry);
+        if (report !== undefined) {
+          entries.push([key, report]);
+        }
+      }
+      return Object.fromEntries(entries);
     },
   },
 );

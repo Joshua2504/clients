@@ -55,6 +55,7 @@ import {
   AutofillTriagePageResult,
   AutofillTriageResponse,
 } from "../types/autofill-triage";
+import { defaultSaveAccount } from "../utils/save-target";
 import {
   addSelector,
   ContainerCandidate,
@@ -205,9 +206,22 @@ export class ContextMenuClickedHandler {
       this.accountService.activeAccount$.pipe(getOptionalUserId),
     );
 
+    let createTargetUserId: UserId | undefined;
     if (isCreateCipherAction) {
-      // A new item is created in the vault the popup shows, which is the active account's.
-      if (activeUserId == null) {
+      // A new item is created in the account a new login is saved to: the active account while
+      // it serves autofill and may save, otherwise the first account serving autofill that may.
+      // The item form shows the active account's vault, so another account becomes active first.
+      createTargetUserId =
+        (await defaultSaveAccount(
+          { uri: tab.url ?? "" },
+          autofillUserIds,
+          activeUserId ?? null,
+          this.fillCipherPolicy,
+        )) ?? autofillUserIds[0];
+      if (
+        createTargetUserId == null ||
+        !(await this.activateAccount(createTargetUserId, activeUserId))
+      ) {
         return;
       }
     } else if (menuItemId === NOOP_COMMAND_SUFFIX) {
@@ -247,7 +261,7 @@ export class ContextMenuClickedHandler {
     const cipher = selection?.cipher;
     // Every effect of the cipher runs for the account that owns it.
     const userId = selection?.userId;
-    const activityUserId = userId ?? activeUserId;
+    const activityUserId = userId ?? createTargetUserId;
     if (activityUserId != null) {
       await this.accountService.setAccountActivity(activityUserId, new Date());
     }
@@ -619,20 +633,33 @@ export class ContextMenuClickedHandler {
     activeUserId: UserId | null,
     action: string,
   ) {
-    if (userId !== activeUserId) {
-      const autofillUserIds = await firstValueFrom(this.autofillAccountsService.autofillUserIds$);
-      if (!autofillUserIds.includes(userId)) {
-        return;
-      }
-      await this.switchAccount(userId);
-      const switchedUserId = await firstValueFrom(
-        this.accountService.activeAccount$.pipe(getOptionalUserId),
-      );
-      if (switchedUserId !== userId) {
-        return;
-      }
+    if (!(await this.activateAccount(userId, activeUserId))) {
+      return;
     }
     await openVaultItemPasswordRepromptPopout(tab, { cipherId: cipher.id, action });
+  }
+
+  /**
+   * Makes `userId` the active account, so a popout shows its vault.
+   *
+   * @returns false when the account is not active and cannot become so; no popout may open.
+   */
+  private async activateAccount(
+    userId: UserId,
+    activeUserId: UserId | null | undefined,
+  ): Promise<boolean> {
+    if (userId === activeUserId) {
+      return true;
+    }
+    const autofillUserIds = await firstValueFrom(this.autofillAccountsService.autofillUserIds$);
+    if (!autofillUserIds.includes(userId)) {
+      return false;
+    }
+    await this.switchAccount(userId);
+    const switchedUserId = await firstValueFrom(
+      this.accountService.activeAccount$.pipe(getOptionalUserId),
+    );
+    return switchedUserId === userId;
   }
 
   /**

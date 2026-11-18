@@ -1,5 +1,5 @@
 import { mock } from "jest-mock-extended";
-import { Subject } from "rxjs";
+import { of, Subject } from "rxjs";
 
 import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
 import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
@@ -214,6 +214,42 @@ describe("BrowserFido2UserInterfaceSession", () => {
       await session.ensureUnlockedVault();
 
       expect(openFido2Popout).not.toHaveBeenCalled();
+    });
+
+    describe("with the active account locked", () => {
+      const lockedSession = async (servedUserIds: UserId[]) => {
+        authService.getAuthStatus.mockResolvedValue(AuthenticationStatus.Locked);
+        await session.close();
+        session = await BrowserFido2UserInterfaceSession.create(
+          authService,
+          false,
+          tab,
+          undefined,
+          of(servedUserIds),
+        );
+      };
+
+      it("does not ask to unlock while another account serves passkeys", async () => {
+        await lockedSession([otherUserId]);
+
+        await session.ensureUnlockedVault();
+
+        expect(openFido2Popout).not.toHaveBeenCalled();
+      });
+
+      it("opens the popout to unlock when no account serves passkeys", async () => {
+        await lockedSession([]);
+
+        const ensured = session.ensureUnlockedVault();
+        await new Promise((resolve) => setTimeout(resolve));
+        messages$.next({
+          sessionId: session.sessionId,
+          type: BrowserFido2MessageTypes.ConnectResponse,
+        });
+        await ensured;
+
+        expect(openFido2Popout).toHaveBeenCalledTimes(1);
+      });
     });
   });
 });

@@ -471,7 +471,25 @@ const safeProviders: SafeProvider[] = [
   }),
   safeProvider({
     provide: DomainSettingsService,
-    useClass: DefaultDomainSettingsService,
+    // Fill assist is resolved across the accounts autofill serves, as it is in the background.
+    useFactory: (
+      stateProvider: StateProvider,
+      policyService: PolicyService,
+      accountService: AccountService,
+      configService: ConfigService,
+      environmentService: EnvironmentService,
+      authService: AuthService,
+      autofillAccountsService: AutofillAccountsService,
+    ) =>
+      new DefaultDomainSettingsService(
+        stateProvider,
+        policyService,
+        accountService,
+        configService,
+        environmentService,
+        authService,
+        autofillAccountsService.autofillUserIds$,
+      ),
     deps: [
       StateProvider,
       PolicyService,
@@ -479,6 +497,7 @@ const safeProviders: SafeProvider[] = [
       ConfigService,
       EnvironmentService,
       AuthService,
+      AutofillAccountsService,
     ],
   }),
   safeProvider({

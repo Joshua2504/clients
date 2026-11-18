@@ -134,10 +134,20 @@ describe("MainBackground logout", () => {
     const clear = () => jest.fn().mockResolvedValue(undefined);
     send = jest.fn();
     sut = Object.create(MainBackground.prototype);
+    const accounts$ = new BehaviorSubject<Record<string, { email: string }>>({
+      [activeUser]: { email: "active@example.com" },
+      [otherUser]: { email: "other@example.com" },
+    });
     sut.accountService = {
       activeAccount$: of({ id: activeUser }),
       nextUpAccount$: of({ id: otherUser }),
-      clean: clear(),
+      accounts$,
+      // Cleaning an account removes it, as the real account service does.
+      clean: jest.fn(async (userId: UserId) => {
+        const rest = { ...accounts$.value };
+        delete rest[userId];
+        accounts$.next(rest);
+      }),
     };
     sut.authService = { authStatusFor$: jest.fn(() => of(AuthenticationStatus.LoggedOut)) };
     sut.eventUploadService = { uploadEvents: clear() };
@@ -172,6 +182,7 @@ describe("MainBackground logout", () => {
       logoutReason: "userInitiated",
       userId: activeUser,
       loggedOutActiveAccount: true,
+      email: "active@example.com",
     });
     expect(sut.mainContextMenuHandler.noAccess).toHaveBeenCalled();
     expect(sut.refreshMenu).not.toHaveBeenCalled();
@@ -198,6 +209,8 @@ describe("MainBackground logout", () => {
       logoutReason: "invalidSecurityStamp",
       userId: otherUser,
       loggedOutActiveAccount: false,
+      // Read before the account's state was cleaned
+      email: "other@example.com",
     });
     // The context menu keeps serving the active account.
     expect(sut.mainContextMenuHandler.noAccess).not.toHaveBeenCalled();

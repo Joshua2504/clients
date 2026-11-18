@@ -82,7 +82,7 @@ describe("tab lifecycle integration tests", () => {
   describe("buffering", () => {
     const TAB = 1;
     const document: BufferedTransitionReport = {
-      userId: "user-1" as UserId,
+      userIds: ["user-1" as UserId],
       tabId: TAB,
       frameId: 0,
       documentId: "doc",
@@ -351,7 +351,7 @@ describe("tab lifecycle integration tests", () => {
       );
     const reported = (documentId: string, frameId = 0) =>
       registerTransition(
-        { userId, tabId: TAB, frameId, documentId },
+        { userIds: [userId], tabId: TAB, frameId, documentId },
         { now: now(), maxAgeMs: MAX_AGE_MS },
       )!;
 

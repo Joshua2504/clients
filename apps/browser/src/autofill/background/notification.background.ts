@@ -74,6 +74,7 @@ import { Fido2Background } from "../fido2/background/abstractions/fido2.backgrou
 import { AutofillService } from "../services/abstractions/autofill.service";
 import { CipherUse, SaveCandidate } from "../services/abstractions/fill-cipher-policy";
 import { MultiAccountFillCipherPolicy } from "../services/abstractions/multi-account-fill-cipher-policy";
+import { defaultSaveAccount, showsAccountLabels } from "../utils/save-target";
 
 import {
   AddChangePasswordNotificationQueueMessage,
@@ -271,10 +272,11 @@ export default class NotificationBackground {
    */
 
   async getNotificationCipherData(): Promise<NotificationCipherData[]> {
-    const [currentTab, showFavicons, autofillUserIds] = await Promise.all([
+    const [currentTab, showFavicons, autofillUserIds, activeUserId] = await Promise.all([
       BrowserApi.getTabFromCurrentWindow(),
       firstValueFrom(this.domainSettingsService.showFavicons$),
       this.getAutofillUserIds(),
+      this.getActiveUserId(),
     ]);
 
     if (!currentTab?.url || autofillUserIds.length === 0) {
@@ -312,7 +314,7 @@ export default class NotificationBackground {
 
     // Icons, organizations and the label all belong to the account that owns the cipher.
     const accounts = await firstValueFrom(this.accountService.accounts$);
-    const showAccountLabel = autofillUserIds.length > 1;
+    const showAccountLabel = showsAccountLabels(autofillUserIds, activeUserId);
     const displayByAccount = new Map<
       UserId,
       {
@@ -656,6 +658,14 @@ export default class NotificationBackground {
         .pipe(getOrganizationById(securityTask.organizationId)),
     );
 
+    // The bar names the account the task belongs to whenever that is not plain from the popup.
+    const accountLabel = showsAccountLabels(
+      await this.getAutofillUserIds(),
+      await this.getActiveUserId(),
+    )
+      ? (await firstValueFrom(this.accountService.accounts$))[userId]?.email
+      : undefined;
+
     this.removeTabFromNotificationQueue(tab);
     const launchTimestamp = new Date().getTime();
     const queueMessage: AtRiskPasswordQueueMessage = {
@@ -666,6 +676,7 @@ export default class NotificationBackground {
       data: {
         hasPasswordChangeUri: passwordChangeUri != null,
         organizationName: organization?.name ?? "",
+        ...(accountLabel ? { accountLabel } : {}),
       },
       tab: tab,
       launchTimestamp,
@@ -771,24 +782,20 @@ export default class NotificationBackground {
   }
 
   /**
-   * The account a new login is saved to unless the user picks another: the active account. While
-   * several accounts serve autofill, the first of them, in their order of precedence, whose
-   * policy takes the login; that is the active account whenever it may save.
+   * The account a new login is saved to unless the user picks another: the active account while
+   * it alone serves autofill or none does, otherwise the first of the accounts serving autofill,
+   * in their order of precedence, whose policy takes the login. That is the active account
+   * whenever it serves and may save. See {@link defaultSaveAccount}.
    *
    * @returns null when no account may save the login.
    */
   private async defaultSaveAccount(candidate: SaveCandidate): Promise<UserId | null> {
-    const userIds = await this.getAutofillUserIds();
-    if (userIds.length < 2) {
-      return await this.getActiveUserId();
-    }
-
-    for (const userId of userIds) {
-      if (await this.multiAccountFillCipherPolicy.canOfferSave(candidate, userId)) {
-        return userId;
-      }
-    }
-    return null;
+    return await defaultSaveAccount(
+      candidate,
+      await this.getAutofillUserIds(),
+      await this.getActiveUserId(),
+      this.multiAccountFillCipherPolicy,
+    );
   }
 
   /**
@@ -797,7 +804,7 @@ export default class NotificationBackground {
    */
   private async saveAccountsFor(queueMessage: AddLoginQueueMessage): Promise<UserId[]> {
     const userIds = await this.getAutofillUserIds();
-    if (userIds.length < 2) {
+    if (userIds.length < 2 && userIds[0] === (await this.getActiveUserId())) {
       return userIds;
     }
 
@@ -923,9 +930,13 @@ export default class NotificationBackground {
       return false;
     }
 
+    // An account that serves autofill takes the notification whatever the active account's
+    // state. With none serving, only a locked active account is left, for the unlock prompt.
+    const servesAutofill = (await this.getAutofillUserIds()).length > 0;
+
     // If there is no account logged in (as opposed to only being locked), exit early
     const authStatus = await this.getAuthStatus();
-    if (authStatus === AuthenticationStatus.LoggedOut) {
+    if (authStatus === AuthenticationStatus.LoggedOut && !servesAutofill) {
       return false;
     }
 
@@ -933,7 +944,7 @@ export default class NotificationBackground {
     const activeUserId = await firstValueFrom(
       this.accountService.activeAccount$.pipe(getOptionalUserId),
     );
-    if (activeUserId === null) {
+    if (activeUserId === null && !servesAutofill) {
       return false;
     }
 
@@ -976,9 +987,9 @@ export default class NotificationBackground {
     };
 
     // While the active account is locked, other accounts may still serve autofill. Their ciphers
-    // are matched below; with none serving, only the unlock prompt remains.
-    const activeAccountIsLocked = authStatus === AuthenticationStatus.Locked;
-    if (activeAccountIsLocked && (await this.getAutofillUserIds()).length === 0) {
+    // are matched below, and a new login is offered to them; with none serving, only the unlock
+    // prompt remains.
+    if (!servesAutofill) {
       return await promptToUnlock();
     }
 
@@ -1071,15 +1082,6 @@ export default class NotificationBackground {
       } as CiphersByInputMatchCategory,
     );
 
-    // No serving account holds a cipher that matches the form, and the active account, which may
-    // hold one, is locked.
-    if (
-      activeAccountIsLocked &&
-      ciphersByInputMatchCategory.noFieldMatches.length === ciphersForURL.length
-    ) {
-      return await promptToUnlock();
-    }
-
     // Handle different field fill combinations and determine the input scenario
     const inputScenariosByKey = {
       upn: inputScenarios.usernamePasswordNewPassword,
@@ -1108,8 +1110,7 @@ export default class NotificationBackground {
         data,
         inputScenario,
         changePasswordNotificationIsEnabled,
-        // A new login goes to the active account by default, which must be unlocked to take it.
-        newLoginNotificationIsEnabled: newLoginNotificationIsEnabled && !activeAccountIsLocked,
+        newLoginNotificationIsEnabled,
       });
     }
 

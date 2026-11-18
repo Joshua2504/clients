@@ -105,6 +105,11 @@ type NotificationBarWindowMessageHandlers = {
 type AtRiskPasswordNotificationParams = {
   hasPasswordChangeUri: boolean;
   organizationName: string;
+  /**
+   * The email of the account the at-risk login belongs to. Present when more than one account
+   * serves autofill, or the one that does is not the active account.
+   */
+  accountLabel?: string;
 };
 
 export {

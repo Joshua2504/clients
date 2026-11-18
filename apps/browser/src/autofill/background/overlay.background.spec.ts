@@ -1,5 +1,5 @@
 import { mock, MockProxy, mockReset } from "jest-mock-extended";
-import { BehaviorSubject, NEVER, of, Subject } from "rxjs";
+import { BehaviorSubject, firstValueFrom, NEVER, of, Subject } from "rxjs";
 import { map } from "rxjs/operators";
 
 import { PolicyService } from "@bitwarden/common/admin-console/abstractions/policy/policy.service.abstraction";
@@ -263,6 +263,9 @@ describe("OverlayBackground", () => {
     Object.defineProperty(autofillAccountsService, "autofillUserIds$", {
       value: autofillUserIds$,
     });
+    autofillAccountsService.isAutofillUser$.mockImplementation((userId) =>
+      autofillUserIds$.pipe(map((userIds) => userIds.includes(userId))),
+    );
     environmentMock$ = new BehaviorSubject(
       new CloudEnvironment({
         key: Region.US,
@@ -272,6 +275,8 @@ describe("OverlayBackground", () => {
     );
     environmentService = mock<EnvironmentService>();
     environmentService.environment$ = environmentMock$;
+    // An account that is not active reads its own environment; it is the same server here.
+    environmentService.getEnvironment$.mockImplementation(() => environmentMock$);
     inlineMenuVisibilityMock$ = new BehaviorSubject(AutofillOverlayVisibility.OnFieldFocus);
     autofillSettingsService = mock<AutofillSettingsService>();
     autofillSettingsService.inlineMenuVisibility$ = inlineMenuVisibilityMock$;
@@ -5220,6 +5225,183 @@ describe("OverlayBackground", () => {
       await flushPromises();
 
       expect(sendResponse).toHaveBeenCalledWith(true);
+    });
+
+    describe("with the active account locked and another account serving", () => {
+      const otherLogin = login("id-other", "other");
+      let switchAccount: jest.Mock;
+
+      beforeEach(async () => {
+        activeAccountStatusMock$.next(AuthenticationStatus.Locked);
+        autofillUserIds$.next([otherUserId]);
+        vaults.set(mockUserId, [login("id-active", "active")]);
+        vaults.set(otherUserId, [otherLogin]);
+        switchAccount = jest.fn(async (userId: UserId) => {
+          await accountService.switchAccount(userId);
+        });
+        overlayBackground["switchAccount"] = switchAccount;
+
+        await overlayBackground.updateOverlayCiphers();
+        await rebuildSettled();
+      });
+
+      afterEach(async () => {
+        await accountService.switchAccount(mockUserId);
+      });
+
+      it("lists the serving account's logins, named as that account's", () => {
+        expect(postedCiphers()).toEqual([
+          expect.objectContaining({ name: "other", accountLabel: otherUserEmail, canView: false }),
+        ]);
+      });
+
+      it("fills a listed login for the serving account", async () => {
+        await fillByKey("inline-menu-cipher-0");
+
+        expect(autofillOrchestrator.fillCipher).toHaveBeenCalledWith(
+          expect.objectContaining({ cipher: otherLogin, userId: otherUserId }),
+        );
+      });
+
+      it("generates a password with the options of the account the login would be saved to", async () => {
+        await expect(overlayBackground["syncGeneratorAccount"]()).resolves.toBe(otherUserId);
+
+        await expect(firstValueFrom(overlayBackground["generatorAccount$"])).resolves.toEqual(
+          expect.objectContaining({ id: otherUserId, email: otherUserEmail }),
+        );
+      });
+
+      it("asks the generator for the preferred algorithm of the save target", async () => {
+        overlayBackground["focusedFieldData"] = createFocusedFieldDataMock({
+          tabId: sender.tab.id,
+          inlineMenuFillType: InlineMenuFillTypes.PasswordGeneration,
+        });
+        generatorService.preferredAlgorithm$.mockClear();
+
+        await overlayBackground["shouldInitInlineMenuPasswordGenerator"](
+          AuthenticationStatus.Unlocked,
+          true,
+          false,
+        );
+
+        const { account$ } = generatorService.preferredAlgorithm$.mock.calls[0][1];
+        await expect(firstValueFrom(account$)).resolves.toEqual(
+          expect.objectContaining({ id: otherUserId }),
+        );
+      });
+
+      it("discards a password generated for another account", async () => {
+        await overlayBackground["syncGeneratorAccount"]();
+        overlayBackground["credential$"].next(generatedPassword);
+
+        activeAccountStatusMock$.next(AuthenticationStatus.Unlocked);
+        autofillUserIds$.next([mockUserId, otherUserId]);
+        await overlayBackground["syncGeneratorAccount"]();
+        await flushPromises();
+
+        expect(overlayBackground["generatorUserId"]).toBe(mockUserId);
+        expect(overlayBackground["credential$"].value).toBe("");
+      });
+
+      it("fills the generated password for the save target, not the locked active account", async () => {
+        globalThis.structuredClone = jest.fn((value) => value);
+        await overlayBackground["syncGeneratorAccount"]();
+        overlayBackground["credential$"].next(generatedPassword);
+        overlayBackground["pageDetailsForTab"][sender.tab.id] = new Map([
+          [sender.frameId, createPageDetailMock()],
+        ]);
+
+        sendPortMessage(listMessageConnectorSpy, { command: "fillGeneratedPassword", portKey });
+        await flushPromises();
+
+        expect(autofillOrchestrator.fillCipher).toHaveBeenCalledWith(
+          expect.objectContaining({ userId: otherUserId }),
+        );
+      });
+
+      it("adds a new item to the serving account, which becomes the active one for the item form", async () => {
+        const openAddEditVaultItemPopoutSpy = jest
+          .spyOn(overlayBackground as any, "openAddEditVaultItemPopout")
+          .mockImplementation();
+
+        overlayBackground["currentAddNewItemData"] = { sender, addNewCipherType: CipherType.Login };
+        await overlayBackground["buildCipherAndOpenAddEditVaultItemPopout"]({
+          addNewCipherType: CipherType.Login,
+          login: { uri: url, hostname: "", username: "username", password: "password" },
+          sender,
+        });
+
+        expect(cipherService.setAddEditCipherInfo).toHaveBeenCalledWith(
+          expect.objectContaining({ cipher: expect.any(Object) }),
+          otherUserId,
+        );
+        expect(switchAccount).toHaveBeenCalledWith(otherUserId);
+        expect(openAddEditVaultItemPopoutSpy).toHaveBeenCalled();
+      });
+
+      it("opens no item form when the serving account cannot become the active one", async () => {
+        const openAddEditVaultItemPopoutSpy = jest
+          .spyOn(overlayBackground as any, "openAddEditVaultItemPopout")
+          .mockImplementation();
+        switchAccount.mockImplementation(async () => undefined);
+
+        overlayBackground["currentAddNewItemData"] = { sender, addNewCipherType: CipherType.Login };
+        await overlayBackground["buildCipherAndOpenAddEditVaultItemPopout"]({
+          addNewCipherType: CipherType.Login,
+          login: { uri: url, hostname: "", username: "username", password: "password" },
+          sender,
+        });
+
+        expect(openAddEditVaultItemPopoutSpy).not.toHaveBeenCalled();
+      });
+    });
+
+    it("keeps the generator and a new item with the active account while it serves", async () => {
+      const switchAccount = jest.fn();
+      overlayBackground["switchAccount"] = switchAccount;
+      jest.spyOn(overlayBackground as any, "openAddEditVaultItemPopout").mockImplementation();
+
+      await expect(overlayBackground["syncGeneratorAccount"]()).resolves.toBe(mockUserId);
+      overlayBackground["currentAddNewItemData"] = { sender, addNewCipherType: CipherType.Login };
+      await overlayBackground["buildCipherAndOpenAddEditVaultItemPopout"]({
+        addNewCipherType: CipherType.Login,
+        login: { uri: url, hostname: "", username: "username", password: "password" },
+        sender,
+      });
+
+      expect(cipherService.setAddEditCipherInfo).toHaveBeenCalledWith(
+        expect.any(Object),
+        mockUserId,
+      );
+      expect(switchAccount).not.toHaveBeenCalled();
+    });
+
+    it("moves the generator to the next account when the active account's policy takes no login", async () => {
+      jest
+        .spyOn(multiAccountFillCipherPolicy, "canOfferSave")
+        .mockImplementation(async (_form, userId) => userId === otherUserId);
+
+      await expect(overlayBackground["syncGeneratorAccount"]()).resolves.toBe(otherUserId);
+    });
+
+    it("reads the icon of a cipher from the server of the account that owns it", async () => {
+      environmentService.getEnvironment$.mockImplementation((userId) =>
+        userId === otherUserId
+          ? of(
+              new CloudEnvironment({
+                key: Region.EU,
+                domain: "bitwarden.eu",
+                urls: { icons: "https://icons.bitwarden.eu/" },
+              }),
+            )
+          : environmentMock$,
+      );
+
+      const display = await overlayBackground["getInlineMenuAccountDisplay"]();
+
+      expect(display.iconsServerUrls).toEqual(
+        new Map([[otherUserId, "https://icons.bitwarden.eu/"]]),
+      );
     });
 
     it("presents the inline menu as unlocked while another account serves autofill", async () => {

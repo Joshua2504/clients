@@ -152,6 +152,9 @@ describe("WebRequestBackground", () => {
     autofillSettingsService.resolvedEnableBasicAuthResponseFor$.mockImplementation(() =>
       defer(() => autofillSettingsService.resolvedEnableBasicAuthResponse$),
     );
+    autofillSettingsService.httpAuthenticationAvailableFor$.mockImplementation(() =>
+      defer(() => autofillSettingsService.httpAuthenticationAvailable$),
+    );
 
     eventCollectionService = mock<EventCollectionService>();
     eventCollectionService.collect.mockResolvedValue(undefined);

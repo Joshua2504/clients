@@ -141,7 +141,15 @@ export type BrowserFido2ParentWindowReference = chrome.tabs.Tab & {
  * The user interface is implemented as a popout and the service uses the browser's messaging API to communicate with it.
  */
 export class BrowserFido2UserInterfaceService implements Fido2UserInterfaceServiceAbstraction<BrowserFido2ParentWindowReference> {
-  constructor(private authService: AuthService) {}
+  /**
+   * @param servedUserIds$ The accounts whose vaults serve passkeys, as from
+   * `AutofillAccountsService.autofillUserIds$`. While any of them serves, the user is not asked
+   * to unlock the active account. Without it, the active account must be unlocked.
+   */
+  constructor(
+    private authService: AuthService,
+    private servedUserIds$?: Observable<UserId[]>,
+  ) {}
 
   async newSession(
     fallbackSupported: boolean,
@@ -153,6 +161,7 @@ export class BrowserFido2UserInterfaceService implements Fido2UserInterfaceServi
       fallbackSupported,
       tab,
       abortController,
+      this.servedUserIds$,
     );
   }
 }
@@ -163,12 +172,15 @@ export class BrowserFido2UserInterfaceSession implements Fido2UserInterfaceSessi
     fallbackSupported: boolean,
     tab: BrowserFido2ParentWindowReference,
     abortController?: AbortController,
+    servedUserIds$?: Observable<UserId[]>,
   ): Promise<BrowserFido2UserInterfaceSession> {
     return new BrowserFido2UserInterfaceSession(
       authService,
       fallbackSupported,
       tab,
       abortController,
+      undefined,
+      servedUserIds$,
     );
   }
 
@@ -217,6 +229,7 @@ export class BrowserFido2UserInterfaceSession implements Fido2UserInterfaceSessi
     private readonly tab: BrowserFido2ParentWindowReference,
     readonly abortController = new AbortController(),
     readonly sessionId = Utils.newGuid(),
+    private readonly servedUserIds$?: Observable<UserId[]>,
   ) {
     this.messages$
       .pipe(
@@ -349,7 +362,18 @@ export class BrowserFido2UserInterfaceSession implements Fido2UserInterfaceSessi
     await this.receive(BrowserFido2MessageTypes.AbortResponse);
   }
 
+  /**
+   * Opens the popout for the user to unlock when no vault can answer the request. An account
+   * that serves passkeys can, so the user is then not asked to unlock the active account: its
+   * passkeys are not found until it is unlocked.
+   */
   async ensureUnlockedVault(): Promise<void> {
+    if (
+      this.servedUserIds$ != undefined &&
+      (await firstValueFrom(this.servedUserIds$)).length > 0
+    ) {
+      return;
+    }
     if ((await this.authService.getAuthStatus()) !== AuthenticationStatus.Unlocked) {
       await this.connect();
     }

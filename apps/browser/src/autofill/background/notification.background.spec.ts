@@ -3694,13 +3694,95 @@ describe("NotificationBackground", () => {
       });
     });
 
-    describe("the unlock prompt", () => {
+    describe("the active account locked while another account serves", () => {
       beforeEach(() => {
         activeAccountStatusMock$.next(AuthenticationStatus.Locked);
       });
 
-      it("stays with the locked active account when no serving account holds the login", async () => {
+      it("offers a new login to the serving account instead of asking to unlock", async () => {
+        const triggered = await notificationBackground.triggerCipherNotification(
+          formData("frodo", "ring"),
+          tab,
+        );
+
+        expect(triggered).toBe(true);
+        expect(queue()).toEqual([
+          expect.objectContaining({
+            type: NotificationType.AddLogin,
+            userId: otherUserId,
+            wasVaultLocked: false,
+          }),
+        ]);
+      });
+
+      it("offers a changed login nobody holds to the serving account", async () => {
         vaults[otherUserId] = [login("other-cipher", "sam", "potatoes")];
+
+        await notificationBackground.triggerCipherNotification(
+          formData("frodo", "old", "ring"),
+          tab,
+        );
+
+        expect(queue()).toEqual([
+          expect.objectContaining({
+            type: NotificationType.AddLogin,
+            userId: otherUserId,
+            wasVaultLocked: false,
+          }),
+        ]);
+      });
+
+      it("names the serving account on the save bar, since it is not the active one", async () => {
+        await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+
+        const cipherData = await notificationBackground.getNotificationCipherData();
+
+        expect(cipherData).toEqual([
+          expect.objectContaining({ userId: otherUserId, accountLabel: "other@example.com" }),
+        ]);
+      });
+
+      it("saves to the serving account without asking the active account to unlock", async () => {
+        await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+
+        await saveCipher();
+
+        expect(openUnlockPopoutSpy).not.toHaveBeenCalled();
+        expect(cipherService.createWithServer).toHaveBeenCalledTimes(1);
+        expect(cipherService.createWithServer).toHaveBeenCalledWith(
+          expect.objectContaining({ login: expect.objectContaining({ username: "frodo" }) }),
+          otherUserId,
+        );
+      });
+
+      it("offers nothing when the serving account's policy does not take the login", async () => {
+        fillCipherPolicy.canOfferSave.mockImplementation(async (_form, id) => id !== otherUserId);
+
+        const triggered = await notificationBackground.triggerCipherNotification(
+          formData("frodo", "ring"),
+          tab,
+        );
+
+        expect(triggered).toBe(false);
+        expect(queue()).toHaveLength(0);
+      });
+
+      it("updates the serving account's login, which needs no unlock", async () => {
+        vaults[otherUserId] = [login("other-cipher", "frodo", "old")];
+
+        await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+
+        expect(queue()).toEqual([
+          expect.objectContaining({
+            type: NotificationType.ChangePassword,
+            userId: otherUserId,
+            wasVaultLocked: false,
+          }),
+        ]);
+      });
+
+      it("asks to unlock the active account once no account serves", async () => {
+        otherAutofillUserIds$.next([]);
 
         await notificationBackground.triggerCipherNotification(
           formData("frodo", "old", "ring"),
@@ -3716,10 +3798,39 @@ describe("NotificationBackground", () => {
           }),
         ]);
       });
+    });
 
-      it("never offers a serving account a new login meant for the locked active account", async () => {
-        await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+    describe("no active account while another account serves", () => {
+      beforeEach(() => {
+        activeAccountStatusMock$.next(AuthenticationStatus.LoggedOut);
+        accountService.activeAccount$ = new BehaviorSubject(null);
+      });
 
+      afterEach(() => {
+        accountService.activeAccount$ = activeAccountSubject;
+      });
+
+      it("raises the save bar for the serving account", async () => {
+        const triggered = await notificationBackground.triggerCipherNotification(
+          formData("frodo", "ring"),
+          tab,
+        );
+
+        expect(triggered).toBe(true);
+        expect(queue()).toEqual([
+          expect.objectContaining({ type: NotificationType.AddLogin, userId: otherUserId }),
+        ]);
+      });
+
+      it("raises no bar once no account serves", async () => {
+        otherAutofillUserIds$.next([]);
+
+        const triggered = await notificationBackground.triggerCipherNotification(
+          formData("frodo", "old", "ring"),
+          tab,
+        );
+
+        expect(triggered).toBe(false);
         expect(queue()).toHaveLength(0);
       });
     });
@@ -4015,6 +4126,32 @@ describe("NotificationBackground", () => {
           expect.objectContaining({
             type: NotificationType.AtRiskPassword,
             userId: otherUserId,
+            data: {
+              hasPasswordChangeUri: true,
+              organizationName: "The Shire",
+              accountLabel: "other@example.com",
+            },
+          }),
+        ]);
+      });
+
+      it("shows no account while the active account alone serves autofill", async () => {
+        otherAutofillUserIds$.next([]);
+        vaults[userId] = [login("other-cipher", "frodo", "ring")];
+        taskService.pendingTasks$.mockImplementation((id) => of(id === userId ? [task] : []));
+        organizationService.organizations$.mockReturnValue(
+          of([{ id: "org-id", name: "The Shire" } as Organization]),
+        );
+
+        await notificationBackground.triggerAtRiskPasswordNotification(
+          formData("frodo", "ring"),
+          tab,
+        );
+
+        expect(queue()).toEqual([
+          expect.objectContaining({
+            type: NotificationType.AtRiskPassword,
+            userId,
             data: { hasPasswordChangeUri: true, organizationName: "The Shire" },
           }),
         ]);

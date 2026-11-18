@@ -8,6 +8,7 @@ import {
   Observable,
   concatMap,
   concat,
+  defer,
   filter,
   firstValueFrom,
   from,
@@ -15,6 +16,7 @@ import {
   merge,
   of,
   pairwise,
+  shareReplay,
   switchMap,
   timeout,
 } from "rxjs";
@@ -50,7 +52,10 @@ import { InternalPolicyService as InternalPolicyServiceAbstraction } from "@bitw
 import { DefaultOrganizationService } from "@bitwarden/common/admin-console/services/organization/default-organization.service";
 import { DefaultPolicyService } from "@bitwarden/common/admin-console/services/policy/default-policy.service";
 import { PolicyApiService } from "@bitwarden/common/admin-console/services/policy/policy-api.service";
-import { AccountService as AccountServiceAbstraction } from "@bitwarden/common/auth/abstractions/account.service";
+import {
+  Account,
+  AccountService as AccountServiceAbstraction,
+} from "@bitwarden/common/auth/abstractions/account.service";
 import { AuthRequestAnsweringService } from "@bitwarden/common/auth/abstractions/auth-request-answering/auth-request-answering.service.abstraction";
 import { AuthService as AuthServiceAbstraction } from "@bitwarden/common/auth/abstractions/auth.service";
 import { AvatarService as AvatarServiceAbstraction } from "@bitwarden/common/auth/abstractions/avatar.service";
@@ -386,6 +391,7 @@ import { TargetingRulesDataService } from "../autofill/services/targeting-rules-
 import { WebmapperDraftService } from "../autofill/services/webmapper-draft.service";
 import { shouldAutoCopyTotp } from "../autofill/types/fill-result";
 import { trackGeneratedCredential } from "../autofill/utils/credential-history-utils";
+import { defaultSaveAccount } from "../autofill/utils/save-target";
 import { SafariApp } from "../browser/safariApp";
 import { PhishingDataService } from "../dirt/phishing-detection/services/phishing-data.service";
 import { PhishingDetectionService } from "../dirt/phishing-detection/services/phishing-detection.service";
@@ -1193,6 +1199,11 @@ export default class MainBackground {
 
     this.userVerificationApiService = new UserVerificationApiService(this.apiService);
 
+    this.autofillAccountsService = new DefaultAutofillAccountsService(
+      this.stateProvider,
+      this.accountService,
+      this.authService,
+    );
     this.domainSettingsService = new DefaultDomainSettingsService(
       this.stateProvider,
       this.policyService,
@@ -1200,6 +1211,7 @@ export default class MainBackground {
       this.configService,
       this.environmentService,
       this.authService,
+      this.autofillAccountsService.autofillUserIds$,
     );
 
     this.targetingRulesDataService = new TargetingRulesDataService(
@@ -1258,11 +1270,6 @@ export default class MainBackground {
         cipherService: this.cipherService,
         revealedCipherService: this.revealedCipherService,
       }) ?? new DefaultFillCipherPolicy(this.cipherService);
-    this.autofillAccountsService = new DefaultAutofillAccountsService(
-      this.stateProvider,
-      this.accountService,
-      this.authService,
-    );
     this.multiAccountFillCipherPolicy = new DefaultMultiAccountFillCipherPolicy(
       this.fillCipherPolicy,
       this.autofillAccountsService,
@@ -1556,9 +1563,14 @@ export default class MainBackground {
       this.authRequestAnsweringService,
       this.autoConfirmService,
       this.billingAccountProfileStateService,
+      // Accounts that are not active stay unlocked and may serve autofill, so keep them current.
+      { processForNonActiveAccounts: true },
     );
 
-    this.fido2UserInterfaceService = new BrowserFido2UserInterfaceService(this.authService);
+    this.fido2UserInterfaceService = new BrowserFido2UserInterfaceService(
+      this.authService,
+      this.autofillAccountsService.autofillUserIds$,
+    );
     this.fido2AuthenticatorService = new Fido2AuthenticatorService(
       this.cipherService,
       this.fido2UserInterfaceService,
@@ -1584,6 +1596,7 @@ export default class MainBackground {
       this.platformUtilsService,
       this.autofillSettingsService,
       this.taskSchedulerService,
+      this.autofillAccountsService.autofillUserIds$,
     );
 
     this.processReloadService = new BrowserProcessReloadService(
@@ -1613,6 +1626,7 @@ export default class MainBackground {
       this.authService,
       permissionsPolicyBackground,
       this.domainSettingsService,
+      this.autofillAccountsService.autofillUserIds$,
     );
 
     const logoutService = new DefaultLogoutService(
@@ -2020,7 +2034,9 @@ export default class MainBackground {
 
     await MainContextMenuHandler.removeAll();
 
-    if (forLocked) {
+    // A lock leaves the menu offering to unlock, unless an account other than the active one
+    // still serves autofill: its entries then stay.
+    if (forLocked && !(await this.anotherAccountServesAutofill())) {
       await this.mainContextMenuHandler?.noAccess();
       this.onUpdatedRan = this.onReplacedRan = false;
       return;
@@ -2050,6 +2066,13 @@ export default class MainBackground {
       await this.cipherContextMenuHandler?.update(tab.url, currentUrlIsBlocked);
       this.onUpdatedRan = this.onReplacedRan = false;
     }
+  }
+
+  /** Whether autofill serves an account that is not the active one. */
+  private async anotherAccountServesAutofill(): Promise<boolean> {
+    const activeUserId = (await firstValueFrom(this.accountService.activeAccount$))?.id;
+    const autofillUserIds = await firstValueFrom(this.autofillAccountsService.autofillUserIds$);
+    return autofillUserIds.some((userId) => userId !== activeUserId);
   }
 
   async updateOverlayCiphers() {
@@ -2125,6 +2148,10 @@ export default class MainBackground {
     );
 
     const userBeingLoggedOut = userId ?? activeUserId;
+    // Read before the account's state is cleaned, so the popup can say which account it was.
+    const loggedOutEmail = (await firstValueFrom(this.accountService.accounts$))?.[
+      userBeingLoggedOut
+    ]?.email;
 
     await this.eventUploadService.uploadEvents(userBeingLoggedOut);
 
@@ -2188,6 +2215,7 @@ export default class MainBackground {
       // Lets the popup tell the logout of the account it shows from one of an account in the
       // background; by now the active account has already moved on.
       loggedOutActiveAccount,
+      email: loggedOutEmail,
     });
 
     if (needStorageReseed) {
@@ -2410,11 +2438,14 @@ export default class MainBackground {
    * Will be reverted to instantiation within the constructor once the feature flag is removed.
    */
   async initOverlayAndTabsBackground() {
+    // The overlay serves a signed-in user: the active account, or an account that serves
+    // autofill while the active one is missing or logged out.
     if (
       this.overlayBackground ||
       this.tabsBackground ||
-      (await firstValueFrom(this.authService.activeAccountStatus$)) ===
-        AuthenticationStatus.LoggedOut
+      ((await firstValueFrom(this.authService.activeAccountStatus$)) ===
+        AuthenticationStatus.LoggedOut &&
+        (await firstValueFrom(this.autofillAccountsService.autofillUserIds$)).length === 0)
     ) {
       return;
     }
@@ -2474,6 +2505,7 @@ export default class MainBackground {
       this.multiAccountFillCipherPolicy,
       this.autofillAccountsService,
       this.billingAccountProfileStateService,
+      (userId) => this.switchAccount(userId),
     );
 
     this.autofillBadgeUpdaterService = new AutofillBadgeUpdaterService(
@@ -2516,6 +2548,26 @@ export default class MainBackground {
     ).init();
   }
 
+  /** The account a password is generated for outside a page. See {@link defaultSaveAccount}. */
+  private async generatorAccount(): Promise<Account | null> {
+    const activeAccount = await firstValueFrom(this.accountService.activeAccount$);
+    const autofillUserIds = await firstValueFrom(this.autofillAccountsService.autofillUserIds$);
+    const userId =
+      (await defaultSaveAccount(
+        { uri: "" },
+        autofillUserIds,
+        activeAccount?.id ?? null,
+        this.multiAccountFillCipherPolicy,
+      )) ??
+      autofillUserIds[0] ??
+      activeAccount?.id;
+    if (userId == null || userId === activeAccount?.id) {
+      return activeAccount;
+    }
+    const accountInfo = (await firstValueFrom(this.accountService.accounts$))[userId];
+    return accountInfo == null ? null : { id: userId, ...accountInfo };
+  }
+
   generatePasswordToClipboard = () => {
     // FIXME: `credentialGeneratorService` and `generatorHistoryService` are initialized in
     // `initOverlayAndTabsBackground()`, which only runs for authenticated users. Returning EMPTY
@@ -2526,23 +2578,27 @@ export default class MainBackground {
       return EMPTY;
     }
 
+    // The password is generated for the account a new login would be saved to: the active
+    // account while it serves autofill or no account does, otherwise the first account serving
+    // autofill that may save. Its generator options, policies and history apply.
+    const account$ = concat(
+      defer(() => this.generatorAccount()),
+      NEVER,
+    ).pipe(shareReplay({ bufferSize: 1, refCount: true }));
+
     return this.credentialGeneratorService
       .generate$({
         on$: concat(
           of({ source: PasswordGenerateRequestSource.Clipboard, type: Type.password }),
           NEVER,
         ),
-        account$: this.accountService.activeAccount$,
+        account$,
       })
       .pipe(
         concatMap(async (generated) => {
           this.platformUtilsService.copyToClipboard(generated.credential);
           try {
-            await trackGeneratedCredential(
-              this.generatorHistoryService,
-              this.accountService.activeAccount$,
-              generated,
-            );
+            await trackGeneratedCredential(this.generatorHistoryService, account$, generated);
           } catch (e) {
             this.logService.error(e);
           }

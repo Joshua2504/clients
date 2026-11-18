@@ -156,6 +156,8 @@ export abstract class AutofillSettingsServiceAbstraction {
   /** {@link autofillOnPageLoad$} for `userId` instead of the active user. */
   autofillOnPageLoadFor$: (userId: UserId) => Observable<boolean>;
   setAutofillOnPageLoad: (newValue: boolean) => Promise<void>;
+  /** {@link setAutofillOnPageLoad} for `userId` instead of the active user. */
+  setAutofillOnPageLoadFor: (newValue: boolean, userId: UserId) => Promise<void>;
   autofillOnPageLoadDefault$: Observable<boolean>;
   /**
    * {@link autofillOnPageLoadDefault$} for `userId` instead of the active user: whether a login
@@ -166,6 +168,11 @@ export abstract class AutofillSettingsServiceAbstraction {
   autofillOnPageLoadCalloutIsDismissed$: Observable<boolean>;
   setAutofillOnPageLoadCalloutIsDismissed: (newValue: boolean) => Promise<void>;
   activateAutofillOnPageLoadFromPolicy$: Observable<boolean>;
+  /**
+   * {@link activateAutofillOnPageLoadFromPolicy$} for `userId` instead of the active user:
+   * whether one of that user's organizations turns autofill on page load on.
+   */
+  activateAutofillOnPageLoadFromPolicyFor$: (userId: UserId) => Observable<boolean>;
   setAutofillOnPageLoadPolicyToastHasDisplayed: (newValue: boolean) => Promise<void>;
   autofillOnPageLoadPolicyToastHasDisplayed$: Observable<boolean>;
   autoCopyTotp$: Observable<boolean>;
@@ -229,9 +236,17 @@ export abstract class AutofillSettingsServiceAbstraction {
    * Emits `false` while there is no active user, and follows changes of active user.
    */
   httpAuthenticationAvailable$: Observable<boolean>;
+  /**
+   * {@link httpAuthenticationAvailable$} for a user other than the active one: whether HTTP
+   * authentication challenges may be answered from `userId`'s vault, gated on the
+   * {@link FeatureFlag.EnableBasicAuthResponse} flag. It does not depend on which user is active.
+   */
+  httpAuthenticationAvailableFor$: (userId: UserId) => Observable<boolean>;
   enableContextMenu$: Observable<boolean>;
   setEnableContextMenu: (newValue: boolean) => Promise<void>;
   clearClipboardDelay$: Observable<ClearClipboardDelaySetting>;
+  /** {@link clearClipboardDelay$} for `userId` instead of the active user. */
+  clearClipboardDelayFor$: (userId: UserId) => Observable<ClearClipboardDelaySetting>;
   setClearClipboardDelay: (newValue: ClearClipboardDelaySetting) => Promise<void>;
   hadPreMigrationClipboardValue$: Observable<boolean>;
   clipboardSettingUpdatedNotificationDismissed$: Observable<boolean>;
@@ -451,6 +466,14 @@ export class AutofillSettingsService implements AutofillSettingsServiceAbstracti
     await this.autofillOnPageLoadState.update(() => newValue);
   }
 
+  async setAutofillOnPageLoadFor(newValue: boolean, userId: UserId): Promise<void> {
+    await this.stateProvider.getUser(userId, AUTOFILL_ON_PAGE_LOAD).update(() => newValue);
+  }
+
+  activateAutofillOnPageLoadFromPolicyFor$(userId: UserId): Observable<boolean> {
+    return this.policyService.policyAppliesToUser$(PolicyType.ActivateAutofill, userId);
+  }
+
   autofillOnPageLoadDefaultFor$(userId: UserId): Observable<boolean> {
     return this.stateProvider
       .getUser(userId, AUTOFILL_ON_PAGE_LOAD_DEFAULT)
@@ -555,12 +578,22 @@ export class AutofillSettingsService implements AutofillSettingsServiceAbstracti
     ]).pipe(map(([userSetting, available]) => available && userSetting === true));
   }
 
+  httpAuthenticationAvailableFor$(_userId: UserId): Observable<boolean> {
+    return this.httpAuthenticationFeatureEnabled$();
+  }
+
   async setEnableBasicAuthResponse(newValue: boolean): Promise<void> {
     await this.enableBasicAuthResponseState.update(() => newValue);
   }
 
   async setEnableContextMenu(newValue: boolean): Promise<void> {
     await this.enableContextMenuState.update(() => newValue);
+  }
+
+  clearClipboardDelayFor$(userId: UserId): Observable<ClearClipboardDelaySetting> {
+    return this.stateProvider
+      .getUser(userId, CLEAR_CLIPBOARD_DELAY)
+      .state$.pipe(map((x) => x ?? ClearClipboardDelay.FiveMinutes));
   }
 
   async setClearClipboardDelay(newValue: ClearClipboardDelaySetting): Promise<void> {

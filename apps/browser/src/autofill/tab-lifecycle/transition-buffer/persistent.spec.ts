@@ -25,7 +25,7 @@ function report(
   expiresAt = 10_000,
   stampedAt = 0,
 ): BufferedTransitionReport {
-  return { userId, tabId, frameId, documentId, stampedAt, expiresAt };
+  return { userIds: [userId], tabId, frameId, documentId, stampedAt, expiresAt };
 }
 
 const hot: TabEdge = {
@@ -52,6 +52,26 @@ describe("BUFFERED_TRANSITIONS", () => {
     expect(BUFFERED_TRANSITIONS.deserializer(JSON.parse(JSON.stringify(record)))).toEqual(record);
   });
 
+  it("reads an entry stored with a single userId as attributed to that account", () => {
+    const stored = { userId, tabId: 1, frameId: 0, documentId: "a", stampedAt: 0, expiresAt: 5 };
+
+    const result = BUFFERED_TRANSITIONS.deserializer({ key: stored } as any);
+
+    expect(result).toEqual({
+      key: { userIds: [userId], tabId: 1, frameId: 0, documentId: "a", stampedAt: 0, expiresAt: 5 },
+    });
+    expect(result.key).not.toHaveProperty("userId");
+  });
+
+  it("keeps every account an entry is attributed to, in order", () => {
+    const other = "user-2" as UserId;
+    const stored = { ...report(1, 0, "a"), userIds: [other, userId] };
+
+    const result = BUFFERED_TRANSITIONS.deserializer({ key: stored } as any);
+
+    expect(result.key.userIds).toEqual([other, userId]);
+  });
+
   it("is an empty record when nothing is stored", () => {
     expect(BUFFERED_TRANSITIONS.deserializer(null as any)).toEqual({});
   });
@@ -60,6 +80,9 @@ describe("BUFFERED_TRANSITIONS", () => {
   it.each([
     ["missing userId", { ...valid, userId: undefined }],
     ["empty userId", { ...valid, userId: "" }],
+    ["no accounts", { ...valid, userId: undefined, userIds: [] }],
+    ["an empty account id", { ...valid, userId: undefined, userIds: [userId, ""] }],
+    ["an account id that is not a string", { ...valid, userId: undefined, userIds: [userId, 7] }],
     ["missing documentId", { ...valid, documentId: undefined }],
     ["empty documentId", { ...valid, documentId: "" }],
     ["missing expiresAt", { ...valid, expiresAt: undefined }],

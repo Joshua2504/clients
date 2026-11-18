@@ -1,10 +1,11 @@
 // FIXME: Update this file to be type safe and remove this and next line
 // @ts-strict-ignore
-import { firstValueFrom, Subscription } from "rxjs";
+import { firstValueFrom, Observable, Subscription } from "rxjs";
 
 import { ClearClipboardDelay } from "../../autofill/constants";
 import { AutofillSettingsServiceAbstraction } from "../../autofill/services/autofill-settings.service";
 import { ClearClipboardDelaySetting } from "../../autofill/types";
+import { UserId } from "../../types/guid";
 import { PlatformUtilsService } from "../abstractions/platform-utils.service";
 import { SystemService as SystemServiceAbstraction } from "../abstractions/system.service";
 import { Utils } from "../misc/utils";
@@ -19,6 +20,12 @@ export class SystemService implements SystemServiceAbstraction {
     private platformUtilsService: PlatformUtilsService,
     private autofillSettingsService: AutofillSettingsServiceAbstraction,
     private taskSchedulerService: TaskSchedulerService,
+    /**
+     * The accounts that share the clipboard, such as the accounts autofill serves. The clipboard
+     * is then cleared after the shortest delay any of them has set. While it is absent or emits
+     * none, the active account's delay applies.
+     */
+    private clipboardUserIds$?: Observable<UserId[]>,
   ) {
     this.taskSchedulerService.registerTaskHandler(
       ScheduledTaskNames.systemClearClipboardTimeout,
@@ -35,10 +42,7 @@ export class SystemService implements SystemServiceAbstraction {
 
     let taskTimeoutInMs = timeoutMs;
     if (!taskTimeoutInMs) {
-      const clearClipboardDelaySetting = await firstValueFrom(
-        this.autofillSettingsService.clearClipboardDelay$,
-      );
-      taskTimeoutInMs = this.convertClearClipboardDelayToMs(clearClipboardDelaySetting);
+      taskTimeoutInMs = await this.clearClipboardDelayMs();
     }
 
     if (!taskTimeoutInMs) {
@@ -56,6 +60,30 @@ export class SystemService implements SystemServiceAbstraction {
       ScheduledTaskNames.systemClearClipboardTimeout,
       taskTimeoutInMs,
     );
+  }
+
+  /**
+   * The delay after which the clipboard is cleared, `null` for never. With several accounts
+   * sharing the clipboard the shortest delay wins, and "never" only when all of them say so.
+   */
+  private async clearClipboardDelayMs(): Promise<number | null> {
+    const userIds =
+      this.clipboardUserIds$ == null ? [] : await firstValueFrom(this.clipboardUserIds$);
+    if (userIds.length === 0) {
+      return this.convertClearClipboardDelayToMs(
+        await firstValueFrom(this.autofillSettingsService.clearClipboardDelay$),
+      );
+    }
+
+    const delays = await Promise.all(
+      userIds.map(async (userId) =>
+        this.convertClearClipboardDelayToMs(
+          await firstValueFrom(this.autofillSettingsService.clearClipboardDelayFor$(userId)),
+        ),
+      ),
+    );
+    const finiteDelays = delays.filter((delay): delay is number => delay != null);
+    return finiteDelays.length > 0 ? Math.min(...finiteDelays) : null;
   }
 
   private convertClearClipboardDelayToMs(setting: ClearClipboardDelaySetting): number | null {
