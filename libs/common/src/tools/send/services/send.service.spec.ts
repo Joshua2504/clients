@@ -125,6 +125,17 @@ describe("SendService", () => {
       expect(result).toBe(undefined);
     });
 
+    it("reads the send of the given user, active or not", async () => {
+      const otherUserId = Utils.newGuid() as UserId;
+      await sendService.replace({ "2": testSendData("2", "Other Send") }, otherUserId);
+
+      expect(await firstValueFrom(sendService.get$("2", otherUserId))).toEqual(
+        testSend("2", "Other Send"),
+      );
+      expect(await firstValueFrom(sendService.get$("1", otherUserId))).toBeUndefined();
+      expect(await firstValueFrom(sendService.get$("1"))).toEqual(testSend("1", "Test Send"));
+    });
+
     it("updated observable", async () => {
       const singleSendObservable = sendService.get$("1");
       const result = await firstValueFrom(singleSendObservable);
@@ -674,6 +685,22 @@ describe("SendService", () => {
       await sendService.delete(["1", "2"]);
       const sendsAfterDelete = await firstValueFrom(sendService.sends$);
       expect(sendsAfterDelete.length).toBe(0);
+    });
+
+    it("deletes from the given user and leaves the active account's sends alone", async () => {
+      const otherUserId = Utils.newGuid() as UserId;
+      await sendService.replace(
+        { "1": testSendData("1", "Other 1"), "2": testSendData("2", "Other 2") },
+        otherUserId,
+      );
+
+      await sendService.delete("1", otherUserId);
+
+      expect(await firstValueFrom(sendService.get$("1", otherUserId))).toBeUndefined();
+      expect(await firstValueFrom(sendService.get$("2", otherUserId))).toEqual(
+        testSend("2", "Other 2"),
+      );
+      expect(await firstValueFrom(sendService.sends$)).toEqual([testSend("1", "Test Send")]);
     });
   });
 

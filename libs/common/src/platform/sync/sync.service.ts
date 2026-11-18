@@ -95,6 +95,20 @@ export abstract class SyncService {
     userId: UserId,
   ): Promise<boolean>;
   abstract syncDeleteCipher(notification: SyncFolderNotification, userId: UserId): Promise<boolean>;
-  abstract syncUpsertSend(notification: SyncSendNotification, isEdit: boolean): Promise<boolean>;
-  abstract syncDeleteSend(notification: SyncSendNotification): Promise<boolean>;
+  /**
+   * Applies a send create or update notification.
+   * @param userId The user the notification is for. It does not need to be the active account.
+   * Without it, the notification is applied only when it is for the active account.
+   */
+  abstract syncUpsertSend(
+    notification: SyncSendNotification,
+    isEdit: boolean,
+    userId?: UserId,
+  ): Promise<boolean>;
+  /**
+   * Applies a send delete notification.
+   * @param userId The user the notification is for. It does not need to be the active account.
+   * Without it, the send is deleted from the active account.
+   */
+  abstract syncDeleteSend(notification: SyncSendNotification, userId?: UserId): Promise<boolean>;
 }

@@ -160,8 +160,14 @@ export class SendService implements InternalSendServiceAbstraction {
     return [send, fileData];
   }
 
-  get$(id: string): Observable<Send | undefined> {
-    return this.sends$.pipe(
+  get$(id: string, userId?: UserId): Observable<Send | undefined> {
+    const sends$ =
+      userId == null
+        ? this.sends$
+        : this.stateProvider
+            .encryptedStateFor$(userId)
+            .pipe(map(([, record]) => Object.values(record || {}).map((data) => new Send(data))));
+    return sends$.pipe(
       distinctUntilChanged((oldSends, newSends) => {
         const oldSend = oldSends.find((oldSend) => oldSend.id === id);
         const newSend = newSends.find((newSend) => newSend.id === id);
@@ -287,8 +293,8 @@ export class SendService implements InternalSendServiceAbstraction {
     await this.replace(sends, userId);
   }
 
-  async delete(id: string | string[]): Promise<any> {
-    const [userId, sends] = await this.stateProvider.getEncryptedSends();
+  async delete(id: string | string[], userId?: UserId): Promise<any> {
+    const [sendsUserId, sends] = await this.stateProvider.getEncryptedSends(userId);
     if (sends == null) {
       return;
     }
@@ -304,7 +310,7 @@ export class SendService implements InternalSendServiceAbstraction {
       });
     }
 
-    await this.replace(sends, userId);
+    await this.replace(sends, sendsUserId);
   }
 
   async replace(sends: { [id: string]: SendData }, userId: UserId): Promise<any> {

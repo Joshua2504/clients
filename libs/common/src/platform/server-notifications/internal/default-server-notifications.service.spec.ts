@@ -24,6 +24,7 @@ import { SyncService } from "../../sync";
 
 import {
   DefaultServerNotificationsService,
+  DefaultServerNotificationsServiceOptions,
   DISABLED_NOTIFICATIONS_URL,
 } from "./default-server-notifications.service";
 import { SignalRConnectionService, SignalRNotification } from "./signalr-connection.service";
@@ -109,7 +110,11 @@ describe("NotificationsService", () => {
       () => new Subject<SignalRNotification>(),
     );
 
-    sut = new DefaultServerNotificationsService(
+    sut = createSut();
+  });
+
+  function createSut(options?: DefaultServerNotificationsServiceOptions) {
+    return new DefaultServerNotificationsService(
       mock<LogService>({ startMeasurement: () => mock<Measurement>() }),
       syncService,
       appIdService,
@@ -123,8 +128,9 @@ describe("NotificationsService", () => {
       authRequestAnsweringService,
       autoConfirmService,
       billingAccountProfileStateService,
+      options,
     );
-  });
+  }
 
   const mockUser1 = "user1" as UserId;
   const mockUser2 = "user2" as UserId;
@@ -343,7 +349,26 @@ describe("NotificationsService", () => {
       subscription.unsubscribe();
     });
 
-    it("runs a revision-gated fullSync for an unlocked inactive user when its connection is established", async () => {
+    it("does not sync an unlocked inactive user when its connection is established, by default", async () => {
+      const subscription = sut.notifications$.subscribe();
+      emitActiveUser(mockUser2);
+      emitActiveUser(mockUser1); // both users in accounts, user1 active
+      emitNotificationUrl("http://test.example.com");
+      authStatusGetter(mockUser1).next(AuthenticationStatus.Unlocked);
+      authStatusGetter(mockUser2).next(AuthenticationStatus.Unlocked);
+      webPushSupportGetter(mockUser1).next({ type: "not-supported", reason: "test" });
+      webPushSupportGetter(mockUser2).next({ type: "not-supported", reason: "test" });
+      await awaitAsync(1);
+
+      signalrNotificationGetter(mockUser2, "http://test.example.com").next({ type: "Connected" });
+      await awaitAsync(1);
+
+      expect(syncService.fullSync).not.toHaveBeenCalled();
+      subscription.unsubscribe();
+    });
+
+    it("runs a revision-gated fullSync for an unlocked inactive user when its connection is established, with processForNonActiveAccounts", async () => {
+      sut = createSut({ processForNonActiveAccounts: true });
       const subscription = sut.notifications$.subscribe();
       emitActiveUser(mockUser2);
       emitActiveUser(mockUser1); // both users in accounts, user1 active
@@ -480,7 +505,7 @@ describe("NotificationsService", () => {
         await sut["processNotification"](notification, mockUser1);
 
         expect(logoutCallback).not.toHaveBeenCalled();
-        expect(syncService.fullSync).toHaveBeenCalledWith(true, { userId: mockUser1 });
+        expect(syncService.fullSync).toHaveBeenCalledWith(true);
       });
     });
 

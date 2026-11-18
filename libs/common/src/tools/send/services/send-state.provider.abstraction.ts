@@ -13,7 +13,16 @@ export abstract class SendStateProvider {
   encryptedState$: Observable<EncryptedSendState>;
   decryptedState$: Observable<SendView[]>;
 
-  getEncryptedSends: () => Promise<EncryptedSendState>;
+  /**
+   * The encrypted sends of the given user, whether or not that user is the active account.
+   * @param userId The user whose sends to read.
+   */
+  encryptedStateFor$: (userId: UserId) => Observable<EncryptedSendState>;
+
+  /**
+   * Gets the encrypted sends of the active account, or of `userId` when it is given.
+   */
+  getEncryptedSends: (userId?: UserId) => Promise<EncryptedSendState>;
 
   setEncryptedSends: (value: { [id: string]: SendData }, userId: UserId) => Promise<void>;
 

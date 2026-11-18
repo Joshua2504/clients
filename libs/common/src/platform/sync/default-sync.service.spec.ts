@@ -1213,6 +1213,109 @@ describe("DefaultSyncService", () => {
       expect(sendsClient.fetch).toHaveBeenCalledWith(sendGuid);
       expect(messageSender.send).toHaveBeenCalledWith("syncedUpsertedSend", { sendId: sendGuid });
     });
+
+    describe("for a user that is not the active account", () => {
+      const otherUser = "other-user" as UserId;
+      const otherNotification = new SyncSendNotification({
+        Id: sendGuid,
+        UserId: otherUser,
+        RevisionDate: "2025-01-02T00:00:00.000Z",
+      });
+
+      it("reads that user's send and fetches it with that user's SDK client", async () => {
+        sendsClient.fetch.mockResolvedValue({ id: sendGuid });
+
+        const result = await sut.syncUpsertSend(otherNotification, false, otherUser);
+
+        expect(result).toBe(true);
+        expect(sendService.get$).toHaveBeenCalledWith(sendGuid, otherUser);
+        expect(authService.authStatusFor$).toHaveBeenCalledWith(otherUser);
+        expect(sdkService.userClient$).toHaveBeenCalledWith(otherUser);
+        expect(sendsClient.fetch).toHaveBeenCalledWith(sendGuid);
+        expect(messageSender.send).toHaveBeenCalledWith("syncCompleted", {
+          successfully: true,
+          userId: otherUser,
+        });
+      });
+
+      it("does nothing when the notification names another user", async () => {
+        const result = await sut.syncUpsertSend(notification, false, otherUser);
+
+        expect(result).toBe(false);
+        expect(sendsClient.fetch).not.toHaveBeenCalled();
+      });
+
+      it("does nothing when that user is logged out", async () => {
+        Matrix.autoMockMethod(authService.authStatusFor$, () => of(AuthenticationStatus.LoggedOut));
+
+        const result = await sut.syncUpsertSend(otherNotification, false, otherUser);
+
+        expect(result).toBe(false);
+        expect(sendsClient.fetch).not.toHaveBeenCalled();
+      });
+    });
+
+    it("ignores a notification for another user when no user is given", async () => {
+      const result = await sut.syncUpsertSend(
+        new SyncSendNotification({
+          Id: sendGuid,
+          UserId: "other-user",
+          RevisionDate: "2025-01-02T00:00:00.000Z",
+        }),
+        false,
+      );
+
+      expect(result).toBe(false);
+      expect(sendsClient.fetch).not.toHaveBeenCalled();
+      expect(messageSender.send).toHaveBeenCalledWith("syncCompleted", {
+        successfully: false,
+        userId: undefined,
+      });
+    });
+  });
+
+  describe("syncDeleteSend", () => {
+    const notification = new SyncSendNotification({ Id: "send-id", UserId: user1 });
+
+    beforeEach(() => {
+      accountService.activeAccount$ = of({ id: user1 } as Account);
+      tokenService.hasAccessToken$.mockReturnValue(of(true));
+    });
+
+    it("deletes the send of the active account when no user is given", async () => {
+      const result = await sut.syncDeleteSend(notification);
+
+      expect(result).toBe(true);
+      expect(tokenService.hasAccessToken$).toHaveBeenCalledWith(user1);
+      expect(sendService.delete).toHaveBeenCalledWith("send-id");
+      expect(messageSender.send).toHaveBeenCalledWith("syncCompleted", {
+        successfully: true,
+        userId: undefined,
+      });
+    });
+
+    it("deletes the send of the given user", async () => {
+      const otherUser = "other-user" as UserId;
+
+      const result = await sut.syncDeleteSend(notification, otherUser);
+
+      expect(result).toBe(true);
+      expect(tokenService.hasAccessToken$).toHaveBeenCalledWith(otherUser);
+      expect(sendService.delete).toHaveBeenCalledWith("send-id", otherUser);
+      expect(messageSender.send).toHaveBeenCalledWith("syncCompleted", {
+        successfully: true,
+        userId: otherUser,
+      });
+    });
+
+    it("does nothing when the given user has no access token", async () => {
+      tokenService.hasAccessToken$.mockReturnValue(of(false));
+
+      const result = await sut.syncDeleteSend(notification, "other-user" as UserId);
+
+      expect(result).toBe(false);
+      expect(sendService.delete).not.toHaveBeenCalled();
+    });
   });
 
   describe("syncUpsertCipher", () => {

@@ -1,3 +1,5 @@
+import { firstValueFrom } from "rxjs";
+
 import {
   FakeAccountService,
   FakeStateProvider,
@@ -32,6 +34,24 @@ describe("Send State Provider", () => {
 
       const actual = await sendStateProvider.getEncryptedSends();
       expect(actual).toStrictEqual([mockUserId, sendData]);
+    });
+
+    it("returns the SendData of the given user", async () => {
+      const otherUserId = Utils.newGuid() as UserId;
+      const sendData = { "1": testSendData("1", "Active Send") };
+      const otherSendData = { "2": testSendData("2", "Other Send") };
+      await sendStateProvider.setEncryptedSends(sendData, mockUserId);
+      await sendStateProvider.setEncryptedSends(otherSendData, otherUserId);
+      await awaitAsync();
+
+      expect(await sendStateProvider.getEncryptedSends(otherUserId)).toStrictEqual([
+        otherUserId,
+        otherSendData,
+      ]);
+      expect(await firstValueFrom(sendStateProvider.encryptedStateFor$(otherUserId))).toStrictEqual(
+        [otherUserId, otherSendData],
+      );
+      expect(await sendStateProvider.getEncryptedSends()).toStrictEqual([mockUserId, sendData]);
     });
   });
 

@@ -26,7 +26,10 @@ import { Environment, EnvironmentService } from "../../abstractions/environment.
 import { LogService } from "../../abstractions/log.service";
 import { MessagingService } from "../../abstractions/messaging.service";
 
-import { DefaultServerNotificationsService } from "./default-server-notifications.service";
+import {
+  DefaultServerNotificationsService,
+  DefaultServerNotificationsServiceOptions,
+} from "./default-server-notifications.service";
 import { SignalRConnectionService } from "./signalr-connection.service";
 import { WebPushConnectionService, WebPushConnector } from "./webpush-connection.service";
 
@@ -139,7 +142,12 @@ describe("DefaultServerNotificationsService (multi-user)", () => {
     autoConfirmService = mock<AutomaticUserConfirmationService>();
     billingAccountProfileStateService = mock<BillingAccountProfileStateService>();
 
-    defaultServerNotificationsService = new DefaultServerNotificationsService(
+    // The browser's configuration; see "without processForNonActiveAccounts" for the default.
+    defaultServerNotificationsService = createService({ processForNonActiveAccounts: true });
+  });
+
+  function createService(options?: DefaultServerNotificationsServiceOptions) {
+    return new DefaultServerNotificationsService(
       mock<LogService>({ startMeasurement: () => mock<Measurement>() }),
       syncService,
       appIdService,
@@ -153,8 +161,9 @@ describe("DefaultServerNotificationsService (multi-user)", () => {
       authRequestAnsweringService,
       autoConfirmService,
       billingAccountProfileStateService,
+      options,
     );
-  });
+  }
 
   function setActiveUserAccount(userId: UserId | null) {
     if (userId == null) {
@@ -299,7 +308,7 @@ describe("DefaultServerNotificationsService (multi-user)", () => {
     subscription.unsubscribe();
   });
 
-  it("does not process restricted notification types for non-active users", async () => {
+  it("does not process notifications that refresh the page in view for non-active users", async () => {
     addUserAccount(mockUserId1);
     addUserAccount(mockUserId2);
     setUserUnlocked(mockUserId1);
@@ -311,26 +320,26 @@ describe("DefaultServerNotificationsService (multi-user)", () => {
 
     const subscription = defaultServerNotificationsService.startListening();
 
-    // Emit a send create for non-active user (should be ignored)
-    user2WebPush.notificationSubject.next(
-      new NotificationResponse({ type: NotificationType.SyncSendCreate }),
-    );
-    // Emit a send create for active user (should be processed)
-    user1WebPush.notificationSubject.next(
-      new NotificationResponse({ type: NotificationType.SyncSendCreate }),
-    );
-    // A logout that is not a key rotation stays with the active user only
+    // Bank account verifications only refresh the page in view, which shows the active account
     user2WebPush.notificationSubject.next(
       new NotificationResponse({
-        type: NotificationType.LogOut,
-        payload: { UserId: mockUserId2 },
+        type: NotificationType.OrganizationBankAccountVerified,
+        payload: { OrganizationId: "org-2" },
+      }),
+    );
+    user1WebPush.notificationSubject.next(
+      new NotificationResponse({
+        type: NotificationType.OrganizationBankAccountVerified,
+        payload: { OrganizationId: "org-1" },
       }),
     );
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(syncService.syncUpsertSend).toHaveBeenCalledTimes(1);
-    expect(userLogoutCallback).not.toHaveBeenCalled();
+    expect(messagingService.send).toHaveBeenCalledTimes(1);
+    expect(messagingService.send).toHaveBeenCalledWith("organizationBankAccountVerified", {
+      organizationId: "org-1",
+    });
 
     subscription.unsubscribe();
   });
@@ -436,7 +445,130 @@ describe("DefaultServerNotificationsService (multi-user)", () => {
       expect(syncService.fullSync).toHaveBeenCalledWith(true, { userId: mockUserId2 });
     });
 
-    it("drops vault sync notifications while that user is locked", async () => {
+    it("processes send changes for that user when it is unlocked", async () => {
+      startListening(true);
+
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.SyncSendCreate,
+          payload: { Id: "send-id", UserId: mockUserId2 },
+        }),
+      );
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.SyncSendUpdate,
+          payload: { Id: "send-id", UserId: mockUserId2 },
+        }),
+      );
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.SyncSendDelete,
+          payload: { Id: "send-id", UserId: mockUserId2 },
+        }),
+      );
+
+      expect(syncService.syncUpsertSend).toHaveBeenCalledWith(
+        expect.anything(),
+        false,
+        mockUserId2,
+      );
+      expect(syncService.syncUpsertSend).toHaveBeenCalledWith(expect.anything(), true, mockUserId2);
+      expect(syncService.syncDeleteSend).toHaveBeenCalledWith(expect.anything(), mockUserId2);
+    });
+
+    it.each([
+      NotificationType.SyncPolicy,
+      NotificationType.SyncOrganizationStatusChanged,
+      NotificationType.SyncOrganizationCollectionSettingChanged,
+    ])(
+      "forces a full sync of that user for notification type %s when it is unlocked",
+      async (type) => {
+        startListening(true);
+        syncService.fullSync.mockClear();
+
+        await emitForUser2(new NotificationResponse({ type, payload: {} }));
+
+        expect(syncService.fullSync).toHaveBeenCalledWith(true, { userId: mockUserId2 });
+      },
+    );
+
+    it.each([true, false])(
+      "updates the premium status of that user (unlocked: %s)",
+      async (user2Unlocked) => {
+        startListening(user2Unlocked);
+        billingAccountProfileStateService.hasPremiumFromAnyOrganization$.mockReturnValue(
+          new BehaviorSubject(false),
+        );
+
+        await emitForUser2(
+          new NotificationResponse({
+            type: NotificationType.PremiumStatusChanged,
+            payload: { UserId: mockUserId2, Premium: true },
+          }),
+        );
+
+        expect(
+          billingAccountProfileStateService.hasPremiumFromAnyOrganization$,
+        ).toHaveBeenCalledWith(mockUserId2);
+        expect(billingAccountProfileStateService.setHasPremium).toHaveBeenCalledWith(
+          true,
+          false,
+          mockUserId2,
+        );
+      },
+    );
+
+    it.each([true, false])(
+      "logs out that user alone for a logout notification (unlocked: %s)",
+      async (user2Unlocked) => {
+        startListening(user2Unlocked);
+
+        await emitForUser2(
+          new NotificationResponse({
+            type: NotificationType.LogOut,
+            payload: { UserId: mockUserId2 },
+          }),
+        );
+
+        expect(userLogoutCallback).toHaveBeenCalledTimes(1);
+        expect(userLogoutCallback).toHaveBeenCalledWith("logoutNotification", mockUserId2);
+      },
+    );
+
+    it("skips a KDF change logout for that user without logging it out", async () => {
+      startListening(false);
+
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.LogOut,
+          payload: { UserId: mockUserId2, Reason: PushNotificationLogOutReasonType.KdfChange },
+        }),
+      );
+
+      expect(userLogoutCallback).not.toHaveBeenCalled();
+    });
+
+    it("ignores a notification whose payload names another user", async () => {
+      startListening(true);
+
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.LogOut,
+          payload: { UserId: mockUserId1 },
+        }),
+      );
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.SyncSendDelete,
+          payload: { Id: "send-id", UserId: mockUserId1 },
+        }),
+      );
+
+      expect(userLogoutCallback).not.toHaveBeenCalled();
+      expect(syncService.syncDeleteSend).not.toHaveBeenCalled();
+    });
+
+    it("drops sync notifications while that user is locked", async () => {
       startListening(false);
 
       await emitForUser2(
@@ -446,6 +578,19 @@ describe("DefaultServerNotificationsService (multi-user)", () => {
         }),
       );
       await emitForUser2(new NotificationResponse({ type: NotificationType.SyncVault }));
+      await emitForUser2(new NotificationResponse({ type: NotificationType.SyncPolicy }));
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.SyncSendCreate,
+          payload: { Id: "send-id", UserId: mockUserId2 },
+        }),
+      );
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.SyncSendDelete,
+          payload: { Id: "send-id", UserId: mockUserId2 },
+        }),
+      );
       await emitForUser2(
         new NotificationResponse({
           type: NotificationType.LogOut,
@@ -454,11 +599,141 @@ describe("DefaultServerNotificationsService (multi-user)", () => {
       );
 
       expect(syncService.syncUpsertCipher).not.toHaveBeenCalled();
+      expect(syncService.syncUpsertSend).not.toHaveBeenCalled();
+      expect(syncService.syncDeleteSend).not.toHaveBeenCalled();
+      expect(userLogoutCallback).not.toHaveBeenCalled();
       expect(syncService.fullSync).not.toHaveBeenCalledWith(expect.anything(), {
         userId: mockUserId2,
       });
       // The active user's catch-up sync on connect is unaffected
       expect(syncService.fullSync).toHaveBeenCalledWith(false);
+    });
+  });
+  describe("without processForNonActiveAccounts (default)", () => {
+    let user2WebPush: ReturnType<typeof setWebPushConnectorForUser>;
+    let subscription: Subscription;
+
+    const emitForUser2 = async (notification: NotificationResponse) => {
+      user2WebPush.notificationSubject.next(notification);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+
+    beforeEach(() => {
+      defaultServerNotificationsService = createService();
+      addUserAccount(mockUserId1);
+      addUserAccount(mockUserId2);
+      setUserUnlocked(mockUserId1);
+      setUserUnlocked(mockUserId2);
+      setActiveUserAccount(mockUserId1);
+      setWebPushConnectorForUser(mockUserId1);
+      user2WebPush = setWebPushConnectorForUser(mockUserId2);
+      billingAccountProfileStateService.hasPremiumFromAnyOrganization$.mockReturnValue(
+        new BehaviorSubject(false),
+      );
+      subscription = defaultServerNotificationsService.startListening();
+    });
+
+    afterEach(() => subscription.unsubscribe());
+
+    it("drops sync, send, policy, premium and logout notifications of an unlocked non-active user", async () => {
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.SyncCipherUpdate,
+          payload: { Id: "cipher-id", UserId: mockUserId2 },
+        }),
+      );
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.SyncFolderCreate,
+          payload: { Id: "folder-id", UserId: mockUserId2 },
+        }),
+      );
+      await emitForUser2(new NotificationResponse({ type: NotificationType.SyncVault }));
+      await emitForUser2(new NotificationResponse({ type: NotificationType.SyncPolicy }));
+      await emitForUser2(
+        new NotificationResponse({ type: NotificationType.SyncOrganizationStatusChanged }),
+      );
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.SyncSendCreate,
+          payload: { Id: "send-id", UserId: mockUserId2 },
+        }),
+      );
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.SyncSendDelete,
+          payload: { Id: "send-id", UserId: mockUserId2 },
+        }),
+      );
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.PremiumStatusChanged,
+          payload: { UserId: mockUserId2, Premium: true },
+        }),
+      );
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.LogOut,
+          payload: { UserId: mockUserId2 },
+        }),
+      );
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.LogOut,
+          payload: { UserId: mockUserId2, Reason: PushNotificationLogOutReasonType.KeyRotation },
+        }),
+      );
+
+      expect(syncService.syncUpsertCipher).not.toHaveBeenCalled();
+      expect(syncService.syncUpsertFolder).not.toHaveBeenCalled();
+      expect(syncService.syncUpsertSend).not.toHaveBeenCalled();
+      expect(syncService.syncDeleteSend).not.toHaveBeenCalled();
+      expect(billingAccountProfileStateService.setHasPremium).not.toHaveBeenCalled();
+      expect(userLogoutCallback).not.toHaveBeenCalled();
+      // Only the active user's catch-up sync on connect; none for the non-active user
+      expect(syncService.fullSync.mock.calls).toEqual([[false]]);
+    });
+
+    it("still processes the allowed multi-user types for a non-active user", async () => {
+      await emitForUser2(
+        new NotificationResponse({
+          type: NotificationType.AuthRequest,
+          payload: { id: "auth-id-2", userId: mockUserId2 },
+        }),
+      );
+
+      expect(authRequestAnsweringService.receivedPendingAuthRequest).toHaveBeenCalledWith(
+        mockUserId2,
+        "auth-id-2",
+      );
+    });
+
+    it("processes the active user's notifications without naming the user, as upstream", async () => {
+      const user1WebPush = setWebPushConnectorForUser(mockUserId1);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      syncService.fullSync.mockClear();
+
+      user1WebPush.notificationSubject.next(
+        new NotificationResponse({ type: NotificationType.SyncPolicy }),
+      );
+      user1WebPush.notificationSubject.next(
+        new NotificationResponse({
+          type: NotificationType.SyncSendUpdate,
+          payload: { Id: "send-id", UserId: mockUserId1 },
+        }),
+      );
+      user1WebPush.notificationSubject.next(
+        new NotificationResponse({
+          type: NotificationType.SyncSendDelete,
+          payload: { Id: "send-id", UserId: mockUserId1 },
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(syncService.fullSync).toHaveBeenCalledWith(true);
+      expect(syncService.syncUpsertSend).toHaveBeenCalledWith(expect.anything(), true);
+      expect(syncService.syncUpsertSend.mock.calls[0]).toHaveLength(2);
+      expect(syncService.syncDeleteSend.mock.calls[0]).toHaveLength(1);
     });
   });
 });

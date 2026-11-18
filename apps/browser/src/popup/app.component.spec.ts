@@ -49,6 +49,7 @@ describe("AppComponent (browser popup)", () => {
   let ngZone: MockProxy<NgZone>;
   let logService: MockProxy<LogService>;
   let toastService: MockProxy<ToastService>;
+  let i18nService: MockProxy<I18nService>;
 
   const userId = "user-1" as UserId;
 
@@ -66,6 +67,10 @@ describe("AppComponent (browser popup)", () => {
     router = mock<Router>();
     ngZone = mock<NgZone>();
     toastService = mock<ToastService>();
+    i18nService = mock<I18nService>();
+    i18nService.t.mockImplementation((key: string, ...params: unknown[]) =>
+      [key, ...params].join(":"),
+    );
 
     accountService.activeAccount$ = of({ id: userId } as any);
     authService.activeAccountStatus$ = EMPTY;
@@ -96,7 +101,7 @@ describe("AppComponent (browser popup)", () => {
       () =>
         new AppComponent(
           authService,
-          mock<I18nService>(),
+          i18nService,
           router,
           mock<TokenService>(),
           mock<CipherService>(),
@@ -228,9 +233,11 @@ describe("AppComponent (browser popup)", () => {
     it("shows the logout reason when the active account was logged out", async () => {
       await receive({ logoutReason: "sessionExpired", userId, loggedOutActiveAccount: true });
 
-      expect(toastService.showToast).toHaveBeenCalledWith(
-        expect.objectContaining({ variant: "warning" }),
-      );
+      expect(toastService.showToast).toHaveBeenCalledWith({
+        variant: "warning",
+        title: "loggedOut",
+        message: "loginExpired",
+      });
     });
 
     it("shows the logout reason for a message that does not say which account it was", async () => {
@@ -239,16 +246,53 @@ describe("AppComponent (browser popup)", () => {
       expect(toastService.showToast).toHaveBeenCalled();
     });
 
-    it("shows no logout toast and does not navigate when an account that is not active was logged out", async () => {
+    it("names the account and gives the reason when an account that is not active was logged out", async () => {
+      await receive({
+        logoutReason: "sessionExpired",
+        userId: "user-2",
+        loggedOutActiveAccount: false,
+        email: "other@example.com",
+      });
+
+      expect(authService.logOut).toHaveBeenCalled();
+      expect(toastService.showToast).toHaveBeenCalledTimes(1);
+      expect(toastService.showToast).toHaveBeenCalledWith({
+        variant: "warning",
+        title: "accountWasLoggedOut:other@example.com",
+        message: "loginExpired",
+      });
+      expect(router.navigate).not.toHaveBeenCalled();
+    });
+
+    it("names the account when an account that is not active was logged out for a reason without a text", async () => {
+      await receive({
+        logoutReason: "logoutNotification",
+        userId: "user-2",
+        loggedOutActiveAccount: false,
+        email: "other@example.com",
+      });
+
+      expect(toastService.showToast).toHaveBeenCalledWith({
+        variant: "info",
+        message: "accountWasLoggedOut:other@example.com",
+      });
+      expect(router.navigate).not.toHaveBeenCalled();
+    });
+
+    it("shows no toast for an account that is not active when the message does not name it", async () => {
       await receive({
         logoutReason: "sessionExpired",
         userId: "user-2",
         loggedOutActiveAccount: false,
       });
 
-      expect(authService.logOut).toHaveBeenCalled();
       expect(toastService.showToast).not.toHaveBeenCalled();
-      expect(router.navigate).not.toHaveBeenCalled();
+    });
+
+    it("shows nothing for an active-account logout reason without a text", async () => {
+      await receive({ logoutReason: "userInitiated", userId, loggedOutActiveAccount: true });
+
+      expect(toastService.showToast).not.toHaveBeenCalled();
     });
   });
 });

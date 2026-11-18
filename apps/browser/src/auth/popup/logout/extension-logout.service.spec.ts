@@ -1,4 +1,5 @@
 import { MockProxy, mock } from "jest-mock-extended";
+import { of } from "rxjs";
 
 import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
 import { LogoutReason, LogoutService } from "@bitwarden/common/auth/logout";
@@ -30,6 +31,10 @@ describe("ExtensionLogoutService", () => {
     messagingService = mock<MessagingService>();
     logService = mock<LogService>();
     accountSwitcherService = mock<AccountSwitcherService>();
+    accountSwitcherService.availableAccounts$ = of([
+      { id: primaryUserId, name: "primary", isActive: true },
+      { id: secondaryUserId, name: "secondary", isActive: false },
+    ]);
     sdkService = mock<SdkService>();
     logoutService = new ExtensionLogoutService(
       messagingService,
@@ -123,6 +128,76 @@ describe("ExtensionLogoutService", () => {
 
         expect(sdkService.logout).toHaveBeenCalledWith(primaryUserId);
         expect(switchFinishedBeforeSdkLogout).toBe(false);
+      });
+    });
+
+    describe("An account that is not active", () => {
+      type Listener = (message: unknown) => void;
+      let listeners: Listener[];
+
+      const emit = (message: unknown) => listeners.forEach((listener) => listener(message));
+
+      beforeEach(() => {
+        listeners = [];
+        (chrome.runtime.onMessage.addListener as jest.Mock).mockImplementation(
+          (listener: Listener) => listeners.push(listener),
+        );
+        (chrome.runtime.onMessage.removeListener as jest.Mock).mockImplementation(
+          (listener: Listener) => (listeners = listeners.filter((l) => l !== listener)),
+        );
+      });
+
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it("does not wait for an account switch and resolves once that account is logged out", async () => {
+        let resolved = false;
+        const logout = logoutService.logout(secondaryUserId, logoutReason).then((result) => {
+          resolved = true;
+          return result;
+        });
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(accountSwitcherService.listenForSwitchAccountFinish).not.toHaveBeenCalled();
+        expect(messagingService.send).toHaveBeenCalledWith("logout", {
+          userId: secondaryUserId,
+          logoutReason,
+        });
+
+        // Neither another account's logout nor another message ends the wait
+        emit({ command: "doneLoggingOut", userId: primaryUserId });
+        emit({ command: "switchAccountFinish", userId: primaryUserId });
+        await Promise.resolve();
+        expect(resolved).toBe(false);
+
+        emit({ command: "doneLoggingOut", userId: secondaryUserId });
+
+        await expect(logout).resolves.toBeUndefined();
+        expect(listeners).toHaveLength(0);
+      });
+
+      it("disposes that account's SDK client before sending the logout message", async () => {
+        const logout = logoutService.logout(secondaryUserId, logoutReason);
+        await Promise.resolve();
+        await Promise.resolve();
+        emit({ command: "doneLoggingOut", userId: secondaryUserId });
+        await logout;
+
+        expect(sdkService.logout).toHaveBeenCalledWith(secondaryUserId);
+        expect(sdkService.logout.mock.invocationCallOrder[0]).toBeLessThan(
+          messagingService.send.mock.invocationCallOrder[0],
+        );
+      });
+
+      it("gives up waiting after a timeout", async () => {
+        jest.useFakeTimers();
+        const logout = logoutService.logout(secondaryUserId, logoutReason);
+        await jest.advanceTimersByTimeAsync(60_000);
+
+        await expect(logout).resolves.toBeUndefined();
+        expect(logService.warning).toHaveBeenCalled();
       });
     });
   });

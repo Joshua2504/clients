@@ -223,60 +223,73 @@ export abstract class CoreSyncService implements SyncService {
     return this.syncCompleted(false, userId);
   }
 
-  async syncUpsertSend(notification: SyncSendNotification, isEdit: boolean): Promise<boolean> {
+  async syncUpsertSend(
+    notification: SyncSendNotification,
+    isEdit: boolean,
+    userId?: UserId,
+  ): Promise<boolean> {
     this.syncStarted();
-    const [activeUserId, status] = await firstValueFrom(
-      this.accountService.activeAccount$.pipe(
-        switchMap((a) => {
-          if (a == null) {
-            of([null, AuthenticationStatus.LoggedOut]);
-          }
-          return this.authService.authStatusFor$(a.id).pipe(map((s) => [a.id, s]));
-        }),
-      ),
-    );
-    // Process only server notifications for currently active user when user is not logged out
-    // TODO: once send service allows data manipulation of non-active users, this should process any received notification
-    if (activeUserId === notification.userId && status !== AuthenticationStatus.LoggedOut) {
+    const [targetUserId, status] =
+      userId != null
+        ? [userId, await firstValueFrom(this.authService.authStatusFor$(userId))]
+        : await firstValueFrom(
+            this.accountService.activeAccount$.pipe(
+              switchMap((a) => {
+                if (a == null) {
+                  of([null, AuthenticationStatus.LoggedOut]);
+                }
+                return this.authService.authStatusFor$(a.id).pipe(map((s) => [a.id, s]));
+              }),
+            ),
+          );
+    // Without a userId, only server notifications for the currently active user are processed.
+    if (targetUserId === notification.userId && status !== AuthenticationStatus.LoggedOut) {
       try {
-        const localSend = await firstValueFrom(this.sendService.get$(notification.id));
+        const localSend = await firstValueFrom(
+          userId != null
+            ? this.sendService.get$(notification.id, userId)
+            : this.sendService.get$(notification.id),
+        );
         if (
           (!isEdit && localSend == null) ||
           (isEdit && localSend != null && localSend.revisionDate < notification.revisionDate)
         ) {
-          // fetch() persists into SEND_USER_ENCRYPTED itself, so no upsert is needed.
-          const sdkSend = await withPasswordManagerSdk(activeUserId, this.sdkService, (sdk) =>
+          // fetch() persists into the user's SEND_USER_ENCRYPTED itself, so no upsert is needed.
+          const sdkSend = await withPasswordManagerSdk(targetUserId, this.sdkService, (sdk) =>
             sdk.sends().fetch(asUuid<SdkSendId>(notification.id)),
           );
           if (sdkSend != null) {
             this.messageSender.send("syncedUpsertedSend", { sendId: notification.id });
-            return this.syncCompleted(true, activeUserId);
+            return this.syncCompleted(true, targetUserId);
           }
         }
       } catch (e) {
         this.logService.error(e);
       }
     }
-    // TODO: Update syncCompleted userId when send service allows modification of non-active users
-    return this.syncCompleted(false, undefined);
+    // Without a userId the completion names no user, as before per-user send sync existed.
+    return this.syncCompleted(false, userId);
   }
 
-  async syncDeleteSend(notification: SyncSendNotification): Promise<boolean> {
+  async syncDeleteSend(notification: SyncSendNotification, userId?: UserId): Promise<boolean> {
     this.syncStarted();
-    const activeUserId = await firstValueFrom(
-      this.accountService.activeAccount$.pipe(map((a) => a?.id)),
-    );
+    const targetUserId =
+      userId ?? (await firstValueFrom(this.accountService.activeAccount$.pipe(map((a) => a?.id))));
     if (
-      activeUserId != null &&
-      (await firstValueFrom(this.tokenService.hasAccessToken$(activeUserId)))
+      targetUserId != null &&
+      (await firstValueFrom(this.tokenService.hasAccessToken$(targetUserId)))
     ) {
-      await this.sendService.delete(notification.id);
+      if (userId != null) {
+        await this.sendService.delete(notification.id, userId);
+      } else {
+        await this.sendService.delete(notification.id);
+      }
       this.messageSender.send("syncedDeletedSend", { sendId: notification.id });
-      // TODO: Update syncCompleted userId when send service allows modification of non-active users
-      this.syncCompleted(true, undefined);
+      // Without a userId the completion names no user, as before per-user send sync existed.
+      this.syncCompleted(true, userId);
       return true;
     }
-    return this.syncCompleted(false, undefined);
+    return this.syncCompleted(false, userId);
   }
 
   // Helpers

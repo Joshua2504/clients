@@ -51,12 +51,38 @@ export const AllowedMultiUserNotificationTypes = new Set<NotificationType>([
   NotificationType.AutoConfirmMember,
 ]);
 
+/** Options for {@link DefaultServerNotificationsService}. */
+export type DefaultServerNotificationsServiceOptions = {
+  /**
+   * Whether notifications for an account that is not active are processed beyond
+   * {@link AllowedMultiUserNotificationTypes}: the types in
+   * {@link UnlockedMultiUserNotificationTypes} while that account is unlocked, the types in
+   * {@link AnyLockStateMultiUserNotificationTypes} and logouts whatever its lock state, and the
+   * catch-up sync when that account's connection is established.
+   * Off, only the active account's notifications are processed, as without this option.
+   * @default false
+   */
+  processForNonActiveAccounts?: boolean;
+};
+
 /**
- * Vault sync notification types that are also processed for a non-active account, as long as
- * that account is unlocked. A locked account cannot decrypt and syncs on unlock instead.
- * {@link NotificationType.LogOut} only counts when its reason is a key rotation, which syncs.
+ * With {@link DefaultServerNotificationsServiceOptions.processForNonActiveAccounts}, notification
+ * types processed for a non-active account whatever its lock state: their handlers act on that
+ * account by id and do not decrypt anything.
+ * {@link NotificationType.PremiumStatusChanged} writes the account's own premium flags.
  */
-export const UnlockedMultiUserSyncNotificationTypes = new Set<NotificationType>([
+export const AnyLockStateMultiUserNotificationTypes = new Set<NotificationType>([
+  NotificationType.PremiumStatusChanged,
+]);
+
+/**
+ * With {@link DefaultServerNotificationsServiceOptions.processForNonActiveAccounts}, sync
+ * notification types that are also processed for a non-active account, as long as that
+ * account is unlocked. Their handlers sync the account, which needs its keys (the crypto sync
+ * handler, send decryption); a locked account cannot do that and syncs on unlock instead.
+ * {@link NotificationType.LogOut} is decided by its reason, see `processesForNonActiveUser`.
+ */
+export const UnlockedMultiUserNotificationTypes = new Set<NotificationType>([
   NotificationType.SyncCipherCreate,
   NotificationType.SyncCipherUpdate,
   NotificationType.SyncCipherDelete,
@@ -69,7 +95,12 @@ export const UnlockedMultiUserSyncNotificationTypes = new Set<NotificationType>(
   NotificationType.SyncSettings,
   NotificationType.SyncOrganizations,
   NotificationType.SyncOrgKeys,
-  NotificationType.LogOut,
+  NotificationType.SyncSendCreate,
+  NotificationType.SyncSendUpdate,
+  NotificationType.SyncSendDelete,
+  NotificationType.SyncOrganizationStatusChanged,
+  NotificationType.SyncOrganizationCollectionSettingChanged,
+  NotificationType.SyncPolicy,
 ]);
 
 export class DefaultServerNotificationsService implements ServerNotificationsService {
@@ -91,6 +122,7 @@ export class DefaultServerNotificationsService implements ServerNotificationsSer
     private readonly authRequestAnsweringService: AuthRequestAnsweringService,
     private autoConfirmService: AutomaticUserConfirmationService,
     private readonly billingAccountProfileStateService: BillingAccountProfileStateService,
+    private readonly options: DefaultServerNotificationsServiceOptions = {},
   ) {
     this.notifications$ = this.accountService.accounts$.pipe(
       map((accounts: Record<UserId, AccountInfo>): Set<UserId> => {
@@ -182,7 +214,7 @@ export class DefaultServerNotificationsService implements ServerNotificationsSer
       );
       if (activeAccountId !== userId) {
         // A locked non-active account cannot decrypt; it syncs on unlock instead.
-        if (!(await this.isUnlocked(userId))) {
+        if (!this.options.processForNonActiveAccounts || !(await this.isUnlocked(userId))) {
           return;
         }
         await this.syncService.fullSync(false, { userId });
@@ -201,7 +233,10 @@ export class DefaultServerNotificationsService implements ServerNotificationsSer
 
   /**
    * Whether a notification for a non-active account is processed: the allowed multi-user types
-   * always, vault sync types only while that account is unlocked.
+   * always. With `processForNonActiveAccounts` also the any-lock-state types, the unlocked types
+   * only while that account is unlocked, and a logout always, except a key rotation, which syncs
+   * and so needs the account unlocked. Bank account verifications only refresh the page in view,
+   * which shows the active account.
    */
   private async processesForNonActiveUser(
     notification: NotificationResponse,
@@ -210,14 +245,19 @@ export class DefaultServerNotificationsService implements ServerNotificationsSer
     if (AllowedMultiUserNotificationTypes.has(notification.type)) {
       return true;
     }
-    if (!UnlockedMultiUserSyncNotificationTypes.has(notification.type)) {
+    if (!this.options.processForNonActiveAccounts) {
       return false;
     }
-    if (
-      notification.type === NotificationType.LogOut &&
-      (notification.payload as LogOutNotification)?.reason !==
-        PushNotificationLogOutReasonType.KeyRotation
-    ) {
+    if (AnyLockStateMultiUserNotificationTypes.has(notification.type)) {
+      return true;
+    }
+    if (notification.type === NotificationType.LogOut) {
+      return (
+        (notification.payload as LogOutNotification)?.reason !==
+          PushNotificationLogOutReasonType.KeyRotation || (await this.isUnlocked(userId))
+      );
+    }
+    if (!UnlockedMultiUserNotificationTypes.has(notification.type)) {
       return false;
     }
     return await this.isUnlocked(userId);
@@ -232,6 +272,16 @@ export class DefaultServerNotificationsService implements ServerNotificationsSer
       ),
       distinctUntilChanged(),
     );
+  }
+
+  /**
+   * Runs a full sync of `userId`. Without `processForNonActiveAccounts` only the active account's
+   * notifications get here, and it syncs the active account as it did before that option existed.
+   */
+  private fullSyncFor(forceSync: boolean, userId: UserId): Promise<boolean> {
+    return this.options.processForNonActiveAccounts
+      ? this.syncService.fullSync(forceSync, { userId })
+      : this.syncService.fullSync(forceSync);
   }
 
   private async processNotification(notification: NotificationResponse, userId: UserId) {
@@ -290,14 +340,14 @@ export class DefaultServerNotificationsService implements ServerNotificationsSer
       case NotificationType.SyncVault:
       case NotificationType.SyncCiphers:
       case NotificationType.SyncSettings:
-        await this.syncService.fullSync(false, { userId });
+        await this.fullSyncFor(false, userId);
         break;
       case NotificationType.SyncOrganizations:
         // An organization update may not have bumped the user's account revision date, so force a sync
-        await this.syncService.fullSync(true, { userId });
+        await this.fullSyncFor(true, userId);
         break;
       case NotificationType.SyncOrgKeys:
-        await this.syncService.fullSync(true, { userId });
+        await this.fullSyncFor(true, userId);
         this.activitySubject.next("inactive"); // Force a disconnect
         this.activitySubject.next("active"); // Allow a reconnect
         break;
@@ -313,7 +363,7 @@ export class DefaultServerNotificationsService implements ServerNotificationsSer
           this.logService.info(
             "[Notifications Service] Skipping logout due to no logout key rotation. Performing full sync.",
           );
-          await this.syncService.fullSync(true, { userId });
+          await this.fullSyncFor(true, userId);
         } else {
           await this.logoutCallback("logoutNotification", userId);
         }
@@ -321,13 +371,28 @@ export class DefaultServerNotificationsService implements ServerNotificationsSer
       }
       case NotificationType.SyncSendCreate:
       case NotificationType.SyncSendUpdate:
-        await this.syncService.syncUpsertSend(
-          notification.payload as SyncSendNotification,
-          notification.type === NotificationType.SyncSendUpdate,
-        );
+        if (this.options.processForNonActiveAccounts) {
+          await this.syncService.syncUpsertSend(
+            notification.payload as SyncSendNotification,
+            notification.type === NotificationType.SyncSendUpdate,
+            userId,
+          );
+        } else {
+          await this.syncService.syncUpsertSend(
+            notification.payload as SyncSendNotification,
+            notification.type === NotificationType.SyncSendUpdate,
+          );
+        }
         break;
       case NotificationType.SyncSendDelete:
-        await this.syncService.syncDeleteSend(notification.payload as SyncSendNotification);
+        if (this.options.processForNonActiveAccounts) {
+          await this.syncService.syncDeleteSend(
+            notification.payload as SyncSendNotification,
+            userId,
+          );
+        } else {
+          await this.syncService.syncDeleteSend(notification.payload as SyncSendNotification);
+        }
         break;
       case NotificationType.AuthRequest: {
         // Only Extension and Desktop implement the AuthRequestAnsweringService
@@ -352,10 +417,10 @@ export class DefaultServerNotificationsService implements ServerNotificationsSer
         break;
       }
       case NotificationType.SyncOrganizationStatusChanged:
-        await this.syncService.fullSync(true);
+        await this.fullSyncFor(true, userId);
         break;
       case NotificationType.SyncOrganizationCollectionSettingChanged:
-        await this.syncService.fullSync(true);
+        await this.fullSyncFor(true, userId);
         break;
       case NotificationType.OrganizationBankAccountVerified:
         this.messagingService.send("organizationBankAccountVerified", {
@@ -371,7 +436,7 @@ export class DefaultServerNotificationsService implements ServerNotificationsSer
       case NotificationType.SyncPolicy:
         // TODO (PM-38875): this should compare against local data and only fetch the specific
         // policy if required. For now just force a sync.
-        await this.syncService.fullSync(true);
+        await this.fullSyncFor(true, userId);
         break;
       case NotificationType.AutoConfirmMember:
         await this.autoConfirmService.autoConfirmUser(
@@ -383,15 +448,17 @@ export class DefaultServerNotificationsService implements ServerNotificationsSer
         break;
       case NotificationType.PremiumStatusChanged: {
         const premiumPayload = notification.payload as PremiumStatusChangedNotification;
+        // The payload's user, when it names one, is `userId` (checked above).
+        const premiumUserId = this.options.processForNonActiveAccounts
+          ? userId
+          : (premiumPayload.userId as UserId);
         const hasPremiumFromAnyOrganization = await firstValueFrom(
-          this.billingAccountProfileStateService.hasPremiumFromAnyOrganization$(
-            premiumPayload.userId as UserId,
-          ),
+          this.billingAccountProfileStateService.hasPremiumFromAnyOrganization$(premiumUserId),
         );
         await this.billingAccountProfileStateService.setHasPremium(
           premiumPayload.premium,
           hasPremiumFromAnyOrganization,
-          premiumPayload.userId as UserId,
+          premiumUserId,
         );
         break;
       }

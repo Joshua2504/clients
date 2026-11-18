@@ -172,9 +172,11 @@ export class AppComponent implements OnInit, OnDestroy {
             // TODO: PM-8544 - why do we call logout in the popup after receiving the doneLoggingOut message? Hasn't this already completed logout?
             this.authService.logOut(async () => {
               // An account other than the one the popup shows was logged out in the background
-              // (`loggedOutActiveAccount === false`): the "logged out" toast would read as if the
-              // account in view had been logged out, so it is not shown.
-              if (msg.logoutReason && msg.loggedOutActiveAccount !== false) {
+              // (`loggedOutActiveAccount === false`): the toast names that account, so it does not
+              // read as if the account in view had been logged out.
+              if (msg.loggedOutActiveAccount === false) {
+                this.displayBackgroundAccountLoggedOut(msg.email, msg.logoutReason);
+              } else if (msg.logoutReason) {
                 await this.displayLogoutReason(msg.logoutReason);
               }
             });
@@ -371,25 +373,52 @@ export class AppComponent implements OnInit, OnDestroy {
   // Displaying toasts isn't super useful on the popup due to the reloads we do.
   // However, it is visible for a moment on the FF sidebar logout.
   private async displayLogoutReason(logoutReason: LogoutReason) {
-    let toastOptions: ToastOptions | null = null;
-    switch (logoutReason) {
-      case "invalidSecurityStamp":
-      case "sessionExpired": {
-        toastOptions = {
-          variant: "warning",
-          title: this.i18nService.t("loggedOut"),
-          message: this.i18nService.t("loginExpired"),
-        };
-        break;
-      }
-    }
-
-    if (toastOptions == null) {
+    const reasonMessage = this.logoutReasonMessage(logoutReason);
+    if (reasonMessage == null) {
       // We don't have anything to show for this particular reason
       return;
     }
 
+    const toastOptions: ToastOptions = {
+      variant: "warning",
+      title: this.i18nService.t("loggedOut"),
+      message: reasonMessage,
+    };
     this.toastService.showToast(toastOptions);
+  }
+
+  /**
+   * Tells the user that an account other than the one in view was logged out, naming it, with the
+   * reason where there is a text for it. Shown for every reason: the account leaves the account
+   * switcher without anything else to say so.
+   */
+  private displayBackgroundAccountLoggedOut(
+    email: string | undefined,
+    logoutReason?: LogoutReason,
+  ) {
+    if (!email) {
+      // Without the account's name the toast would read as if the account in view was logged out
+      return;
+    }
+
+    const title = this.i18nService.t("accountWasLoggedOut", email);
+    const reasonMessage = logoutReason ? this.logoutReasonMessage(logoutReason) : null;
+    this.toastService.showToast(
+      reasonMessage == null
+        ? { variant: "info", message: title }
+        : { variant: "warning", title, message: reasonMessage },
+    );
+  }
+
+  /** The text that explains a logout reason, or `null` when the reason has none. */
+  private logoutReasonMessage(logoutReason: LogoutReason): string | null {
+    switch (logoutReason) {
+      case "invalidSecurityStamp":
+      case "sessionExpired":
+        return this.i18nService.t("loginExpired");
+      default:
+        return null;
+    }
   }
 
   private async processPendingAuthRequests() {

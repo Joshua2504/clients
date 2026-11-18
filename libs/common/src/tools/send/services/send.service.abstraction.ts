@@ -33,9 +33,10 @@ export abstract class SendService implements UserKeyRotationDataProvider<SendWit
    * Provides a send for a determined id
    * updates after a change occurs to the send that matches the id
    * @param id The id of the desired send
+   * @param userId The user whose send to read. Defaults to the active account.
    * @returns An observable that listens to the value of the desired send
    */
-  abstract get$(id: string): Observable<Send | undefined>;
+  abstract get$(id: string, userId?: UserId): Observable<Send | undefined>;
   /**
    * Provides re-encrypted user sends for the key rotation process
    * @param newUserKey The new user key to use for re-encryption
@@ -64,5 +65,8 @@ export abstract class SendService implements UserKeyRotationDataProvider<SendWit
 export abstract class InternalSendService extends SendService {
   abstract upsert(send: SendData | SendData[]): Promise<any>;
   abstract replace(sends: { [id: string]: SendData }, userId: UserId): Promise<void>;
-  abstract delete(id: string | string[]): Promise<any>;
+  /**
+   * Deletes sends from the active account, or from `userId` when it is given.
+   */
+  abstract delete(id: string | string[], userId?: UserId): Promise<any>;
 }
