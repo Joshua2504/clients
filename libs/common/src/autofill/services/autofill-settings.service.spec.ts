@@ -7,7 +7,11 @@ import { FeatureFlag } from "../../enums/feature-flag.enum";
 import { ConfigService } from "../../platform/abstractions/config/config.service";
 import { SingleUserState } from "../../platform/state";
 import { UserId } from "../../types/guid";
-import { RestrictedItemTypesService } from "../../vault/services/restricted-item-types.service";
+import { CipherType } from "../../vault/enums";
+import {
+  RestrictedCipherType,
+  RestrictedItemTypesService,
+} from "../../vault/services/restricted-item-types.service";
 
 import { AutofillSettingsService } from "./autofill-settings.service";
 
@@ -20,6 +24,7 @@ describe("AutofillSettingsService", () => {
   let configService: MockProxy<ConfigService>;
   let featureFlag$: BehaviorSubject<boolean>;
   let enableBasicAuthResponseByUser: Map<UserId, Observable<boolean | null>>;
+  let restrictedItemTypesService: MockProxy<RestrictedItemTypesService>;
   let autofillSettingsService: AutofillSettingsService;
 
   const collectEmissions = (observable$: Observable<boolean>) => {
@@ -51,11 +56,13 @@ describe("AutofillSettingsService", () => {
           ({ state$: enableBasicAuthResponseByUser.get(requestedUserId) }) as SingleUserState<any>,
       );
 
+    restrictedItemTypesService = mock<RestrictedItemTypesService>();
+
     autofillSettingsService = new AutofillSettingsService(
       stateProvider,
       mock<PolicyService>(),
       accountService,
-      mock<RestrictedItemTypesService>(),
+      restrictedItemTypesService,
       configService,
     );
   });
@@ -88,6 +95,84 @@ describe("AutofillSettingsService", () => {
       await expect(
         firstValueFrom(autofillSettingsService.autofillOnPageLoadDefaultFor$(otherUserId)),
       ).resolves.toBe(true);
+    });
+  });
+
+  describe("per-user readers", () => {
+    const stored = (value: boolean | null) =>
+      jest.spyOn(stateProvider, "getUser").mockReturnValue({
+        state$: new BehaviorSubject(value) as Observable<boolean | null>,
+      } as SingleUserState<any>);
+
+    const restricted = (...cipherTypes: CipherType[]) =>
+      restrictedItemTypesService.restrictedFor$.mockReturnValue(
+        new BehaviorSubject<RestrictedCipherType[]>(
+          cipherTypes.map((cipherType) => ({ cipherType, allowViewOrgIds: [] as string[] })),
+        ),
+      );
+
+    it.each([
+      ["autofillOnPageLoadFor$", "autofillOnPageLoad", false],
+      ["autoCopyTotpFor$", "autoCopyTotp", true],
+      ["showInlineMenuIdentitiesFor$", "showInlineMenuIdentities", true],
+      ["showInlineMenuCardsFor$", "showInlineMenuCards", true],
+      ["showInlineMenuSshKeysFor$", "showInlineMenuSshKeys", true],
+      ["enableBasicAuthResponseFor$", "enableBasicAuthResponse", false],
+    ] as const)(
+      "%s reads the given user's stored %s, defaulting to %s",
+      async (reader, key, defaultValue) => {
+        restricted();
+
+        stored(!defaultValue);
+        await expect(firstValueFrom(autofillSettingsService[reader](otherUserId))).resolves.toBe(
+          !defaultValue,
+        );
+        expect(stateProvider.getUser).toHaveBeenCalledWith(
+          otherUserId,
+          expect.objectContaining({ key }),
+        );
+
+        stored(null);
+        await expect(firstValueFrom(autofillSettingsService[reader](otherUserId))).resolves.toBe(
+          defaultValue,
+        );
+      },
+    );
+
+    it.each([
+      ["showInlineMenuCardsFor$", CipherType.Card, CipherType.SshKey],
+      ["showInlineMenuSshKeysFor$", CipherType.SshKey, CipherType.Card],
+    ] as const)(
+      "%s is off while the given user's organizations restrict the type",
+      async (reader, ownType, otherType) => {
+        stored(true);
+
+        restricted(ownType);
+        await expect(firstValueFrom(autofillSettingsService[reader](otherUserId))).resolves.toBe(
+          false,
+        );
+        expect(restrictedItemTypesService.restrictedFor$).toHaveBeenCalledWith(otherUserId);
+
+        restricted(otherType);
+        await expect(firstValueFrom(autofillSettingsService[reader](otherUserId))).resolves.toBe(
+          true,
+        );
+      },
+    );
+
+    it("resolvedEnableBasicAuthResponseFor$ gates the given user's setting on the feature flag", async () => {
+      await expect(
+        firstValueFrom(autofillSettingsService.resolvedEnableBasicAuthResponseFor$(userId)),
+      ).resolves.toBe(true);
+      await expect(
+        firstValueFrom(autofillSettingsService.resolvedEnableBasicAuthResponseFor$(otherUserId)),
+      ).resolves.toBe(false);
+
+      featureFlag$.next(false);
+
+      await expect(
+        firstValueFrom(autofillSettingsService.resolvedEnableBasicAuthResponseFor$(userId)),
+      ).resolves.toBe(false);
     });
   });
 

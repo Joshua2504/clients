@@ -90,6 +90,8 @@ export class PamFillCipherPolicy extends DefaultFillCipherPolicy {
       url,
       options?.includeOtherTypes,
       options?.defaultMatch,
+      undefined,
+      userId,
     );
     return withRevealed(ciphers, matching);
   }
@@ -133,7 +135,16 @@ export class PamFillCipherPolicy extends DefaultFillCipherPolicy {
     });
     return (
       matches.length === 0 ||
-      (await this.cipherService.filterCiphersForUrl(matches, form.uri)).length === 0
+      (
+        await this.cipherService.filterCiphersForUrl(
+          matches,
+          form.uri,
+          undefined,
+          undefined,
+          undefined,
+          userId,
+        )
+      ).length === 0
     );
   }
 

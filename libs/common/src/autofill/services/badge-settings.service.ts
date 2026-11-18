@@ -8,6 +8,7 @@ import {
   StateProvider,
   UserKeyDefinition,
 } from "../../platform/state";
+import { UserId } from "../../types/guid";
 
 const ENABLE_BADGE_COUNTER = new UserKeyDefinition(BADGE_SETTINGS_DISK, "enableBadgeCounter", {
   deserializer: (value: boolean) => value ?? true,
@@ -16,6 +17,8 @@ const ENABLE_BADGE_COUNTER = new UserKeyDefinition(BADGE_SETTINGS_DISK, "enableB
 
 export abstract class BadgeSettingsServiceAbstraction {
   enableBadgeCounter$: Observable<boolean>;
+  /** {@link enableBadgeCounter$} for `userId` instead of the active user. */
+  enableBadgeCounterFor$: (userId: UserId) => Observable<boolean>;
   setEnableBadgeCounter: (newValue: boolean) => Promise<void>;
 }
 
@@ -26,6 +29,12 @@ export class BadgeSettingsService implements BadgeSettingsServiceAbstraction {
   constructor(private stateProvider: StateProvider) {
     this.enableBadgeCounterState = this.stateProvider.getActive(ENABLE_BADGE_COUNTER);
     this.enableBadgeCounter$ = this.enableBadgeCounterState.state$.pipe(map((x) => x ?? true));
+  }
+
+  enableBadgeCounterFor$(userId: UserId): Observable<boolean> {
+    return this.stateProvider
+      .getUser(userId, ENABLE_BADGE_COUNTER)
+      .state$.pipe(map((x) => x ?? true));
   }
 
   async setEnableBadgeCounter(newValue: boolean): Promise<void> {

@@ -127,6 +127,11 @@ export abstract class CipherService implements UserKeyRotationDataProvider<Ciphe
     defaultMatch?: UriMatchStrategySetting,
     /** When true, will override the match strategy for the cipher if it is Never. */
     overrideNeverMatchStrategy?: true,
+    /**
+     * The user the ciphers belong to: their equivalent domains and default URI match strategy
+     * apply. Defaults to the active user.
+     */
+    userId?: UserId,
   ): Promise<C[]>;
   abstract getAllFromApiForOrganization(
     organizationId: string,
@@ -168,7 +173,13 @@ export abstract class CipherService implements UserKeyRotationDataProvider<Ciphe
     autofillOnPageLoad: boolean,
   ): Promise<CipherView>;
   abstract getNextCipherForUrl(url: string, userId: UserId): Promise<CipherView>;
-  abstract updateLastUsedIndexForUrl(url: string): void;
+  /**
+   * Advances the rotation that {@link getNextCipherForUrl} walks for `url`.
+   *
+   * @param userId The user whose rotation advances. Without it, the rotation of every user
+   *   advances, which is the same thing while a single user is being served.
+   */
+  abstract updateLastUsedIndexForUrl(url: string, userId?: UserId): void;
   abstract updateLastUsedDate(id: string, userId: UserId): Promise<void>;
   abstract updateLastLaunchedDate(id: string, userId: UserId): Promise<void>;
   abstract saveNeverDomain(domain: string): Promise<void>;

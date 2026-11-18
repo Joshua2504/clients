@@ -8,9 +8,11 @@ import { Policy } from "../../admin-console/models/domain/policy";
 import { AuthService } from "../../auth/abstractions/auth.service";
 import { AuthenticationStatus } from "../../auth/enums/authentication-status";
 import { FeatureFlag } from "../../enums/feature-flag.enum";
+import { UriMatchStrategy } from "../../models/domain/domain-service";
 import { ConfigService } from "../../platform/abstractions/config/config.service";
 import { Environment, EnvironmentService } from "../../platform/abstractions/environment.service";
 import { Utils } from "../../platform/misc/utils";
+import { SingleUserState } from "../../platform/state";
 import { UserId } from "../../types/guid";
 import { FormPurposeCategories } from "../constants";
 import { TargetingRulesByDomain, FormContent } from "../types";
@@ -115,6 +117,77 @@ describe("DefaultDomainSettingsService", () => {
 
       expect(domainSettingsService.getUrlEquivalentDomains).toHaveBeenCalledWith("asdf");
       expect(actual).toEqual(new Set());
+    });
+  });
+
+  describe("per-user readers", () => {
+    const otherUserId = Utils.newGuid() as UserId;
+    /** Stores `value` under `key` for the other user; every other read stays untouched. */
+    const stored = (key: string, value: unknown) => {
+      const getUser = fakeStateProvider.getUser.bind(fakeStateProvider);
+      jest
+        .spyOn(fakeStateProvider, "getUser")
+        .mockImplementation((userId, keyDefinition) =>
+          userId === otherUserId && keyDefinition.key === key
+            ? ({ state$: of(value) } as SingleUserState<any>)
+            : getUser(userId, keyDefinition),
+        );
+    };
+
+    const uriMatchPolicy = (uriMatchDetection: unknown, enabled = true): Policy =>
+      ({
+        id: "policy-id",
+        organizationId: "org-id",
+        type: PolicyType.UriMatchDefaults,
+        data: { uriMatchDetection },
+        enabled,
+      }) as unknown as Policy;
+
+    beforeEach(() => {
+      policyService.policiesByType$.mockReturnValue(of([]));
+    });
+
+    it("getUrlEquivalentDomains resolves against the given user's equivalent domains", async () => {
+      stored("equivalentDomains", [["example.com", "other-account.example"]]);
+
+      await expect(
+        firstValueFrom(domainSettingsService.getUrlEquivalentDomains("example.com", otherUserId)),
+      ).resolves.toEqual(new Set(["example.com", "other-account.example"]));
+    });
+
+    it("getUrlEquivalentDomains returns an empty set when the given user has none", async () => {
+      await expect(
+        firstValueFrom(domainSettingsService.getUrlEquivalentDomains("example.com", otherUserId)),
+      ).resolves.toEqual(new Set());
+    });
+
+    it("resolvedDefaultUriMatchStrategyFor$ reads the given user's setting", async () => {
+      stored("defaultUriMatchStrategy", UriMatchStrategy.Exact);
+
+      await expect(
+        firstValueFrom(domainSettingsService.resolvedDefaultUriMatchStrategyFor$(otherUserId)),
+      ).resolves.toBe(UriMatchStrategy.Exact);
+    });
+
+    it("resolvedDefaultUriMatchStrategyFor$ defaults to the base domain", async () => {
+      await expect(
+        firstValueFrom(domainSettingsService.resolvedDefaultUriMatchStrategyFor$(otherUserId)),
+      ).resolves.toBe(UriMatchStrategy.Domain);
+    });
+
+    it("resolvedDefaultUriMatchStrategyFor$ lets the given user's policy override the setting", async () => {
+      stored("defaultUriMatchStrategy", UriMatchStrategy.Exact);
+      policyService.policiesByType$.mockImplementation((_type, userId) =>
+        of(userId === otherUserId ? [uriMatchPolicy(UriMatchStrategy.Host)] : []),
+      );
+
+      await expect(
+        firstValueFrom(domainSettingsService.resolvedDefaultUriMatchStrategyFor$(otherUserId)),
+      ).resolves.toBe(UriMatchStrategy.Host);
+      expect(policyService.policiesByType$).toHaveBeenCalledWith(
+        PolicyType.UriMatchDefaults,
+        otherUserId,
+      );
     });
   });
 

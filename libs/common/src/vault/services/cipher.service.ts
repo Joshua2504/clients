@@ -70,9 +70,7 @@ const PERF_TRACK = "Vault Items";
 // New cipher operations must go through the SDK (CipherSdkService/CipherEncryptionService), not ApiService/EncryptService.
 // See libs/common/src/vault/CONTRIBUTING.md.
 export class CipherService implements CipherServiceAbstraction {
-  private sortedCiphersCache: SortedCiphersCache = new SortedCiphersCache(
-    this.sortCiphersByLastUsed,
-  );
+  private readonly sortedCiphersCaches = new Map<UserId, SortedCiphersCache>();
   /**
    * Observable that forces the `cipherViews$` observable for the given user to emit a null value.
    * Used to let subscribers of `cipherViews$` know that the decrypted ciphers have been cleared for the user and to
@@ -469,6 +467,7 @@ export class CipherService implements CipherServiceAbstraction {
       includeOtherTypes,
       defaultMatch,
       overrideNeverMatchStrategy,
+      userId,
     );
 
     return this.decryptIds(
@@ -559,16 +558,19 @@ export class CipherService implements CipherServiceAbstraction {
     includeOtherTypes?: CipherType[],
     defaultMatch: UriMatchStrategySetting = null,
     overrideNeverMatchStrategy?: true,
+    userId?: UserId,
   ): Promise<C[]> {
     if (url == null && includeOtherTypes == null) {
       return [];
     }
 
     const equivalentDomains = await firstValueFrom(
-      this.domainSettingsService.getUrlEquivalentDomains(url),
+      this.domainSettingsService.getUrlEquivalentDomains(url, userId),
     );
     defaultMatch ??= await firstValueFrom(
-      this.domainSettingsService.resolvedDefaultUriMatchStrategy$,
+      userId == null
+        ? this.domainSettingsService.resolvedDefaultUriMatchStrategy$
+        : this.domainSettingsService.resolvedDefaultUriMatchStrategyFor$(userId),
     );
 
     return ciphers.filter((cipher) => {
@@ -731,36 +733,45 @@ export class CipherService implements CipherServiceAbstraction {
 
   async getNextCardCipher(userId: UserId): Promise<CipherView> {
     const cacheKey = "cardCiphers";
+    const sortedCiphersCache = this.sortedCiphersCacheFor(userId);
 
-    if (!this.sortedCiphersCache.isCached(cacheKey)) {
+    if (!sortedCiphersCache.isCached(cacheKey)) {
       const ciphers = await this.getAllDecryptedCiphersOfType([CipherType.Card], userId);
       if (!ciphers?.length) {
         return null;
       }
 
-      this.sortedCiphersCache.addCiphers(cacheKey, ciphers);
+      sortedCiphersCache.addCiphers(cacheKey, ciphers);
     }
 
-    return this.sortedCiphersCache.getNext(cacheKey);
+    return sortedCiphersCache.getNext(cacheKey);
   }
 
   async getNextIdentityCipher(userId: UserId): Promise<CipherView> {
     const cacheKey = "identityCiphers";
+    const sortedCiphersCache = this.sortedCiphersCacheFor(userId);
 
-    if (!this.sortedCiphersCache.isCached(cacheKey)) {
+    if (!sortedCiphersCache.isCached(cacheKey)) {
       const ciphers = await this.getAllDecryptedCiphersOfType([CipherType.Identity], userId);
       if (!ciphers?.length) {
         return null;
       }
 
-      this.sortedCiphersCache.addCiphers(cacheKey, ciphers);
+      sortedCiphersCache.addCiphers(cacheKey, ciphers);
     }
 
-    return this.sortedCiphersCache.getNext(cacheKey);
+    return sortedCiphersCache.getNext(cacheKey);
   }
 
-  updateLastUsedIndexForUrl(url: string) {
-    this.sortedCiphersCache.updateLastUsedIndex(url);
+  updateLastUsedIndexForUrl(url: string, userId?: UserId) {
+    if (userId != null) {
+      this.sortedCiphersCaches.get(userId)?.updateLastUsedIndex(url);
+      return;
+    }
+
+    for (const sortedCiphersCache of this.sortedCiphersCaches.values()) {
+      sortedCiphersCache.updateLastUsedIndex(url);
+    }
   }
 
   async updateLastUsedDate(id: string, userId: UserId): Promise<void> {
@@ -1667,8 +1678,18 @@ export class CipherService implements CipherServiceAbstraction {
     return upgradedView ?? (await this.decrypt(await this.get(cipher.id, userId), userId));
   }
 
-  private async getAutofillOnPageLoadDefault() {
-    return await firstValueFrom(this.autofillSettingsService.autofillOnPageLoadDefault$);
+  private async getAutofillOnPageLoadDefault(userId: UserId) {
+    return await firstValueFrom(this.autofillSettingsService.autofillOnPageLoadDefaultFor$(userId));
+  }
+
+  /** The rotations of `userId`; a rotation holds ciphers, so one is never shared between users. */
+  private sortedCiphersCacheFor(userId: UserId): SortedCiphersCache {
+    let sortedCiphersCache = this.sortedCiphersCaches.get(userId);
+    if (sortedCiphersCache == null) {
+      sortedCiphersCache = new SortedCiphersCache(this.sortCiphersByLastUsed);
+      this.sortedCiphersCaches.set(userId, sortedCiphersCache);
+    }
+    return sortedCiphersCache;
   }
 
   private async getCipherForUrl(
@@ -1679,7 +1700,8 @@ export class CipherService implements CipherServiceAbstraction {
     autofillOnPageLoad: boolean,
   ): Promise<CipherView> {
     const cacheKey = autofillOnPageLoad ? "autofillOnPageLoad-" + url : url;
-    if (!this.sortedCiphersCache.isCached(cacheKey)) {
+    const sortedCiphersCache = this.sortedCiphersCacheFor(userId);
+    if (!sortedCiphersCache.isCached(cacheKey)) {
       let ciphers = await this.getAllDecryptedForUrl(url, userId);
 
       if (!ciphers?.length) {
@@ -1695,7 +1717,7 @@ export class CipherService implements CipherServiceAbstraction {
       ciphers = hydrateCiphersWithLocalData(ciphers, localData);
 
       if (autofillOnPageLoad) {
-        const autofillOnPageLoadDefault = await this.getAutofillOnPageLoadDefault();
+        const autofillOnPageLoadDefault = await this.getAutofillOnPageLoadDefault(userId);
 
         ciphers = ciphers.filter(
           (cipher) =>
@@ -1707,15 +1729,15 @@ export class CipherService implements CipherServiceAbstraction {
         }
       }
 
-      this.sortedCiphersCache.addCiphers(cacheKey, ciphers);
+      sortedCiphersCache.addCiphers(cacheKey, ciphers);
     }
 
     if (lastLaunched) {
-      return this.sortedCiphersCache.getLastLaunched(cacheKey);
+      return sortedCiphersCache.getLastLaunched(cacheKey);
     } else if (lastUsed) {
-      return this.sortedCiphersCache.getLastUsed(cacheKey);
+      return sortedCiphersCache.getLastUsed(cacheKey);
     } else {
-      return this.sortedCiphersCache.getNext(cacheKey);
+      return sortedCiphersCache.getNext(cacheKey);
     }
   }
 
@@ -1727,11 +1749,11 @@ export class CipherService implements CipherServiceAbstraction {
 
   private async clearDecryptedCiphersState(userId: UserId) {
     await this.setFailedDecryptedCiphers(null, userId);
-    this.clearSortedCiphers();
+    this.clearSortedCiphers(userId);
   }
 
-  private clearSortedCiphers() {
-    this.sortedCiphersCache.clear();
+  private clearSortedCiphers(userId: UserId) {
+    this.sortedCiphersCaches.get(userId)?.clear();
   }
 
   /**

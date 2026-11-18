@@ -130,6 +130,8 @@ export abstract class DomainSettingsService {
    * URIs which should be treated as equivalent to each other for various concerns (autofill, etc)
    */
   equivalentDomains$: Observable<EquivalentDomains>;
+  /** {@link equivalentDomains$} for `userId` instead of the active user. */
+  equivalentDomainsFor$: (userId: UserId) => Observable<EquivalentDomains>;
   setEquivalentDomains: (newValue: EquivalentDomains, userId: UserId) => Promise<void>;
 
   /**
@@ -150,11 +152,18 @@ export abstract class DomainSettingsService {
    * strategies. Can be overridden by cipher-specific settings.
    */
   resolvedDefaultUriMatchStrategy$: Observable<UriMatchStrategySetting>;
+  /**
+   * {@link resolvedDefaultUriMatchStrategy$} for `userId` instead of the active user: that user's
+   * setting, overridden by that user's org policy.
+   */
+  resolvedDefaultUriMatchStrategyFor$: (userId: UserId) => Observable<UriMatchStrategySetting>;
 
   /**
    * Helper function for the common resolution of a given URL against equivalent domains
+   *
+   * @param userId The user whose equivalent domains apply. Defaults to the active user.
    */
-  getUrlEquivalentDomains: (url: string) => Observable<Set<string>>;
+  getUrlEquivalentDomains: (url: string, userId?: UserId) => Observable<Set<string>>;
 
   /**
    * User-controlled setting for whether or not fill assist targeting rules
@@ -379,18 +388,7 @@ export class DefaultDomainSettingsService implements DomainSettingsService {
 
     this.defaultUriMatchStrategyPolicy$ = this.accountService.activeAccount$.pipe(
       getUserId,
-      switchMap((userId) =>
-        this.policyService.policiesByType$(PolicyType.UriMatchDefaults, userId),
-      ),
-      getFirstPolicy,
-      map((policy) => {
-        if (!policy?.enabled || policy?.data == null) {
-          return null;
-        }
-        const data = policy.data?.uriMatchDetection;
-        // Validate that data is a valid UriMatchStrategy value
-        return Object.values(UriMatchStrategy).includes(data) ? data : null;
-      }),
+      switchMap((userId) => this.defaultUriMatchStrategyPolicyFor$(userId)),
       shareReplay({ bufferSize: 1, refCount: true }),
     );
 
@@ -400,6 +398,38 @@ export class DefaultDomainSettingsService implements DomainSettingsService {
     ]).pipe(
       map(([userSettingValue, policySettingValue]) => policySettingValue || userSettingValue),
       shareReplay({ bufferSize: 1, refCount: true }),
+    );
+  }
+
+  /** The org policy value for the default URI match strategy of `userId`, `null` without one. */
+  private defaultUriMatchStrategyPolicyFor$(userId: UserId): Observable<UriMatchStrategySetting> {
+    return this.policyService.policiesByType$(PolicyType.UriMatchDefaults, userId).pipe(
+      getFirstPolicy,
+      map((policy) => {
+        if (!policy?.enabled || policy?.data == null) {
+          return null;
+        }
+        const data = policy.data?.uriMatchDetection;
+        // Validate that data is a valid UriMatchStrategy value
+        return Object.values(UriMatchStrategy).includes(data) ? data : null;
+      }),
+    );
+  }
+
+  equivalentDomainsFor$(userId: UserId): Observable<EquivalentDomains> {
+    return this.stateProvider
+      .getUser(userId, EQUIVALENT_DOMAINS)
+      .state$.pipe(map((x) => x ?? null));
+  }
+
+  resolvedDefaultUriMatchStrategyFor$(userId: UserId): Observable<UriMatchStrategySetting> {
+    return combineLatest([
+      this.stateProvider
+        .getUser(userId, DEFAULT_URI_MATCH_STRATEGY)
+        .state$.pipe(map((x) => x ?? UriMatchStrategy.Domain)),
+      this.defaultUriMatchStrategyPolicyFor$(userId),
+    ]).pipe(
+      map(([userSettingValue, policySettingValue]) => policySettingValue || userSettingValue),
     );
   }
 
@@ -423,8 +453,10 @@ export class DefaultDomainSettingsService implements DomainSettingsService {
     await this.defaultUriMatchStrategyState.update(() => newValue);
   }
 
-  getUrlEquivalentDomains(url: string): Observable<Set<string>> {
-    const domains$ = this.equivalentDomains$.pipe(
+  getUrlEquivalentDomains(url: string, userId?: UserId): Observable<Set<string>> {
+    const equivalentDomains$ =
+      userId == null ? this.equivalentDomains$ : this.equivalentDomainsFor$(userId);
+    const domains$ = equivalentDomains$.pipe(
       map((equivalentDomains) => {
         const domain = Utils.getDomain(url);
         if (domain == null || equivalentDomains == null) {

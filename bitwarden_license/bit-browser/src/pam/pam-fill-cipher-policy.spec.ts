@@ -126,11 +126,14 @@ describe("PamFillCipherPolicy", () => {
         [CipherType.Card],
         undefined,
       );
+      // The revealed views are matched under the settings of the user they are revealed to.
       expect(cipherService.filterCiphersForUrl).toHaveBeenCalledWith(
         expect.any(Array),
         url,
         [CipherType.Card],
         undefined,
+        undefined,
+        userId,
       );
     });
 

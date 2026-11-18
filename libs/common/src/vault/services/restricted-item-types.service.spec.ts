@@ -278,6 +278,23 @@ describe("RestrictedItemTypesService", () => {
     });
   });
 
+  describe("restrictedFor$", () => {
+    it("reads the restrictions of the given user, not the active one", async () => {
+      const otherUserId = Utils.newGuid() as UserId;
+      organizationService.organizations$.mockImplementation((userId) =>
+        of(userId === otherUserId ? [org1] : [org1, org2]),
+      );
+      policyService.policiesByType$.mockImplementation((_type, userId) =>
+        of(userId === otherUserId ? [policyOrg1] : []),
+      );
+
+      await expect(firstValueFrom(service.restrictedFor$(otherUserId))).resolves.toEqual([
+        { cipherType: CipherType.Card, allowViewOrgIds: [] },
+      ]);
+      await expect(firstValueFrom(service.restricted$)).resolves.toEqual([]);
+    });
+  });
+
   describe("isCipherRestricted$", () => {
     it("returns true when cipher is restricted by policy", async () => {
       policyService.policiesByType$.mockReturnValue(of([policyOrg1]));

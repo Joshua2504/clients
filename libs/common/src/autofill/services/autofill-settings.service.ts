@@ -153,6 +153,8 @@ const CLIPBOARD_SETTING_UPDATED_NOTIFICATION_DISMISSED = new UserKeyDefinition(
 
 export abstract class AutofillSettingsServiceAbstraction {
   autofillOnPageLoad$: Observable<boolean>;
+  /** {@link autofillOnPageLoad$} for `userId` instead of the active user. */
+  autofillOnPageLoadFor$: (userId: UserId) => Observable<boolean>;
   setAutofillOnPageLoad: (newValue: boolean) => Promise<void>;
   autofillOnPageLoadDefault$: Observable<boolean>;
   /**
@@ -167,14 +169,28 @@ export abstract class AutofillSettingsServiceAbstraction {
   setAutofillOnPageLoadPolicyToastHasDisplayed: (newValue: boolean) => Promise<void>;
   autofillOnPageLoadPolicyToastHasDisplayed$: Observable<boolean>;
   autoCopyTotp$: Observable<boolean>;
+  /** {@link autoCopyTotp$} for `userId` instead of the active user. */
+  autoCopyTotpFor$: (userId: UserId) => Observable<boolean>;
   setAutoCopyTotp: (newValue: boolean) => Promise<void>;
   inlineMenuVisibility$: Observable<InlineMenuVisibilitySetting>;
   setInlineMenuVisibility: (newValue: InlineMenuVisibilitySetting) => Promise<void>;
   showInlineMenuIdentities$: Observable<boolean>;
+  /** {@link showInlineMenuIdentities$} for `userId` instead of the active user. */
+  showInlineMenuIdentitiesFor$: (userId: UserId) => Observable<boolean>;
   setShowInlineMenuIdentities: (newValue: boolean) => Promise<void>;
   showInlineMenuCards$: Observable<boolean>;
+  /**
+   * {@link showInlineMenuCards$} for `userId` instead of the active user: that user's setting,
+   * off while one of that user's organizations restricts cards.
+   */
+  showInlineMenuCardsFor$: (userId: UserId) => Observable<boolean>;
   setShowInlineMenuCards: (newValue: boolean) => Promise<void>;
   showInlineMenuSshKeys$: Observable<boolean>;
+  /**
+   * {@link showInlineMenuSshKeys$} for `userId` instead of the active user: that user's setting,
+   * off while one of that user's organizations restricts SSH keys.
+   */
+  showInlineMenuSshKeysFor$: (userId: UserId) => Observable<boolean>;
   setShowInlineMenuSshKeys: (newValue: boolean) => Promise<void>;
   honorBitwardenIgnoreAttribute$: Observable<boolean>;
   setHonorBitwardenIgnoreAttribute: (newValue: boolean) => Promise<void>;
@@ -185,6 +201,8 @@ export abstract class AutofillSettingsServiceAbstraction {
    * answered with a matching vault credential.
    */
   enableBasicAuthResponse$: Observable<boolean>;
+  /** {@link enableBasicAuthResponse$} for `userId` instead of the active user. */
+  enableBasicAuthResponseFor$: (userId: UserId) => Observable<boolean>;
   setEnableBasicAuthResponse: (newValue: boolean) => Promise<void>;
   /**
    * Resolved state for answering HTTP auth challenges for the active user: the
@@ -196,6 +214,11 @@ export abstract class AutofillSettingsServiceAbstraction {
    * active user.
    */
   resolvedEnableBasicAuthResponse$: Observable<boolean>;
+  /**
+   * {@link resolvedEnableBasicAuthResponse$} for `userId` instead of the active user: that user's
+   * setting, gated on the {@link FeatureFlag.EnableBasicAuthResponse} flag.
+   */
+  resolvedEnableBasicAuthResponseFor$: (userId: UserId) => Observable<boolean>;
   /**
    * Whether HTTP authentication challenges may be answered from the active user's vault, gated on
    * the {@link FeatureFlag.EnableBasicAuthResponse} flag. This reports availability only; it does
@@ -370,12 +393,7 @@ export class AutofillSettingsService implements AutofillSettingsServiceAbstracti
     this.resolvedEnableBasicAuthResponse$ = this.accountService.activeAccount$.pipe(
       getOptionalUserId,
       switchMap((userId) =>
-        userId == null
-          ? of(false)
-          : combineLatest([
-              this.stateProvider.getUser(userId, ENABLE_BASIC_AUTH_RESPONSE).state$,
-              this.httpAuthenticationFeatureEnabled$(),
-            ]).pipe(map(([userSetting, available]) => available && userSetting === true)),
+        userId == null ? of(false) : this.resolvedEnableBasicAuthResponseFor$(userId),
       ),
       distinctUntilChanged(),
     );
@@ -423,6 +441,12 @@ export class AutofillSettingsService implements AutofillSettingsServiceAbstracti
     );
   }
 
+  autofillOnPageLoadFor$(userId: UserId): Observable<boolean> {
+    return this.stateProvider
+      .getUser(userId, AUTOFILL_ON_PAGE_LOAD)
+      .state$.pipe(map((x) => x ?? false));
+  }
+
   async setAutofillOnPageLoad(newValue: boolean): Promise<void> {
     await this.autofillOnPageLoadState.update(() => newValue);
   }
@@ -445,6 +469,10 @@ export class AutofillSettingsService implements AutofillSettingsServiceAbstracti
     await this.autofillOnPageLoadPolicyToastHasDisplayedState.update(() => newValue);
   }
 
+  autoCopyTotpFor$(userId: UserId): Observable<boolean> {
+    return this.stateProvider.getUser(userId, AUTO_COPY_TOTP).state$.pipe(map((x) => x ?? true));
+  }
+
   async setAutoCopyTotp(newValue: boolean): Promise<void> {
     await this.autoCopyTotpState.update(() => newValue);
   }
@@ -453,8 +481,39 @@ export class AutofillSettingsService implements AutofillSettingsServiceAbstracti
     await this.inlineMenuVisibilityState.update(() => newValue);
   }
 
+  showInlineMenuIdentitiesFor$(userId: UserId): Observable<boolean> {
+    return this.stateProvider
+      .getUser(userId, SHOW_INLINE_MENU_IDENTITIES)
+      .state$.pipe(map((x) => x ?? true));
+  }
+
   async setShowInlineMenuIdentities(newValue: boolean): Promise<void> {
     await this.showInlineMenuIdentitiesState.update(() => newValue);
+  }
+
+  showInlineMenuCardsFor$(userId: UserId): Observable<boolean> {
+    return this.showInlineMenuTypeFor$(userId, SHOW_INLINE_MENU_CARDS, CipherType.Card);
+  }
+
+  showInlineMenuSshKeysFor$(userId: UserId): Observable<boolean> {
+    return this.showInlineMenuTypeFor$(userId, SHOW_INLINE_MENU_SSH_KEYS, CipherType.SshKey);
+  }
+
+  /** The user's setting for a cipher type in the inline menu, off while that type is restricted. */
+  private showInlineMenuTypeFor$(
+    userId: UserId,
+    setting: UserKeyDefinition<boolean>,
+    cipherType: CipherType,
+  ): Observable<boolean> {
+    return combineLatest([
+      this.stateProvider.getUser(userId, setting).state$.pipe(map((x) => x ?? true)),
+      this.restrictedItemTypesService.restrictedFor$(userId),
+    ]).pipe(
+      map(
+        ([enabled, restrictions]) =>
+          enabled && !restrictions.some((r) => r.cipherType === cipherType),
+      ),
+    );
   }
 
   async setShowInlineMenuCards(newValue: boolean): Promise<void> {
@@ -481,6 +540,19 @@ export class AutofillSettingsService implements AutofillSettingsServiceAbstracti
     return this.configService
       .getFeatureFlag$(FeatureFlag.EnableBasicAuthResponse)
       .pipe(map((featureFlag) => featureFlag === true));
+  }
+
+  enableBasicAuthResponseFor$(userId: UserId): Observable<boolean> {
+    return this.stateProvider
+      .getUser(userId, ENABLE_BASIC_AUTH_RESPONSE)
+      .state$.pipe(map((x) => x ?? false));
+  }
+
+  resolvedEnableBasicAuthResponseFor$(userId: UserId): Observable<boolean> {
+    return combineLatest([
+      this.stateProvider.getUser(userId, ENABLE_BASIC_AUTH_RESPONSE).state$,
+      this.httpAuthenticationFeatureEnabled$(),
+    ]).pipe(map(([userSetting, available]) => available && userSetting === true));
   }
 
   async setEnableBasicAuthResponse(newValue: boolean): Promise<void> {

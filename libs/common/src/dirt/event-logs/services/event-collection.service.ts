@@ -33,17 +33,19 @@ export class EventCollectionService implements EventCollectionServiceAbstraction
     return orgs?.filter((o) => o.useEvents)?.map((x) => x.id) ?? [];
   };
 
-  /** Adds an event to the active user's event collection
+  /** Adds an event to a user's event collection
    *  @param eventType the event type to be added
    *  @param ciphers The collection of ciphers to log events for
    *  @param uploadImmediately in some cases the recorded events should be uploaded right after being added
+   *  @param userId the user to record for. Defaults to the active user
    */
   async collectMany(
     eventType: EventType,
     ciphers: CipherView[],
     uploadImmediately = false,
+    userId?: UserId,
   ): Promise<any> {
-    const userId = await firstValueFrom(getUserId(this.accountService.activeAccount$));
+    userId ??= await firstValueFrom(getUserId(this.accountService.activeAccount$));
     const eventStore = this.stateProvider.getUser(userId, EVENT_COLLECTION);
 
     if (!(await this.shouldUpdate(userId, null, eventType, ciphers))) {
@@ -72,23 +74,25 @@ export class EventCollectionService implements EventCollectionServiceAbstraction
     );
 
     if (uploadImmediately) {
-      await this.eventUploadService.uploadEvents();
+      await this.eventUploadService.uploadEvents(userId);
     }
   }
 
-  /** Adds an event to the active user's event collection
+  /** Adds an event to a user's event collection
    *  @param eventType the event type to be added
    *  @param cipherId if provided the id of the cipher involved in the event
    *  @param uploadImmediately in some cases the recorded events should be uploaded right after being added
    *  @param organizationId the organizationId involved in the event. If the cipherId is not provided an organizationId is required
+   *  @param userId the user to record for. Defaults to the active user
    */
   async collect(
     eventType: EventType,
     cipherId: string = null,
     uploadImmediately = false,
     organizationId: string = null,
+    userId?: UserId,
   ): Promise<any> {
-    const userId = await firstValueFrom(getUserId(this.accountService.activeAccount$));
+    userId ??= await firstValueFrom(getUserId(this.accountService.activeAccount$));
     const eventStore = this.stateProvider.getUser(userId, EVENT_COLLECTION);
 
     if (!(await this.shouldUpdate(userId, organizationId, eventType, undefined, cipherId))) {
@@ -108,12 +112,12 @@ export class EventCollectionService implements EventCollectionServiceAbstraction
     });
 
     if (uploadImmediately) {
-      await this.eventUploadService.uploadEvents();
+      await this.eventUploadService.uploadEvents(userId);
     }
   }
 
   /** Verifies if the event collection should be updated for the provided information
-   *  @param userId the active user's id
+   *  @param userId the user the event is recorded for
    *  @param cipherId the cipher for the event
    *  @param organizationId the organization for the event
    */
@@ -131,7 +135,7 @@ export class EventCollectionService implements EventCollectionServiceAbstraction
       .pipe(map((orgs) => this.getOrgIds(orgs)));
 
     const [authStatus, orgIds, cipher] = await firstValueFrom(
-      zip(this.authService.activeAccountStatus$, orgIds$, cipher$),
+      zip(this.authService.authStatusFor$(userId), orgIds$, cipher$),
     );
 
     // The user must be authorized

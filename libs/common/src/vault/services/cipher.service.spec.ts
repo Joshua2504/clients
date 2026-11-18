@@ -113,6 +113,7 @@ describe("Cipher Service", () => {
   const cipherSdkService = mock<CipherSdkService>();
 
   const userId = "TestUserId" as UserId;
+  const otherUserId = "OtherTestUserId" as UserId;
   const orgId = "4ff8c0b2-1d3e-4f8c-9b2d-1d3e4f8c0b21" as OrganizationId;
 
   let cipherService: CipherService;
@@ -758,6 +759,41 @@ describe("Cipher Service", () => {
         );
 
         expect(result).toEqual([]);
+      });
+
+      it("matches with the active user's settings when no user is given", async () => {
+        Object.defineProperty(domainSettingsService, "resolvedDefaultUriMatchStrategy$", {
+          value: of(UriMatchStrategy.Exact),
+          configurable: true,
+        });
+
+        const result = await cipherService.filterCiphersForUrl([login(false)], url);
+
+        expect(result).toEqual([]);
+        expect(domainSettingsService.getUrlEquivalentDomains).toHaveBeenCalledWith(url, undefined);
+        expect(domainSettingsService.resolvedDefaultUriMatchStrategyFor$).not.toHaveBeenCalled();
+      });
+
+      it("matches with the given user's equivalent domains and default match strategy", async () => {
+        const view = login(false);
+        domainSettingsService.resolvedDefaultUriMatchStrategyFor$.mockImplementation((id) =>
+          of(id === otherUserId ? UriMatchStrategy.Host : UriMatchStrategy.Never),
+        );
+
+        const result = await cipherService.filterCiphersForUrl(
+          [view],
+          url,
+          undefined,
+          undefined,
+          undefined,
+          otherUserId,
+        );
+
+        expect(result).toEqual([view]);
+        expect(domainSettingsService.getUrlEquivalentDomains).toHaveBeenCalledWith(
+          url,
+          otherUserId,
+        );
       });
 
       it("matches the same login when it is not restricted", async () => {
@@ -2000,10 +2036,7 @@ describe("Cipher Service", () => {
 
   describe("getCipherForUrl localData freshness", () => {
     beforeEach(() => {
-      Object.defineProperty(autofillSettingsService, "autofillOnPageLoadDefault$", {
-        value: of(true),
-        writable: true,
-      });
+      autofillSettingsService.autofillOnPageLoadDefaultFor$.mockReturnValue(of(true));
     });
 
     it("re-hydrates localData at call time so the launch flow selects the correct cipher", async () => {
@@ -2023,6 +2056,66 @@ describe("Cipher Service", () => {
       const result = await cipherService.getLastLaunchedForUrl("https://example.com", userId, true);
 
       expect(result.localData).toEqual(freshLocalData);
+    });
+  });
+
+  describe("per-user rotation and page-load default", () => {
+    const url = "https://example.com";
+    const loginView = (id: string, autofillOnPageLoad: boolean | null = null) => {
+      const view = new CipherView();
+      view.id = id;
+      view.type = CipherType.Login;
+      view.login = new LoginView();
+      view.login.autofillOnPageLoad = autofillOnPageLoad;
+      return view;
+    };
+    const vaults = (byUser: Record<string, CipherView[]>) => {
+      jest.spyOn(cipherService, "localData$").mockReturnValue(of({}));
+      jest
+        .spyOn(cipherService, "getAllDecryptedForUrl")
+        .mockImplementation(async (_url, id) => [...(byUser[id] ?? [])]);
+    };
+
+    it("keeps one rotation per user for the same URL", async () => {
+      vaults({ [userId]: [loginView("a1"), loginView("a2")], [otherUserId]: [loginView("b1")] });
+
+      expect((await cipherService.getNextCipherForUrl(url, userId)).id).toBe("a1");
+      expect((await cipherService.getNextCipherForUrl(url, otherUserId)).id).toBe("b1");
+
+      cipherService.updateLastUsedIndexForUrl(url, userId);
+
+      expect((await cipherService.getNextCipherForUrl(url, userId)).id).toBe("a2");
+      expect((await cipherService.getNextCipherForUrl(url, otherUserId)).id).toBe("b1");
+    });
+
+    it("advances the rotation of the URL without a user, as before", async () => {
+      vaults({ [userId]: [loginView("a1"), loginView("a2")] });
+
+      expect((await cipherService.getNextCipherForUrl(url, userId)).id).toBe("a1");
+      cipherService.updateLastUsedIndexForUrl(url);
+
+      expect((await cipherService.getNextCipherForUrl(url, userId)).id).toBe("a2");
+    });
+
+    it("keeps the other users' rotations when one user's cache is cleared", async () => {
+      vaults({ [userId]: [loginView("a1"), loginView("a2")], [otherUserId]: [loginView("b1")] });
+      await cipherService.getNextCipherForUrl(url, userId);
+      await cipherService.getNextCipherForUrl(url, otherUserId);
+      cipherService.updateLastUsedIndexForUrl(url, userId);
+
+      await cipherService.clearCache(otherUserId);
+
+      expect((await cipherService.getNextCipherForUrl(url, userId)).id).toBe("a2");
+    });
+
+    it("applies the page-load default of the given user", async () => {
+      vaults({ [userId]: [loginView("a1")], [otherUserId]: [loginView("b1")] });
+      autofillSettingsService.autofillOnPageLoadDefaultFor$.mockImplementation((id) =>
+        of(id === otherUserId),
+      );
+
+      expect(await cipherService.getLastUsedForUrl(url, userId, true)).toBeNull();
+      expect((await cipherService.getLastUsedForUrl(url, otherUserId, true)).id).toBe("b1");
     });
   });
 
