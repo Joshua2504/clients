@@ -7,13 +7,18 @@ import { BehaviorSubject, of } from "rxjs";
 
 import { ViewCacheService } from "@bitwarden/angular/platform/view-cache";
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { BillingAccountProfileStateService } from "@bitwarden/common/billing/abstractions";
 import { EventCollectionService, EventType } from "@bitwarden/common/dirt/event-logs";
 import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
 import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
 import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
-import { mockAccountServiceWith } from "@bitwarden/common/spec";
+import {
+  FakeAccountService,
+  mockAccountInfoWith,
+  mockAccountServiceWith,
+} from "@bitwarden/common/spec";
 import { UserId } from "@bitwarden/common/types/guid";
 import { CipherArchiveService } from "@bitwarden/common/vault/abstractions/cipher-archive.service";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
@@ -63,6 +68,7 @@ describe("AddEditComponent", () => {
   const navigate = jest.fn();
   const back = jest.fn().mockResolvedValue(null);
   const setHistory = jest.fn();
+  const isAutofillUser$ = jest.fn().mockReturnValue(of(true));
   const collect = jest.fn().mockResolvedValue(null);
   const navigateAfterDeletion = jest.fn().mockResolvedValue(undefined);
   const openSimpleDialog = jest.fn().mockResolvedValue(true);
@@ -104,6 +110,7 @@ describe("AddEditComponent", () => {
         { provide: PopupCloseWarningService, useValue: { disable } },
         { provide: Router, useValue: { navigate } },
         { provide: ActivatedRoute, useValue: { queryParams: queryParams$ } },
+        { provide: AutofillAccountsService, useValue: { isAutofillUser$ } },
         { provide: I18nService, useValue: { t: (key: string) => key } },
         { provide: RevealedCipherService, useValue: revealedCipherService },
         { provide: CipherService, useValue: cipherServiceMock },
@@ -241,6 +248,7 @@ describe("AddEditComponent", () => {
         "222-333-444-5555",
         false,
         "444-555-666",
+        undefined,
       );
     }));
 
@@ -255,6 +263,7 @@ describe("AddEditComponent", () => {
         "222-333-444-5555",
         false,
         "444-555-666",
+        undefined,
       );
     }));
   });
@@ -685,6 +694,159 @@ describe("AddEditComponent", () => {
       tick();
 
       expect(component.config.initialValues).toBe(initialValues);
+    }));
+  });
+
+  describe("for the account named by `userId`", () => {
+    const otherUserId = "other-user-id" as UserId;
+    const cipherId = "222-333-444-5555";
+
+    const open = (params: Record<string, string> = {}) => {
+      queryParams$.next({ userId: otherUserId, ...params });
+      tick();
+    };
+
+    beforeEach(() => {
+      isAutofillUser$.mockReset();
+      isAutofillUser$.mockReturnValue(of(true));
+      cipherArchiveService.userCanArchive$.mockClear();
+      cipherServiceMock.addEditCipherInfo$.mockClear();
+      (TestBed.inject(CipherAuthorizationService).canDeleteCipher$ as jest.Mock).mockClear();
+      buildConfigResponse.originalCipher = {
+        edit: true,
+        id: cipherId,
+        organizationId: "444-555-666",
+      } as Cipher;
+    });
+
+    afterEach(() => {
+      queryParams$.next({});
+      buildConfigResponse.originalCipher = {} as Cipher;
+    });
+
+    it("builds the form of an edit for that account", fakeAsync(() => {
+      open({ cipherId });
+
+      expect(buildConfig).toHaveBeenLastCalledWith("edit", cipherId, undefined, otherUserId);
+      expect(isAutofillUser$).toHaveBeenCalledWith(otherUserId);
+    }));
+
+    it("builds the form of a new item for that account", fakeAsync(() => {
+      open({ type: CipherType.Card.toString() });
+
+      expect(buildConfig).toHaveBeenLastCalledWith("add", undefined, CipherType.Card, otherUserId);
+    }));
+
+    it("builds the form of a clone for that account", fakeAsync(() => {
+      open({ cipherId, clone: "true" });
+
+      expect(buildConfig).toHaveBeenLastCalledWith("clone", cipherId, undefined, otherUserId);
+    }));
+
+    it("reads the prefill, permissions and events of that account", fakeAsync(() => {
+      open({ cipherId });
+
+      expect(cipherServiceMock.addEditCipherInfo$).toHaveBeenCalledWith(otherUserId);
+      expect(cipherServiceMock.addEditCipherInfo$).not.toHaveBeenCalledWith("UserId");
+      expect(TestBed.inject(CipherAuthorizationService).canDeleteCipher$).toHaveBeenCalledWith(
+        buildConfigResponse.originalCipher,
+        undefined,
+        otherUserId,
+      );
+      expect(collect).toHaveBeenCalledWith(
+        EventType.Cipher_ClientViewed,
+        cipherId,
+        false,
+        "444-555-666",
+        otherUserId,
+      );
+    }));
+
+    it("shows whose vault the item is saved to", fakeAsync(() => {
+      const accountService = TestBed.inject(AccountService) as FakeAccountService;
+      void accountService.addAccount(
+        otherUserId,
+        mockAccountInfoWith({ email: "other@example.com" }),
+      );
+      void accountService.switchAccount("UserId" as UserId);
+      tick();
+
+      open({ cipherId });
+
+      // The header hint renders this email. Rendering it here would render the whole form.
+      expect(component["itemAccount"].accountHint()).toBe("other@example.com");
+    }));
+
+    it("opens the saved new item in that account", fakeAsync(() => {
+      open();
+      component.config.mode = "add";
+
+      void component.onCipherSaved({ id: "123-456-789" } as CipherView);
+      tick();
+
+      expect(navigate).toHaveBeenCalledWith(["/view-cipher"], {
+        replaceUrl: true,
+        queryParams: { cipherId: "123-456-789", userId: otherUserId },
+      });
+    }));
+
+    it("deletes the item from that account's vault", fakeAsync(() => {
+      open({ cipherId });
+
+      void component.delete();
+      tick();
+
+      expect(cipherServiceMock.softDeleteWithServer).toHaveBeenCalledWith(cipherId, otherUserId);
+    }));
+
+    it("fills the saved item from that account's vault", fakeAsync(() => {
+      jest.spyOn(BrowserPopupUtils, "inSingleActionPopout").mockReturnValue(true);
+      jest.spyOn(BrowserPopupUtils, "closeSingleActionPopout").mockResolvedValue();
+      const sendMessageSpy = jest.spyOn(BrowserApi, "sendMessage").mockResolvedValue(undefined);
+      const doAutofillForAccount = jest.fn().mockResolvedValue(true);
+      (vaultPopupAutofillService as any).doAutofillForAccount = doAutofillForAccount;
+      open();
+      (component as any).fillOnSuccessfulSave = true;
+      (component as any).saveAndFillEnabled = true;
+      const cipher = { id: "123-456-789", name: "Test Cipher" } as CipherView;
+
+      void component.onCipherSaved(cipher);
+      tick();
+
+      expect(doAutofillForAccount).toHaveBeenCalledWith({ userId: otherUserId, cipher }, false);
+      expect(vaultPopupAutofillService.doAutofill).not.toHaveBeenCalled();
+      expect(sendMessageSpy).toHaveBeenCalledWith(
+        "showLoginSavedNotification",
+        expect.objectContaining({ userId: otherUserId, cipherId: "123-456-789" }),
+      );
+      jest.restoreAllMocks();
+    }));
+
+    it("reloads the prefill only when the request is for that account", fakeAsync(() => {
+      open();
+      cipherServiceMock.addEditCipherInfo$.mockClear();
+      const messageListener = component["messageListener"];
+
+      messageListener({ command: "reloadAddEditCipherData", data: {} });
+      tick();
+      expect(cipherServiceMock.addEditCipherInfo$).not.toHaveBeenCalled();
+
+      messageListener({ command: "reloadAddEditCipherData", data: { userId: otherUserId } });
+      tick();
+      expect(cipherServiceMock.addEditCipherInfo$).toHaveBeenCalledWith(otherUserId);
+    }));
+
+    it("builds no form when that account does not serve autofill", fakeAsync(() => {
+      isAutofillUser$.mockReturnValue(of(false));
+      buildConfig.mockClear();
+      component.config = null as any;
+
+      open({ cipherId });
+
+      expect(buildConfig).not.toHaveBeenCalled();
+      expect(component.config).toBeNull();
+      expect(setHistory).toHaveBeenCalledWith([]);
+      expect(navigate).toHaveBeenCalledWith(["/tabs/vault"]);
     }));
   });
 });

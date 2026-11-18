@@ -20,7 +20,13 @@ import { CipherType } from "@bitwarden/sdk-internal";
 })
 export class NewItemNudgeComponent {
   readonly configType = input.required<CipherType | null>();
-  activeUserId$ = this.accountService.activeAccount$.pipe(getUserId);
+  /** The account the nudge is shown to and dismissed for. Defaults to the active account. */
+  readonly userId = input<UserId | undefined>(undefined);
+  activeUserId$ = toObservable(this.userId).pipe(
+    switchMap((userId) =>
+      userId != null ? of(userId) : this.accountService.activeAccount$.pipe(getUserId),
+    ),
+  );
   showNewItemSpotlight$ = combineLatest([this.activeUserId$, toObservable(this.configType)]).pipe(
     switchMap(([userId, cipherType]) => {
       if (cipherType == null) {

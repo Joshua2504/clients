@@ -33,6 +33,7 @@ import {
 } from "@bitwarden/components";
 
 import { BitTotpCountdownComponent } from "../../components/totp-countdown/totp-countdown.component";
+import { CipherAccountContext } from "../../services/cipher-account-context";
 import { ReadOnlyCipherCardComponent } from "../read-only-cipher-card/read-only-cipher-card.component";
 
 type TotpCodeValues = {
@@ -60,6 +61,8 @@ type TotpCodeValues = {
   ],
 })
 export class LoginCredentialsViewComponent implements OnChanges {
+  private readonly cipherAccountContext = inject(CipherAccountContext);
+
   // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
   // eslint-disable-next-line @angular-eslint/prefer-signals
   @Input() cipher: CipherView;
@@ -134,6 +137,7 @@ export class LoginCredentialsViewComponent implements OnChanges {
         this.cipher.id,
         false,
         this.cipher.organizationId,
+        this.cipherAccountContext.explicitUserId(),
       );
     }
   }
@@ -152,6 +156,7 @@ export class LoginCredentialsViewComponent implements OnChanges {
       this.cipher.id,
       false,
       this.cipher.organizationId,
+      this.cipherAccountContext.explicitUserId(),
     );
   }
 

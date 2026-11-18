@@ -1,6 +1,7 @@
-import { ChangeDetectionStrategy, Component, input } from "@angular/core";
+import { ChangeDetectionStrategy, Component, inject, input } from "@angular/core";
 
 import { JslibModule } from "@bitwarden/angular/jslib.module";
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherType } from "@bitwarden/common/vault/enums";
 import {
   CipherViewLike,
@@ -9,6 +10,7 @@ import {
 import { IconButtonModule, ItemModule, MenuModule } from "@bitwarden/components";
 import { CopyableCipherFields } from "@bitwarden/sdk-internal";
 
+import { CipherAccountContext } from "../../services/cipher-account-context";
 import { CopyFieldAction } from "../../services/copy-cipher-field.service";
 import { CopyCipherFieldDirective } from "../copy-cipher-field.directive";
 
@@ -26,6 +28,7 @@ type CipherItem = {
   selector: "vault-item-copy-actions",
   templateUrl: "./item-copy-actions.component.html",
   changeDetection: ChangeDetectionStrategy.OnPush,
+  providers: [CipherAccountContext],
   imports: [ItemModule, IconButtonModule, JslibModule, MenuModule, CopyCipherFieldDirective],
   host: {
     /**
@@ -38,6 +41,17 @@ type CipherItem = {
 })
 export class VaultItemCopyActionsComponent {
   readonly cipher = input.required<CipherViewLike>();
+
+  /**
+   * The account whose vault holds the cipher. Every copy action then runs for it: the re-prompt,
+   * the TOTP premium check, the decryption of a list view and the collected event. Defaults to
+   * the active account.
+   */
+  readonly userId = input<UserId | undefined>(undefined);
+
+  private readonly cipherAccountContext = inject(CipherAccountContext, { self: true }).bind(
+    this.userId,
+  );
 
   readonly showQuickCopyActions = input(false);
 

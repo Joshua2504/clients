@@ -358,6 +358,7 @@ export class CustomFieldsComponent implements OnInit, AfterViewInit {
         originalCipher.id,
         false,
         originalCipher.organizationId,
+        this.cipherFormContainer.config.userId,
       );
     }
   }

@@ -1,6 +1,6 @@
 import { CollectionView } from "@bitwarden/common/admin-console/models/collections";
 import { Organization } from "@bitwarden/common/admin-console/models/domain/organization";
-import { CipherId, CollectionId, OrganizationId } from "@bitwarden/common/types/guid";
+import { CipherId, CollectionId, OrganizationId, UserId } from "@bitwarden/common/types/guid";
 import { CipherType } from "@bitwarden/common/vault/enums";
 import { Cipher } from "@bitwarden/common/vault/models/domain/cipher";
 import { FolderView } from "@bitwarden/common/vault/models/view/folder.view";
@@ -110,6 +110,13 @@ type BaseCipherFormConfig = {
 
   /** True when the config is built within the context of the Admin Console */
   isAdminConsole?: true;
+
+  /**
+   * The account whose vault the form reads and writes: the cipher is loaded from, decrypted for
+   * and saved to it, and its organizations, collections, folders, policies and settings apply.
+   * Defaults to the active account.
+   */
+  userId?: UserId;
 };
 
 /**
@@ -161,10 +168,13 @@ export abstract class CipherFormConfigService {
    * @param mode
    * @param cipherId
    * @param cipherType
+   * @param userId The account whose vault the form reads and writes, returned as the config's
+   * `userId`. Defaults to the active account.
    */
   abstract buildConfig(
     mode: CipherFormMode,
     cipherId?: CipherId,
     cipherType?: CipherType,
+    userId?: UserId,
   ): Promise<CipherFormConfig>;
 }

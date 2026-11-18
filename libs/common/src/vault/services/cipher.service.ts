@@ -1789,11 +1789,11 @@ export class CipherService implements CipherServiceAbstraction {
   }
 
   /** Fetches the full `CipherView` when a `CipherListView` is passed. */
-  async getFullCipherView(c: CipherViewLike): Promise<CipherView> {
+  async getFullCipherView(c: CipherViewLike, userId?: UserId): Promise<CipherView> {
     if (CipherViewLikeUtils.isCipherListView(c)) {
-      const activeUserId = await firstValueFrom(
-        this.accountService.activeAccount$.pipe(map((a) => a?.id)),
-      );
+      const activeUserId =
+        userId ??
+        (await firstValueFrom(this.accountService.activeAccount$.pipe(map((a) => a?.id))));
       const cipher = await this.get(uuidAsString(c.id!), activeUserId);
       return this.decrypt(cipher, activeUserId);
     }

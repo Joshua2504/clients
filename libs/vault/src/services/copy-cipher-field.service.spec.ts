@@ -6,6 +6,7 @@ import { BillingAccountProfileStateService } from "@bitwarden/common/billing/abs
 import { EventCollectionService, EventType } from "@bitwarden/common/dirt/event-logs";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
 import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
+import { UserId } from "@bitwarden/common/types/guid";
 import { TotpService } from "@bitwarden/common/vault/abstractions/totp.service";
 import { CipherRepromptType, CipherType } from "@bitwarden/common/vault/enums";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
@@ -201,6 +202,7 @@ describe("CopyCipherFieldService", () => {
         cipher.id,
         false,
         cipher.organizationId,
+        undefined,
       );
     });
 
@@ -243,6 +245,7 @@ describe("CopyCipherFieldService", () => {
           cipher.id,
           false,
           cipher.organizationId,
+          undefined,
         );
       });
 
@@ -269,6 +272,7 @@ describe("CopyCipherFieldService", () => {
           cipher.id,
           false,
           cipher.organizationId,
+          undefined,
         );
       });
 
@@ -279,7 +283,77 @@ describe("CopyCipherFieldService", () => {
           cipher.id,
           false,
           cipher.organizationId,
+          undefined,
         );
+      });
+    });
+
+    describe("for the account that owns the cipher", () => {
+      const otherUserId = "otherUserId" as UserId;
+
+      beforeEach(() => {
+        cipher.type = CipherType.Login;
+        cipher.login = new LoginView();
+        cipher.login.totp = "secret-totp";
+        cipher.organizationUseTotp = false;
+        cipher.reprompt = CipherRepromptType.None;
+        totpService.getCode$.mockReturnValue(of({ code: "123456", period: 30 }));
+        // Only the other account has premium.
+        billingAccountProfileStateService.hasPremiumFromAnySource$.mockImplementation((id) =>
+          of(id === otherUserId),
+        );
+      });
+
+      it("copies a TOTP code with the premium of that account", async () => {
+        const result = await service.copy(valueToCopy, "totp", cipher, skipReprompt, otherUserId);
+
+        expect(result).toBe(true);
+        expect(platformUtilsService.copyToClipboard).toHaveBeenCalledWith("123456");
+        expect(billingAccountProfileStateService.hasPremiumFromAnySource$).toHaveBeenCalledWith(
+          otherUserId,
+        );
+        expect(billingAccountProfileStateService.hasPremiumFromAnySource$).not.toHaveBeenCalledWith(
+          userId,
+        );
+      });
+
+      it("does not copy a TOTP code with the premium of the active account", async () => {
+        billingAccountProfileStateService.hasPremiumFromAnySource$.mockImplementation((id) =>
+          of(id === userId),
+        );
+
+        const result = await service.copy(valueToCopy, "totp", cipher, skipReprompt, otherUserId);
+
+        expect(result).toBe(false);
+        expect(platformUtilsService.copyToClipboard).not.toHaveBeenCalled();
+      });
+
+      it("asks for the master password of that account", async () => {
+        cipher.reprompt = CipherRepromptType.Password;
+        passwordRepromptService.showPasswordPrompt.mockResolvedValue(false);
+
+        const result = await service.copy(valueToCopy, "password", cipher, false, otherUserId);
+
+        expect(result).toBe(false);
+        expect(passwordRepromptService.showPasswordPrompt).toHaveBeenCalledWith(otherUserId);
+        expect(platformUtilsService.copyToClipboard).not.toHaveBeenCalled();
+      });
+
+      it("collects the event for that account", async () => {
+        await service.copy(valueToCopy, "password", cipher, true, otherUserId);
+
+        expect(eventCollectionService.collect).toHaveBeenCalledWith(
+          EventType.Cipher_ClientCopiedPassword,
+          cipher.id,
+          false,
+          cipher.organizationId,
+          otherUserId,
+        );
+      });
+
+      it("reports TOTP as allowed by that account's premium", async () => {
+        await expect(service.totpAllowed(cipher, otherUserId)).resolves.toBe(true);
+        await expect(service.totpAllowed(cipher)).resolves.toBe(false);
       });
     });
 

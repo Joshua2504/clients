@@ -1,7 +1,7 @@
 // FIXME: Update this file to be type safe and remove this and next line
 // @ts-strict-ignore
 import { inject, Injectable } from "@angular/core";
-import { combineLatest, filter, firstValueFrom, map, switchMap } from "rxjs";
+import { combineLatest, filter, firstValueFrom, map, of, switchMap } from "rxjs";
 
 // This import has been flagged as unallowed for this class. It may be involved in a circular dependency loop.
 // eslint-disable-next-line no-restricted-imports
@@ -41,8 +41,10 @@ export class DefaultCipherFormConfigService implements CipherFormConfigService {
     mode: CipherFormMode,
     cipherId?: CipherId,
     cipherType?: CipherType,
+    userId?: UserId,
   ): Promise<CipherFormConfig> {
-    const activeUserId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+    const activeUserId =
+      userId ?? (await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId)));
 
     const [organizations, collections, organizationDataOwnershipDisabled, folders, cipher] =
       await firstValueFrom(
@@ -56,7 +58,7 @@ export class DefaultCipherFormConfigService implements CipherFormConfigService {
               ),
             ),
           ),
-          this.organizationDataOwnershipDisabled$,
+          this.organizationDataOwnershipDisabled$(userId),
           this.folderService.folders$(activeUserId).pipe(
             switchMap((f) =>
               this.folderService
@@ -80,6 +82,7 @@ export class DefaultCipherFormConfigService implements CipherFormConfigService {
       collections,
       organizations,
       folders,
+      userId,
     };
   }
 
@@ -95,13 +98,14 @@ export class DefaultCipherFormConfigService implements CipherFormConfigService {
       );
   }
 
-  private organizationDataOwnershipDisabled$ = this.accountService.activeAccount$.pipe(
-    getUserId,
-    switchMap((userId) =>
-      this.policyService.policyAppliesToUser$(PolicyType.OrganizationDataOwnership, userId),
-    ),
-    map((p) => !p),
-  );
+  private organizationDataOwnershipDisabled$(userId?: UserId) {
+    return (userId != null ? of(userId) : this.accountService.activeAccount$.pipe(getUserId)).pipe(
+      switchMap((userId) =>
+        this.policyService.policyAppliesToUser$(PolicyType.OrganizationDataOwnership, userId),
+      ),
+      map((p) => !p),
+    );
+  }
 
   private getCipher(userId: UserId, id?: CipherId): Promise<Cipher | null> {
     if (id == null) {

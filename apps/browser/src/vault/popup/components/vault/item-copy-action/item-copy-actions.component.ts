@@ -1,6 +1,7 @@
 import { AsyncPipe } from "@angular/common";
 import { Component, computed, input, inject } from "@angular/core";
 
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherViewLike } from "@bitwarden/common/vault/utils/cipher-view-like-utils";
 import { RestrictedCipherPolicy } from "@bitwarden/common/vault/utils/restricted-cipher-policy";
 import { VaultCopyButtonsService, VaultItemCopyActionsComponent } from "@bitwarden/vault";
@@ -16,6 +17,12 @@ export class ItemCopyActionsComponent {
   protected showQuickCopyActions$ = inject(VaultCopyButtonsService).showQuickCopyActions$;
 
   readonly cipher = input.required<CipherViewLike>();
+
+  /**
+   * The account whose vault holds the cipher. The copy actions then run for that account.
+   * Defaults to the active account.
+   */
+  readonly userId = input<UserId | undefined>(undefined);
 
   /** A restricted cipher without a revealed view has nothing to copy. */
   protected readonly restricted = computed(() =>

@@ -1,10 +1,11 @@
 import { ComponentFixture, fakeAsync, TestBed, tick } from "@angular/core/testing";
-import { ActivatedRoute } from "@angular/router";
+import { ActivatedRoute, Router } from "@angular/router";
 import { mock } from "jest-mock-extended";
-import { BehaviorSubject, Subject } from "rxjs";
+import { BehaviorSubject, of, Subject } from "rxjs";
 
 import { WINDOW } from "@bitwarden/angular/services/injection-tokens";
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
 import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
@@ -16,6 +17,7 @@ import { Cipher } from "@bitwarden/common/vault/models/domain/cipher";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 
 import { PopupRouterCacheService } from "../../../../../platform/popup/view-cache/popup-router-cache.service";
+import { PopupCloseWarningService } from "../../../../../popup/services/popup-close-warning.service";
 
 import { PasswordHistoryComponent } from "./vault-password-history.component";
 
@@ -32,6 +34,9 @@ describe("PasswordHistoryComponent", () => {
   const mockCipher = {} as unknown as Cipher;
 
   const back = jest.fn().mockResolvedValue(undefined);
+  const setHistory = jest.fn().mockResolvedValue([]);
+  const navigate = jest.fn().mockResolvedValue(true);
+  const isAutofillUser$ = jest.fn().mockReturnValue(of(true));
   const revealedCipherService = mock<RevealedCipherService>();
   const cipherView$ = jest
     .fn()
@@ -58,7 +63,10 @@ describe("PasswordHistoryComponent", () => {
           provide: AccountService,
           useValue: mockAccountServiceWith(mockUserId),
         },
-        { provide: PopupRouterCacheService, useValue: { back } },
+        { provide: PopupRouterCacheService, useValue: { back, setHistory } },
+        { provide: PopupCloseWarningService, useValue: mock<PopupCloseWarningService>() },
+        { provide: AutofillAccountsService, useValue: { isAutofillUser$ } },
+        { provide: Router, useValue: { navigate } },
         { provide: ActivatedRoute, useValue: { queryParams: params$ } },
         { provide: I18nService, useValue: { t: (key: string) => key } },
       ],
@@ -93,5 +101,38 @@ describe("PasswordHistoryComponent", () => {
 
     expect(back).toHaveBeenCalledTimes(1);
     expect(cipherView$).not.toHaveBeenCalled();
+  });
+
+  describe("for the account named by `userId`", () => {
+    const otherUserId = "acct-2" as UserId;
+
+    beforeEach(() => {
+      isAutofillUser$.mockReset();
+      isAutofillUser$.mockReturnValue(of(true));
+      navigate.mockClear();
+    });
+
+    afterEach(() => {
+      params$.next({});
+    });
+
+    it("loads the cipher from that account's vault", fakeAsync(() => {
+      params$.next({ cipherId: mockCipherView.id, userId: otherUserId });
+      tick(100);
+
+      expect(isAutofillUser$).toHaveBeenCalledWith(otherUserId);
+      expect(cipherView$).toHaveBeenCalledWith(otherUserId, mockCipherView.id);
+      expect(cipherView$).not.toHaveBeenCalledWith(mockUserId, mockCipherView.id);
+    }));
+
+    it("loads nothing and leaves when that account does not serve autofill", fakeAsync(() => {
+      isAutofillUser$.mockReturnValue(of(false));
+
+      params$.next({ cipherId: mockCipherView.id, userId: otherUserId });
+      tick(100);
+
+      expect(cipherView$).not.toHaveBeenCalled();
+      expect(navigate).toHaveBeenCalledWith(["/tabs/vault"]);
+    }));
   });
 });

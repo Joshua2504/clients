@@ -262,7 +262,9 @@ export class ItemDetailsSectionComponent implements OnInit {
       this.organizations.map((org) => [org.id, orgIconTile(org.productTierType)]),
     );
 
-    this.userId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+    this.userId =
+      this.config.userId ??
+      (await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId)));
 
     const prefillCipher = this.cipherFormContainer.getInitialCipherView();
 

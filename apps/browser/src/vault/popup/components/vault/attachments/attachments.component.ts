@@ -1,7 +1,7 @@
 // FIXME: Update this file to be type safe and remove this and next line
 // @ts-strict-ignore
 import { CommonModule } from "@angular/common";
-import { Component } from "@angular/core";
+import { Component, inject } from "@angular/core";
 import { takeUntilDestroyed } from "@angular/core/rxjs-interop";
 import { ActivatedRoute } from "@angular/router";
 import { first } from "rxjs";
@@ -16,6 +16,8 @@ import { PopupFooterComponent } from "../../../../../platform/popup/layout/popup
 import { PopupHeaderComponent } from "../../../../../platform/popup/layout/popup-header.component";
 import { PopupPageComponent } from "../../../../../platform/popup/layout/popup-page.component";
 import { PopupRouterCacheService } from "../../../../../platform/popup/view-cache/popup-router-cache.service";
+import { VaultPopupItemAccount } from "../../../services/vault-popup-item-account.service";
+import { ItemAccountHintComponent } from "../../item-account-hint/item-account-hint.component";
 
 // FIXME(https://bitwarden.atlassian.net/browse/CL-764): Migrate to OnPush
 // eslint-disable-next-line @angular-eslint/prefer-on-push-component-change-detection
@@ -31,7 +33,9 @@ import { PopupRouterCacheService } from "../../../../../platform/popup/view-cach
     PopupHeaderComponent,
     PopupFooterComponent,
     PopOutComponent,
+    ItemAccountHintComponent,
   ],
+  providers: [VaultPopupItemAccount],
 })
 export class AttachmentsComponent {
   /** The `id` tied to the underlying HTMLFormElement */
@@ -40,12 +44,24 @@ export class AttachmentsComponent {
   /** Id of the cipher */
   cipherId: CipherId;
 
+  /** The account the page operates on: the one the route names, else the active account. */
+  protected readonly itemAccount = inject(VaultPopupItemAccount);
+
   constructor(
     private popupRouterCacheService: PopupRouterCacheService,
     route: ActivatedRoute,
   ) {
     route.queryParams.pipe(takeUntilDestroyed(), first()).subscribe(({ cipherId }) => {
-      this.cipherId = cipherId;
+      if (this.itemAccount.explicitUserId() == null) {
+        this.cipherId = cipherId;
+        return;
+      }
+      // Nothing of the named account's vault is shown unless that account serves.
+      void this.itemAccount.userId().then((userId) => {
+        if (userId != null) {
+          this.cipherId = cipherId;
+        }
+      });
     });
   }
 

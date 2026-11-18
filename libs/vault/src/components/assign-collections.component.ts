@@ -17,9 +17,11 @@ import { toObservable } from "@angular/core/rxjs-interop";
 import { FormBuilder, ReactiveFormsModule, Validators } from "@angular/forms";
 import {
   combineLatest,
+  defer,
   firstValueFrom,
   map,
   Observable,
+  of,
   shareReplay,
   startWith,
   Subject,
@@ -96,6 +98,12 @@ export interface CollectionAssignmentParams {
    * The bulk method already handles admin actions internally.
    */
   isSingleCipherAdmin?: boolean;
+
+  /**
+   * The account whose vault holds the ciphers. Its organizations and collections are offered and
+   * the assignment is saved to its vault. Defaults to the active account.
+   */
+  userId?: UserId;
 }
 
 export const CollectionAssignmentResult = {
@@ -199,9 +207,23 @@ export class AssignCollectionsComponent implements OnInit, OnDestroy, AfterViewI
    */
   protected orgIconTiles = new Map<string, IconTileOptions>();
 
-  protected organizations$: Observable<Organization[]> = this.accountService.activeAccount$.pipe(
-    switchMap((account) =>
-      this.organizationService.organizations$(account?.id).pipe(
+  /** The account named by the params, else the active account. */
+  private readonly userId$: Observable<UserId | undefined> = defer(() =>
+    this.params?.userId != null
+      ? of(this.params.userId)
+      : this.accountService.activeAccount$.pipe(map((account) => account?.id)),
+  );
+
+  /** {@link userId$}, failing while there is no account. */
+  private readonly requiredUserId$: Observable<UserId> = defer(() =>
+    this.params?.userId != null
+      ? of(this.params.userId)
+      : this.accountService.activeAccount$.pipe(getUserId),
+  );
+
+  protected organizations$: Observable<Organization[]> = this.userId$.pipe(
+    switchMap((userId) =>
+      this.organizationService.organizations$(userId).pipe(
         map((orgs) =>
           orgs
             .filter((o) => o.enabled && o.status === OrganizationUserStatusType.Confirmed)
@@ -383,7 +405,7 @@ export class AssignCollectionsComponent implements OnInit, OnDestroy, AfterViewI
       .filter((i) => i.organizationId)
       .map((i) => i.id as CipherId);
 
-    const activeUserId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+    const activeUserId = await firstValueFrom(this.requiredUserId$);
 
     // Move personal items to the organization
     if (this.personalItemsCount > 0) {
@@ -435,7 +457,7 @@ export class AssignCollectionsComponent implements OnInit, OnDestroy, AfterViewI
       return;
     }
 
-    const userId = await firstValueFrom(getUserId(this.accountService.activeAccount$));
+    const userId = await firstValueFrom(this.requiredUserId$);
     const org = await firstValueFrom(
       this.organizationService.organizations$(userId).pipe(getOrganizationById(organizationId)),
     );
@@ -524,7 +546,7 @@ export class AssignCollectionsComponent implements OnInit, OnDestroy, AfterViewI
       return;
     }
 
-    const userId = await firstValueFrom(getUserId(this.accountService.activeAccount$));
+    const userId = await firstValueFrom(this.requiredUserId$);
     const org = await firstValueFrom(
       this.organizationService.organizations$(userId).pipe(getOrganizationById(organizationId)),
     );
@@ -581,8 +603,7 @@ export class AssignCollectionsComponent implements OnInit, OnDestroy, AfterViewI
    * @returns An observable of the collections for the organization.
    */
   private getCollectionsForOrganization(orgId: OrganizationId): Observable<CollectionView[]> {
-    return this.accountService.activeAccount$.pipe(
-      getUserId,
+    return this.requiredUserId$.pipe(
       switchMap((userId) =>
         combineLatest([
           this.collectionService.decryptedCollections$(userId),

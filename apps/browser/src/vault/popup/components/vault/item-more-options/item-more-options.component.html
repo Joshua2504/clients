@@ -19,7 +19,7 @@
         </button>
       }
       @for (action of contributedActions; track action.id) {
-        @if (action.show?.(cipher) ?? true) {
+        @if (!otherAccount() && (action.show?.(cipher) ?? true)) {
           <button
             type="button"
             bitMenuItem
@@ -51,7 +51,7 @@
           </a>
         }
       }
-      @if (!isLocked && allows(RestrictedCipherAction.Share)) {
+      @if (!isLocked && !otherAccount() && allows(RestrictedCipherAction.Share)) {
         <a bitMenuItem *appShareLinkMenuItem="cipher; let share = share" (click)="share()">
           {{ "shareViaLink" | i18n }}
         </a>
@@ -60,7 +60,7 @@
         <button type="button" bitMenuItem (click)="archive()">
           {{ "archiveVerb" | i18n }}
         </button>
-      } @else {
+      } @else if (!otherAccount()) {
         <button
           type="button"
           bitMenuItem

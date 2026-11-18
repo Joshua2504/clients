@@ -2,12 +2,15 @@ import { mock } from "jest-mock-extended";
 import { of } from "rxjs";
 
 import { Account, AccountService } from "@bitwarden/common/auth/abstractions/account.service";
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
 import { CipherType } from "@bitwarden/common/vault/enums";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
+import { CipherViewLike } from "@bitwarden/common/vault/utils/cipher-view-like-utils";
 import { BitIconButtonComponent, MenuItemComponent } from "@bitwarden/components";
 
 import { CopyCipherFieldService } from "..";
+import { CipherAccountContext } from "../services/cipher-account-context";
 
 import { CopyCipherFieldDirective } from "./copy-cipher-field.directive";
 
@@ -174,6 +177,8 @@ describe("CopyCipherFieldDirective", () => {
         value,
         action,
         copyCipherFieldDirective.cipher,
+        false,
+        undefined,
       );
     });
   });
@@ -202,6 +207,8 @@ describe("CopyCipherFieldDirective", () => {
         value,
         action,
         copyCipherFieldDirective.cipher,
+        false,
+        undefined,
       );
     });
   });
@@ -226,6 +233,8 @@ describe("CopyCipherFieldDirective", () => {
         value,
         action,
         copyCipherFieldDirective.cipher,
+        false,
+        undefined,
       );
     });
   });
@@ -246,6 +255,8 @@ describe("CopyCipherFieldDirective", () => {
         "test-secure-note",
         "secureNote",
         copyCipherFieldDirective.cipher,
+        false,
+        undefined,
       );
     });
   });
@@ -272,6 +283,8 @@ describe("CopyCipherFieldDirective", () => {
         value,
         action,
         copyCipherFieldDirective.cipher,
+        false,
+        undefined,
       );
     });
   });
@@ -300,7 +313,127 @@ describe("CopyCipherFieldDirective", () => {
         value,
         action,
         copyCipherFieldDirective.cipher,
+        false,
+        undefined,
       );
+    });
+  });
+
+  describe("for the account that owns the cipher", () => {
+    const otherUserId = "other-account-id" as UserId;
+
+    const directiveIn = (context?: CipherAccountContext) => {
+      const directive = new CopyCipherFieldDirective(
+        copyFieldService as unknown as CopyCipherFieldService,
+        mockAccountService,
+        mockCipherService,
+        undefined,
+        undefined,
+        context,
+      );
+      directive.cipher = new CipherView();
+      directive.cipher.type = CipherType.Login;
+      (directive.cipher as CipherView).login.username = "test-username";
+      (directive.cipher as CipherView).login.totp = "test-totp";
+      directive.action = "username";
+      return directive;
+    };
+
+    const contextOf = (userId: UserId | undefined) =>
+      ({ explicitUserId: () => userId }) as unknown as CipherAccountContext;
+
+    it("copies for the account given as input", async () => {
+      const directive = directiveIn();
+      directive.userId = otherUserId;
+
+      await directive.copy();
+
+      expect(copyFieldService.copy).toHaveBeenCalledWith(
+        "test-username",
+        "username",
+        directive.cipher,
+        false,
+        otherUserId,
+      );
+    });
+
+    it("copies for the account of the surrounding context", async () => {
+      const directive = directiveIn(contextOf(otherUserId));
+
+      await directive.copy();
+
+      expect(copyFieldService.copy).toHaveBeenCalledWith(
+        "test-username",
+        "username",
+        directive.cipher,
+        false,
+        otherUserId,
+      );
+    });
+
+    it("prefers the input over the surrounding context", async () => {
+      const directive = directiveIn(contextOf("context-account-id" as UserId));
+      directive.userId = otherUserId;
+
+      await directive.copy();
+
+      expect(copyFieldService.copy).toHaveBeenCalledWith(
+        "test-username",
+        "username",
+        directive.cipher,
+        false,
+        otherUserId,
+      );
+    });
+
+    it("decides on TOTP with that account", async () => {
+      const directive = directiveIn(contextOf(otherUserId));
+      directive.action = "totp";
+
+      await directive.ngOnChanges();
+
+      expect(copyFieldService.totpAllowed).toHaveBeenCalledWith(directive.cipher, otherUserId);
+    });
+
+    it("decrypts a list view from that account's vault", async () => {
+      const directive = directiveIn(contextOf(otherUserId));
+      const listView = {
+        id: "cipher-id",
+        type: { login: {} },
+        copyableFields: ["LoginUsername"],
+      } as unknown as CipherViewLike;
+      directive.cipher = listView;
+      const fullCipher = new CipherView();
+      fullCipher.login.username = "from-other-vault";
+      (mockCipherService.get as jest.Mock).mockResolvedValue({ id: "cipher-id" });
+      (mockCipherService.decrypt as jest.Mock).mockResolvedValue(fullCipher);
+
+      await directive.copy();
+
+      expect(mockCipherService.get).toHaveBeenCalledWith("cipher-id", otherUserId);
+      expect(mockCipherService.decrypt).toHaveBeenCalledWith({ id: "cipher-id" }, otherUserId);
+      expect(copyFieldService.copy).toHaveBeenCalledWith(
+        "from-other-vault",
+        "username",
+        listView,
+        false,
+        otherUserId,
+      );
+    });
+
+    it("decrypts a list view from the active account's vault without an account", async () => {
+      const directive = directiveIn(contextOf(undefined));
+      directive.cipher = {
+        id: "cipher-id",
+        type: { login: {} },
+        copyableFields: ["LoginUsername"],
+      } as unknown as CipherViewLike;
+      (mockCipherService.get as jest.Mock).mockResolvedValue({ id: "cipher-id" });
+      (mockCipherService.decrypt as jest.Mock).mockResolvedValue(new CipherView());
+
+      await directive.copy();
+
+      expect(mockCipherService.get).toHaveBeenCalledWith("cipher-id", "test-account-id");
     });
   });
 });

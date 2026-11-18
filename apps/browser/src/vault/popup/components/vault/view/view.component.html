@@ -8,8 +8,12 @@
     </ng-container>
   </popup-header>
 
+  @if (itemAccount.accountHint(); as accountEmail) {
+    <app-item-account-hint slot="above-scroll-area" [email]="accountEmail" />
+  }
+
   @if (cipher) {
-    <app-cipher-view [cipher]="cipher">
+    <app-cipher-view [cipher]="cipher" [userId]="itemAccount.explicitUserId()">
       @if (showAutofillButton()) {
         <button
           type="button"
@@ -23,7 +27,7 @@
           {{ "autofillVerb" | i18n }}
         </button>
       }
-      @if (allows(RestrictedCipherAction.Share)) {
+      @if (allows(RestrictedCipherAction.Share) && !itemAccount.accountHint()) {
         <app-share-button
           [cipher]="cipher"
           class="tw-mt-4"

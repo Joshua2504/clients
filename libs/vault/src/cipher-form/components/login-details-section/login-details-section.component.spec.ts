@@ -311,6 +311,7 @@ describe("LoginDetailsSectionComponent", () => {
         "111-222-333",
         false,
         "333-444-555",
+        undefined,
       );
 
       await passwordToggle.triggerEventHandler("toggledChange", false);

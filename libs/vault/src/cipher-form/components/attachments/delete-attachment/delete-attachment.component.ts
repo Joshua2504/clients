@@ -1,5 +1,5 @@
 import { CommonModule } from "@angular/common";
-import { Component, EventEmitter, Input, Output } from "@angular/core";
+import { Component, EventEmitter, inject, Input, Output } from "@angular/core";
 import { firstValueFrom } from "rxjs";
 
 import { JslibModule } from "@bitwarden/angular/jslib.module";
@@ -17,6 +17,8 @@ import {
   IconButtonModule,
   ToastService,
 } from "@bitwarden/components";
+
+import { CipherAccountContext } from "../../../../services/cipher-account-context";
 
 // FIXME(https://bitwarden.atlassian.net/browse/CL-764): Migrate to OnPush
 // eslint-disable-next-line @angular-eslint/prefer-on-push-component-change-detection
@@ -46,6 +48,9 @@ export class DeleteAttachmentComponent {
   // eslint-disable-next-line @angular-eslint/prefer-output-emitter-ref
   @Output() onDeletionSuccess = new EventEmitter<void>();
 
+  /** The account of the surrounding attachments component: the active one unless it names one. */
+  private readonly cipherAccountContext = inject(CipherAccountContext);
+
   constructor(
     private toastService: ToastService,
     private i18nService: I18nService,
@@ -67,9 +72,9 @@ export class DeleteAttachmentComponent {
     }
 
     try {
-      const activeUserId = await firstValueFrom(
-        this.accountService.activeAccount$.pipe(getOptionalUserId),
-      );
+      const activeUserId =
+        this.cipherAccountContext.explicitUserId() ??
+        (await firstValueFrom(this.accountService.activeAccount$.pipe(getOptionalUserId)));
 
       if (activeUserId == null) {
         throw new Error("An active user is expected while deleting an attachment.");

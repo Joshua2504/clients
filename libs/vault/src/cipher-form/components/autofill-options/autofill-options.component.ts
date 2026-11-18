@@ -14,7 +14,7 @@ import {
 } from "@angular/core";
 import { takeUntilDestroyed, toSignal } from "@angular/core/rxjs-interop";
 import { AbstractControl, FormBuilder, ReactiveFormsModule } from "@angular/forms";
-import { filter, map, shareReplay, Subject, switchMap, take } from "rxjs";
+import { defer, filter, map, shareReplay, Subject, switchMap, take } from "rxjs";
 
 import { JslibModule } from "@bitwarden/angular/jslib.module";
 import { AutofillSettingsServiceAbstraction } from "@bitwarden/common/autofill/services/autofill-settings.service";
@@ -96,13 +96,25 @@ export class AutofillOptionsComponent implements OnInit {
     return this.cipherFormContainer.config.mode === "partial-edit";
   }
 
-  protected defaultMatchDetection$ =
-    this.domainSettingsService.resolvedDefaultUriMatchStrategy$.pipe(
-      // The default match detection should only be shown when used on the browser
-      filter(() => this.platformUtilsService.getClientType() == ClientType.Browser),
-    );
+  /** The account the form reads and writes when its config names one. */
+  private get userId() {
+    return this.cipherFormContainer.config?.userId;
+  }
 
-  protected autofillOnPageLoadEnabled$ = this.autofillSettingsService.autofillOnPageLoad$;
+  protected defaultMatchDetection$ = defer(() =>
+    this.userId == null
+      ? this.domainSettingsService.resolvedDefaultUriMatchStrategy$
+      : this.domainSettingsService.resolvedDefaultUriMatchStrategyFor$(this.userId),
+  ).pipe(
+    // The default match detection should only be shown when used on the browser
+    filter(() => this.platformUtilsService.getClientType() == ClientType.Browser),
+  );
+
+  protected autofillOnPageLoadEnabled$ = defer(() =>
+    this.userId == null
+      ? this.autofillSettingsService.autofillOnPageLoad$
+      : this.autofillSettingsService.autofillOnPageLoadFor$(this.userId),
+  );
 
   protected autofillOptions: { label: string; value: boolean | null }[] = [
     { label: this.i18nService.t("default"), value: null },
@@ -309,7 +321,10 @@ export class AutofillOptionsComponent implements OnInit {
   }
 
   private updateDefaultAutofillLabel() {
-    this.autofillSettingsService.autofillOnPageLoadDefault$
+    (this.userId == null
+      ? this.autofillSettingsService.autofillOnPageLoadDefault$
+      : this.autofillSettingsService.autofillOnPageLoadDefaultFor$(this.userId)
+    )
       .pipe(takeUntilDestroyed())
       .subscribe((value: boolean) => {
         const defaultOption = this.autofillOptions.find((o) => o.value === value);

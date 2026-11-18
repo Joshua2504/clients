@@ -1,4 +1,7 @@
 import { Observable } from "rxjs";
+
+import { UserId } from "../../../types/guid";
+
 /**
  * Service for managing vault settings.
  */
@@ -25,6 +28,9 @@ export abstract class VaultSettingsService {
    * to users.
    */
   abstract showAtRiskPasswordNotifications$: Observable<boolean>;
+
+  /** {@link showAtRiskPasswordNotifications$} for `userId` instead of the active user. */
+  abstract showAtRiskPasswordNotificationsFor$(userId: UserId): Observable<boolean>;
 
   /**
    * Saves the enable passkeys setting to disk.

@@ -3,9 +3,14 @@
     <app-pop-out slot="end" />
   </popup-header>
 
+  @if (itemAccount.accountHint(); as accountEmail) {
+    <app-item-account-hint slot="above-scroll-area" [email]="accountEmail" />
+  }
+
   @if (cipherId) {
     <app-cipher-attachments
       [cipherId]="cipherId"
+      [userId]="itemAccount.explicitUserId()"
       [submitBtn]="submitButton"
       (onUploadSuccess)="navigateBack()"
     ></app-cipher-attachments>

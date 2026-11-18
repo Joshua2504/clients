@@ -4,6 +4,7 @@ import { firstValueFrom } from "rxjs";
 
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { getOptionalUserId } from "@bitwarden/common/auth/services/account.service";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { CipherId } from "@bitwarden/common/types/guid";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
 import { RevealedCipherService } from "@bitwarden/common/vault/abstractions/revealed-cipher.service";
@@ -11,6 +12,11 @@ import {
   RestrictedCipherAction,
   RestrictedCipherPolicy,
 } from "@bitwarden/common/vault/utils/restricted-cipher-policy";
+
+import {
+  itemAccountFromParams,
+  itemAccountQueryParams,
+} from "../services/vault-popup-item-account.service";
 
 /**
  * Sends a route for a restricted cipher to the item's view when the restricted-cipher rule blocks
@@ -22,10 +28,22 @@ export const restrictedCipherGuard =
     const accountService = inject(AccountService);
     const cipherService = inject(CipherService);
     const revealedCipherService = inject(RevealedCipherService);
+    const autofillAccountsService = inject(AutofillAccountsService);
     const router = inject(Router);
 
     const { cipherId, type } = route.queryParams;
-    const userId = await firstValueFrom(accountService.activeAccount$.pipe(getOptionalUserId));
+    // The account the route names with `userId`, else the active account.
+    const explicitUserId = itemAccountFromParams(route.queryParams);
+    if (
+      explicitUserId != null &&
+      !(await firstValueFrom(autofillAccountsService.isAutofillUser$(explicitUserId)))
+    ) {
+      // The page leaves by itself when its account does not serve. Its vault is not read here.
+      return true;
+    }
+    const userId =
+      explicitUserId ??
+      (await firstValueFrom(accountService.activeAccount$.pipe(getOptionalUserId)));
     if (!cipherId || !userId) {
       return true;
     }
@@ -43,5 +61,7 @@ export const restrictedCipherGuard =
       return true;
     }
 
-    return router.createUrlTree(["/view-cipher"], { queryParams: { cipherId, type } });
+    return router.createUrlTree(["/view-cipher"], {
+      queryParams: { cipherId, type, ...itemAccountQueryParams(explicitUserId) },
+    });
   };

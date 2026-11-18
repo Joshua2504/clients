@@ -13,7 +13,9 @@ import {
   COPY_PASSWORD_ID,
   COPY_USERNAME_ID,
   COPY_VERIFICATION_CODE_ID,
+  SHOW_AUTOFILL_BUTTON,
 } from "@bitwarden/common/autofill/constants";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { DomainSettingsService } from "@bitwarden/common/autofill/services/domain-settings.service";
 import { BillingAccountProfileStateService } from "@bitwarden/common/billing/abstractions";
 import { EventCollectionService, EventType } from "@bitwarden/common/dirt/event-logs";
@@ -24,7 +26,11 @@ import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.servic
 import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
 import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
 import { Utils } from "@bitwarden/common/platform/misc/utils";
-import { FakeAccountService, mockAccountServiceWith } from "@bitwarden/common/spec";
+import {
+  FakeAccountService,
+  mockAccountInfoWith,
+  mockAccountServiceWith,
+} from "@bitwarden/common/spec";
 import { UserId } from "@bitwarden/common/types/guid";
 import { ChangeLoginPasswordService } from "@bitwarden/common/vault/abstractions/change-login-password.service";
 import { CipherArchiveService } from "@bitwarden/common/vault/abstractions/cipher-archive.service";
@@ -44,6 +50,7 @@ import { DialogService, ToastService } from "@bitwarden/components";
 import { ShareLinkService } from "@bitwarden/tools-share";
 import {
   ArchiveCipherUtilitiesService,
+  CipherViewComponent,
   CopyCipherFieldService,
   PasswordRepromptService,
 } from "@bitwarden/vault";
@@ -51,6 +58,7 @@ import {
 import { BrowserApi } from "../../../../../platform/browser/browser-api";
 import BrowserPopupUtils from "../../../../../platform/browser/browser-popup-utils";
 import { PopupRouterCacheService } from "../../../../../platform/popup/view-cache/popup-router-cache.service";
+import { PopupCloseWarningService } from "../../../../../popup/services/popup-close-warning.service";
 import { VaultPopupAfterDeletionNavigationService } from "../../../services/vault-popup-after-deletion-navigation.service";
 import { VaultPopupAutofillService } from "../../../services/vault-popup-autofill.service";
 import {
@@ -75,11 +83,22 @@ describe("ViewComponent", () => {
   const doAutofillAndSave = jest.fn().mockResolvedValue(true);
   const copy = jest.fn().mockResolvedValue(true);
   const back = jest.fn().mockResolvedValue(null);
+  const setHistory = jest.fn().mockResolvedValue([]);
   const openSimpleDialog = jest.fn().mockResolvedValue(true);
   const navigateAfterDeletion = jest.fn().mockResolvedValue(undefined);
   const showToast = jest.fn();
   const showPasswordPrompt = jest.fn().mockResolvedValue(true);
   const currentAutofillTab$ = of({ url: "https://example.com", id: 1 });
+  const doAutofillForAccount = jest.fn().mockResolvedValue(true);
+  const disableCloseWarning = jest.fn();
+  /** Whether each account currently serves autofill, as `AutofillAccountsService` reports it. */
+  const autofillUsers = new Map<UserId, BehaviorSubject<boolean>>();
+  const isAutofillUser$ = jest.fn((userId: UserId) => {
+    if (!autofillUsers.has(userId)) {
+      autofillUsers.set(userId, new BehaviorSubject<boolean>(true));
+    }
+    return autofillUsers.get(userId)!.asObservable();
+  });
 
   const mockCipher = {
     id: "122-333-444",
@@ -104,6 +123,7 @@ describe("ViewComponent", () => {
   const autofillAllowed$ = new BehaviorSubject<boolean>(true);
   const mockVaultPopupAutofillService = {
     doAutofill,
+    doAutofillForAccount,
     doAutofillAndSave,
     currentAutofillTab$,
     autofillAllowed$,
@@ -138,6 +158,10 @@ describe("ViewComponent", () => {
     mockNavigate.mockClear();
     collect.mockClear();
     doAutofill.mockClear();
+    doAutofillForAccount.mockClear();
+    disableCloseWarning.mockClear();
+    autofillUsers.clear();
+    isAutofillUser$.mockClear();
     doAutofillAndSave.mockClear();
     copy.mockClear();
     navigateAfterDeletion.mockClear();
@@ -170,8 +194,13 @@ describe("ViewComponent", () => {
             getFeatureFlag$: jest.fn().mockReturnValue(of(false)),
           }),
         },
-        { provide: PopupRouterCacheService, useValue: mock<PopupRouterCacheService>({ back }) },
+        {
+          provide: PopupRouterCacheService,
+          useValue: mock<PopupRouterCacheService>({ back, setHistory }),
+        },
         { provide: ActivatedRoute, useValue: { queryParams: params$ } },
+        { provide: AutofillAccountsService, useValue: { isAutofillUser$ } },
+        { provide: PopupCloseWarningService, useValue: { disable: disableCloseWarning } },
         { provide: EventCollectionService, useValue: { collect } },
         {
           provide: VaultPopupAfterDeletionNavigationService,
@@ -344,6 +373,7 @@ describe("ViewComponent", () => {
         EventType.Cipher_ClientViewed,
         mockCipher.id,
         false,
+        undefined,
         undefined,
       );
     }));
@@ -640,6 +670,7 @@ describe("ViewComponent", () => {
       expect(component["archiveCipherUtilsService"].archiveCipher).toHaveBeenCalledWith(
         expect.objectContaining({ id: "122-333-444" }),
         true,
+        undefined,
       );
     });
   });
@@ -652,6 +683,8 @@ describe("ViewComponent", () => {
 
       expect(component["archiveCipherUtilsService"].unarchiveCipher).toHaveBeenCalledWith(
         expect.objectContaining({ id: "122-333-444" }),
+        false,
+        undefined,
       );
     });
   });
@@ -1202,5 +1235,190 @@ describe("ViewComponent", () => {
         },
       });
     });
+  });
+
+  describe("for the account named by `userId`", () => {
+    const otherUserId = "other-user-id" as UserId;
+    const canDeleteCipher$ = () =>
+      TestBed.inject(CipherAuthorizationService).canDeleteCipher$ as jest.Mock;
+
+    /** Each account's vault holds an item with the same id, as a shared item would. */
+    const cipherOf = (userId: UserId) =>
+      ({
+        ...mockCipher,
+        name: `item of ${userId}`,
+        type: CipherType.Login,
+        // Earlier tests leave the shared cipher deleted.
+        isDeleted: false,
+      }) as CipherView;
+
+    const open = (params: Record<string, string> = {}) => {
+      params$.next({ cipherId: mockCipher.id, userId: otherUserId, ...params });
+      flush();
+      fixture.detectChanges();
+    };
+
+    beforeEach(async () => {
+      await accountService.addAccount(
+        otherUserId,
+        mockAccountInfoWith({ email: "other@example.com" }),
+      );
+      await accountService.switchAccount(mockUserId);
+      // Also drops the one-time vaults that earlier tests queued and did not read.
+      mockCipherService.cipherViews$.mockReset();
+      mockCipherService.cipherViews$.mockImplementation((userId) => of([cipherOf(userId)]));
+      mockNavigate.mockReset();
+      canDeleteCipher$().mockClear();
+      cipherArchiveService.userCanArchive$.mockClear();
+      setHistory.mockClear();
+    });
+
+    afterEach(() => {
+      mockCipherService.cipherViews$.mockImplementation(() => of([mockCipher]));
+    });
+
+    it("loads the item from that account's vault and never from the active one", fakeAsync(() => {
+      open();
+
+      expect(component.cipher.name).toBe(`item of ${otherUserId}`);
+      expect(mockCipherService.cipherViews$).toHaveBeenCalledWith(otherUserId);
+      expect(mockCipherService.cipherViews$).not.toHaveBeenCalledWith(mockUserId);
+      expect(revealedCipherService.displayView$).toHaveBeenLastCalledWith(
+        otherUserId,
+        expect.anything(),
+      );
+    }));
+
+    it("checks permissions and collects the viewed event for that account", fakeAsync(() => {
+      open();
+
+      expect(canDeleteCipher$()).toHaveBeenCalledWith(component.cipher, undefined, otherUserId);
+      expect(cipherArchiveService.userCanArchive$).toHaveBeenCalledWith(otherUserId);
+      expect(cipherArchiveService.userCanArchive$).not.toHaveBeenCalledWith(mockUserId);
+      expect(collect).toHaveBeenCalledWith(
+        EventType.Cipher_ClientViewed,
+        mockCipher.id,
+        false,
+        undefined,
+        otherUserId,
+      );
+    }));
+
+    it("shows whose vault the item is in", fakeAsync(() => {
+      open();
+
+      const hint = fixture.debugElement.query(By.css('[data-testid="item-account-hint"]'));
+      expect(hint.nativeElement.textContent).toContain("other@example.com");
+    }));
+
+    it("renders the item for that account", fakeAsync(() => {
+      open();
+
+      const cipherView = fixture.debugElement.query(By.directive(CipherViewComponent));
+      expect(cipherView.componentInstance.userId()).toBe(otherUserId);
+    }));
+
+    it("opens the edit page for that account", fakeAsync(() => {
+      open();
+
+      void component.editCipher();
+
+      expect(mockNavigate).toHaveBeenCalledWith(["/edit-cipher"], {
+        queryParams: expect.objectContaining({ cipherId: mockCipher.id, userId: otherUserId }),
+      });
+    }));
+
+    it("deletes the item from that account's vault", fakeAsync(() => {
+      open();
+
+      void component.delete();
+      flush();
+
+      expect(mockCipherService.softDeleteWithServer).toHaveBeenCalledWith(
+        mockCipher.id,
+        otherUserId,
+      );
+    }));
+
+    it("archives the item in that account's vault", fakeAsync(() => {
+      open();
+
+      void component.archive();
+      flush();
+
+      expect(component["archiveCipherUtilsService"].archiveCipher).toHaveBeenCalledWith(
+        component.cipher,
+        true,
+        otherUserId,
+      );
+    }));
+
+    it("copies with that account's re-prompt, premium and event log", fakeAsync(() => {
+      open({ action: COPY_VERIFICATION_CODE_ID });
+
+      expect(copy).toHaveBeenCalledWith("123", "totp", expect.anything(), false, otherUserId);
+    }));
+
+    it("fills from that account's vault", fakeAsync(() => {
+      open({ action: AUTOFILL_ID });
+
+      expect(doAutofillForAccount).toHaveBeenCalledWith(
+        { userId: otherUserId, cipher: expect.objectContaining({ id: mockCipher.id }) },
+        false,
+      );
+      expect(doAutofill).not.toHaveBeenCalled();
+    }));
+
+    it("asks for that account's master password", fakeAsync(() => {
+      mockCipherService.cipherViews$.mockImplementation((userId) =>
+        of([{ ...cipherOf(userId), reprompt: CipherRepromptType.Password } as CipherView]),
+      );
+
+      open({ action: SHOW_AUTOFILL_BUTTON });
+
+      expect(showPasswordPrompt).toHaveBeenCalledWith(otherUserId);
+    }));
+
+    it("does not offer to share the item, which would share it from the active account", fakeAsync(() => {
+      open();
+
+      expect(fixture.debugElement.query(By.css("app-share-button"))).toBeNull();
+    }));
+
+    it("leaves the page when that account locks while it is open", fakeAsync(() => {
+      open();
+
+      autofillUsers.get(otherUserId)!.next(false);
+      flush();
+
+      expect(setHistory).toHaveBeenCalledWith([]);
+      expect(mockNavigate).toHaveBeenCalledWith(["/tabs/vault"]);
+      expect(mockCipherService.cipherViews$).not.toHaveBeenCalledWith(mockUserId);
+    }));
+
+    it("shows nothing when that account does not serve autofill", fakeAsync(() => {
+      isAutofillUser$(otherUserId);
+      autofillUsers.get(otherUserId)!.next(false);
+
+      params$.next({ cipherId: mockCipher.id, userId: otherUserId });
+      flush();
+
+      expect(component.cipher).toBeUndefined();
+      expect(mockCipherService.cipherViews$).not.toHaveBeenCalled();
+      expect(collect).not.toHaveBeenCalled();
+      expect(mockNavigate).toHaveBeenCalledWith(["/tabs/vault"]);
+    }));
+
+    it("shows no hint and uses the active account without `userId`", fakeAsync(() => {
+      params$.next({ cipherId: mockCipher.id });
+      flush();
+      fixture.detectChanges();
+
+      expect(component.cipher.name).toBe(`item of ${mockUserId}`);
+      expect(fixture.debugElement.query(By.css('[data-testid="item-account-hint"]'))).toBeNull();
+      expect(isAutofillUser$).not.toHaveBeenCalled();
+      const cipherView = fixture.debugElement.query(By.directive(CipherViewComponent));
+      expect(cipherView.componentInstance.userId()).toBeUndefined();
+    }));
   });
 });

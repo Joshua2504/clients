@@ -7,6 +7,7 @@ import { EventCollectionService, EventType } from "@bitwarden/common/dirt/event-
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
 import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
 import { uuidAsString } from "@bitwarden/common/platform/abstractions/sdk/sdk.service";
+import { UserId } from "@bitwarden/common/types/guid";
 import { TotpService } from "@bitwarden/common/vault/abstractions/totp.service";
 import { CipherRepromptType } from "@bitwarden/common/vault/enums";
 import {
@@ -157,6 +158,8 @@ export class CopyCipherFieldService {
    * @param actionType The type of field being copied.
    * @param cipher The cipher containing the field to copy.
    * @param skipReprompt Whether to skip password re-prompting.
+   * @param userId The account whose vault holds `cipher`. The re-prompt, the TOTP premium check
+   * and the collected event are that account's. Defaults to the active account.
    *
    * @returns Whether the field was copied successfully.
    */
@@ -165,6 +168,7 @@ export class CopyCipherFieldService {
     actionType: CopyAction,
     cipher: CipherViewLike,
     skipReprompt: boolean = false,
+    userId?: UserId,
   ): Promise<boolean> {
     // Ciphers saved with empty strings can still report the field as copyable,
     // so avoid prompting, copying, and showing a success toast when there is nothing to copy.
@@ -177,13 +181,13 @@ export class CopyCipherFieldService {
       !skipReprompt &&
       cipher.reprompt !== CipherRepromptType.None &&
       action.protected &&
-      !(await this.passwordRepromptService.showPasswordPrompt())
+      !(await this.passwordRepromptService.showPasswordPrompt(userId))
     ) {
       return false;
     }
 
     if (actionType === "totp") {
-      if (!(await this.totpAllowed(cipher))) {
+      if (!(await this.totpAllowed(cipher, userId))) {
         return false;
       }
       const totpResponse = await firstValueFrom(this.totpService.getCode$(valueToCopy));
@@ -206,6 +210,7 @@ export class CopyCipherFieldService {
         cipher.id ? uuidAsString(cipher.id) : undefined,
         false,
         cipher.organizationId ? uuidAsString(cipher.organizationId) : undefined,
+        userId,
       );
     }
 
@@ -214,10 +219,12 @@ export class CopyCipherFieldService {
 
   /**
    * Determines if TOTP generation is allowed for a cipher and user.
+   * @param cipher The cipher that holds the TOTP key.
+   * @param userId The account whose vault holds `cipher`. Defaults to the active account.
    */
-  async totpAllowed(cipher: CipherViewLike): Promise<boolean> {
-    const activeAccount = await firstValueFrom(this.accountService.activeAccount$);
-    if (!activeAccount?.id) {
+  async totpAllowed(cipher: CipherViewLike, userId?: UserId): Promise<boolean> {
+    const accountId = userId ?? (await firstValueFrom(this.accountService.activeAccount$))?.id;
+    if (!accountId) {
       return false;
     }
 
@@ -227,7 +234,7 @@ export class CopyCipherFieldService {
       !!login?.totp &&
       (cipher.organizationUseTotp ||
         (await firstValueFrom(
-          this.billingAccountProfileStateService.hasPremiumFromAnySource$(activeAccount.id),
+          this.billingAccountProfileStateService.hasPremiumFromAnySource$(accountId),
         )))
     );
   }

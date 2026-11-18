@@ -577,6 +577,7 @@ describe("CipherAttachmentsComponent", () => {
       expect(cipherAuthorizationService.canDeleteCipher$).toHaveBeenCalledWith(
         expect.anything(),
         true,
+        undefined,
       );
     });
   });

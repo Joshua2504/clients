@@ -11,8 +11,6 @@ import { JslibModule } from "@bitwarden/angular/jslib.module";
 import { BrowserPremiumUpgradePromptService } from "@bitwarden/browser/billing/popup/services/browser-premium-upgrade-prompt.service";
 import { CollectionView } from "@bitwarden/common/admin-console/models/collections";
 import { Organization } from "@bitwarden/common/admin-console/models/domain/organization";
-import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
-import { getUserId } from "@bitwarden/common/auth/services/account.service";
 import {
   AUTOFILL_ID,
   COPY_PASSWORD_ID,
@@ -74,7 +72,13 @@ import {
   VaultPopupAfterDeletionNavigationService,
 } from "../../../services/vault-popup-after-deletion-navigation.service";
 import { VaultPopupAutofillService } from "../../../services/vault-popup-autofill.service";
-import { closeViewVaultItemPopout, VaultPopoutType } from "../../../utils/vault-popout-window";
+import { VaultPopupItemAccount } from "../../../services/vault-popup-item-account.service";
+import {
+  closeViewVaultItemPopout,
+  VaultPopoutType,
+  viewVaultItemPopoutKey,
+} from "../../../utils/vault-popout-window";
+import { ItemAccountHintComponent } from "../../item-account-hint/item-account-hint.component";
 import {
   AutofillConfirmationDialogComponent,
   AutofillConfirmationDialogResult,
@@ -113,8 +117,10 @@ type LoadAction =
     CalloutModule,
     ChipActionComponent,
     ShareButtonComponent,
+    ItemAccountHintComponent,
   ],
   providers: [
+    VaultPopupItemAccount,
     { provide: ViewPasswordHistoryService, useClass: BrowserViewPasswordHistoryService },
     { provide: PremiumUpgradePromptService, useClass: BrowserPremiumUpgradePromptService },
   ],
@@ -122,6 +128,10 @@ type LoadAction =
 export class ViewComponent {
   private readonly configService = inject(ConfigService);
 
+  /** The account the page operates on: the one the route names, else the active account. */
+  protected readonly itemAccount = inject(VaultPopupItemAccount);
+
+  /** The account whose vault holds the cipher. Named `activeUserId` from when it always was. */
   private activeUserId: UserId;
 
   headerText: string;
@@ -145,9 +155,9 @@ export class ViewComponent {
   );
   private uriMatchStrategy$ = this.domainSettingsService.resolvedDefaultUriMatchStrategy$;
   protected showFooter$: Observable<boolean>;
-  protected userCanArchive$ = this.accountService.activeAccount$
-    .pipe(getUserId)
-    .pipe(switchMap((userId) => this.archiveService.userCanArchive$(userId)));
+  protected userCanArchive$ = this.itemAccount.userId$.pipe(
+    switchMap((userId) => this.archiveService.userCanArchive$(userId)),
+  );
   constructor(
     private passwordRepromptService: PasswordRepromptService,
     private route: ActivatedRoute,
@@ -158,7 +168,6 @@ export class ViewComponent {
     private logService: LogService,
     private toastService: ToastService,
     private vaultPopupAutofillService: VaultPopupAutofillService,
-    private accountService: AccountService,
     private eventCollectionService: EventCollectionService,
     private popupRouterCacheService: PopupRouterCacheService,
     protected cipherAuthorizationService: CipherAuthorizationService,
@@ -181,9 +190,12 @@ export class ViewComponent {
             ? params.routeAfterDeletion
             : undefined;
 
-          this.activeUserId = await firstValueFrom(
-            this.accountService.activeAccount$.pipe(getUserId),
-          );
+          const userId = await this.itemAccount.userId();
+          if (userId == null) {
+            // The named account does not serve. The page is being left and shows nothing.
+            return null;
+          }
+          this.activeUserId = userId;
 
           const stored = await this.getCipherData(params.cipherId, this.activeUserId);
           const cipher = await firstValueFrom(
@@ -216,6 +228,7 @@ export class ViewComponent {
             cipher.id,
             false,
             cipher.organizationId,
+            this.itemAccount.explicitUserId(),
           );
 
           return stored;
@@ -231,6 +244,8 @@ export class ViewComponent {
 
           this.canDeleteCipher$ = this.cipherAuthorizationService.canDeleteCipher$(
             this.storedCipher,
+            undefined,
+            this.itemAccount.explicitUserId(),
           );
 
           this.showFooter$ = of(
@@ -298,6 +313,7 @@ export class ViewComponent {
         type: this.cipher.type,
         isNew: false,
         routeAfterDeletion: this.routeAfterDeletion,
+        ...this.itemAccount.queryParams(),
       },
     });
     return true;
@@ -357,7 +373,11 @@ export class ViewComponent {
   };
 
   archive = async () => {
-    const cipherResponse = await this.archiveCipherUtilsService.archiveCipher(this.cipher, true);
+    const cipherResponse = await this.archiveCipherUtilsService.archiveCipher(
+      this.cipher,
+      true,
+      this.itemAccount.explicitUserId(),
+    );
 
     if (!cipherResponse) {
       return;
@@ -366,7 +386,11 @@ export class ViewComponent {
   };
 
   unarchive = async () => {
-    const cipherResponse = await this.archiveCipherUtilsService.unarchiveCipher(this.cipher);
+    const cipherResponse = await this.archiveCipherUtilsService.unarchiveCipher(
+      this.cipher,
+      false,
+      this.itemAccount.explicitUserId(),
+    );
 
     if (!cipherResponse) {
       return;
@@ -400,7 +424,7 @@ export class ViewComponent {
   async doAutofill() {
     //for non login types that are still auto-fillable
     if (CipherViewLikeUtils.getType(this.cipher) !== CipherType.Login) {
-      await this.vaultPopupAutofillService.doAutofill(this.cipher, true, true);
+      await this.fill(this.cipher, true, true);
       return;
     }
 
@@ -418,7 +442,7 @@ export class ViewComponent {
     }
 
     if (await this._domainMatched(currentTab)) {
-      await this.vaultPopupAutofillService.doAutofill(this.cipher, true, true);
+      await this.fill(this.cipher, true, true);
       return;
     }
 
@@ -427,9 +451,12 @@ export class ViewComponent {
         currentUrl: currentTab?.url || "",
         savedUris: this.cipher.login?.uris?.filter((u) => u.uri) ?? [],
         // Adding the URL saves the cipher outside the edit form, which a restricted cipher refuses.
+        // `doAutofillAndSave` saves the URL to the active account's vault, so the page of another
+        // account fills without offering to add it.
         viewOnly:
           !this.cipher.edit ||
-          RestrictedCipherPolicy.isRestricted(this.storedCipher ?? this.cipher),
+          RestrictedCipherPolicy.isRestricted(this.storedCipher ?? this.cipher) ||
+          this.itemAccount.explicitUserId() != null,
       },
     });
 
@@ -439,7 +466,7 @@ export class ViewComponent {
       case AutofillConfirmationDialogResult.Canceled:
         return;
       case AutofillConfirmationDialogResult.AutofilledOnly:
-        await this.vaultPopupAutofillService.doAutofill(this.cipher, true, true);
+        await this.fill(this.cipher, true, true);
         return;
       case AutofillConfirmationDialogResult.AutofillAndUrlAdded:
         await this.vaultPopupAutofillService.doAutofillAndSave(this.cipher, true, true);
@@ -447,12 +474,33 @@ export class ViewComponent {
     }
   }
 
+  /**
+   * Fills the cipher from the vault of the page's account. A page that follows the active account
+   * fills as it always has.
+   */
+  private fill(
+    cipher: CipherView,
+    closePopup: boolean,
+    skipPasswordReprompt = false,
+  ): Promise<boolean> {
+    const userId = this.itemAccount.explicitUserId();
+    if (userId == null) {
+      return this.vaultPopupAutofillService.doAutofill(cipher, closePopup, skipPasswordReprompt);
+    }
+    return this.vaultPopupAutofillService.doAutofillForAccount({ userId, cipher }, closePopup);
+  }
+
   private async _domainMatched(currentTab: chrome.tabs.Tab): Promise<boolean> {
+    const userId = this.itemAccount.explicitUserId();
     const equivalentDomains = await firstValueFrom(
-      this.domainSettingsService.getUrlEquivalentDomains(currentTab?.url),
+      userId == null
+        ? this.domainSettingsService.getUrlEquivalentDomains(currentTab?.url)
+        : this.domainSettingsService.getUrlEquivalentDomains(currentTab?.url, userId),
     );
     const defaultMatch = await firstValueFrom(
-      this.domainSettingsService.resolvedDefaultUriMatchStrategy$,
+      userId == null
+        ? this.domainSettingsService.resolvedDefaultUriMatchStrategy$
+        : this.domainSettingsService.resolvedDefaultUriMatchStrategyFor$(userId),
     );
 
     return CipherViewLikeUtils.matchesUri(
@@ -478,25 +526,30 @@ export class ViewComponent {
     senderTabId?: number,
   ): Promise<void | boolean> {
     let actionSuccess = false;
+    // Undefined while the page follows the active account, which every call below defaults to.
+    const userId = this.itemAccount.explicitUserId();
+    const popoutKey = viewVaultItemPopoutKey(cipher.id, userId);
 
     switch (loadAction) {
       case SHOW_AUTOFILL_BUTTON:
         // This action simply shows the cipher view, no need to do anything.
         if (
           cipher.reprompt !== CipherRepromptType.None &&
-          !(await this.passwordRepromptService.showPasswordPrompt())
+          !(await this.passwordRepromptService.showPasswordPrompt(userId))
         ) {
-          await closeViewVaultItemPopout(`${VaultPopoutType.viewVaultItem}_${cipher.id}`);
+          await closeViewVaultItemPopout(popoutKey);
         }
         return;
       case AUTOFILL_ID:
-        actionSuccess = await this.vaultPopupAutofillService.doAutofill(cipher, false);
+        actionSuccess = await this.fill(cipher, false);
         break;
       case COPY_USERNAME_ID:
         actionSuccess = await this.copyCipherFieldService.copy(
           cipher.login.username,
           "username",
           cipher,
+          false,
+          userId,
         );
         break;
       case COPY_PASSWORD_ID:
@@ -504,22 +557,32 @@ export class ViewComponent {
           cipher.login.password,
           "password",
           cipher,
+          false,
+          userId,
         );
         break;
       case COPY_VERIFICATION_CODE_ID:
-        actionSuccess = await this.copyCipherFieldService.copy(cipher.login.totp, "totp", cipher);
+        actionSuccess = await this.copyCipherFieldService.copy(
+          cipher.login.totp,
+          "totp",
+          cipher,
+          false,
+          userId,
+        );
         break;
       case UPDATE_PASSWORD: {
-        const repromptSuccess = await this.passwordRepromptService.showPasswordPrompt();
+        const repromptSuccess = await this.passwordRepromptService.showPasswordPrompt(userId);
 
         const tab = await BrowserApi.getTab(senderTabId);
         await sendExtensionMessage("bgHandleReprompt", {
           tab,
           cipherId: cipher.id,
           success: repromptSuccess,
+          // The account whose master password answered, when the popout was opened for one.
+          ...this.itemAccount.queryParams(),
         });
 
-        await closeViewVaultItemPopout(`${VaultPopoutType.viewVaultItem}_${cipher.id}`);
+        await closeViewVaultItemPopout(popoutKey);
 
         break;
       }
@@ -533,7 +596,7 @@ export class ViewComponent {
             senderTabId
           ) {
             await BrowserApi.focusTab(senderTabId);
-            await closeViewVaultItemPopout(`${VaultPopoutType.viewVaultItem}_${cipher.id}`);
+            await closeViewVaultItemPopout(popoutKey);
           } else {
             await this.popupRouterCacheService.back();
           }

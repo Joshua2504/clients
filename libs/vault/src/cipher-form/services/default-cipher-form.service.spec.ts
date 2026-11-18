@@ -284,4 +284,160 @@ describe("DefaultCipherFormService", () => {
       },
     );
   });
+
+  describe("for the account the config names", () => {
+    const activeUserId = "user-1" as UserId;
+    const otherUserId = "user-2" as UserId;
+    const cipherId = "3f5a3c8a-3b1e-4c8a-9b1e-3b1e4c8a9b1e" as CipherId;
+
+    const storedCipher = (collectionIds: string[] = []) => {
+      const cipher = new Cipher();
+      cipher.id = cipherId;
+      cipher.type = CipherType.Login;
+      cipher.collectionIds = collectionIds;
+      return cipher;
+    };
+
+    const editedView = (password = "new-password") => {
+      const view = new CipherView();
+      view.id = cipherId;
+      view.type = CipherType.Login;
+      view.login = new LoginView();
+      view.login.password = password;
+      return view;
+    };
+
+    const configFor = (overrides: Partial<CipherFormConfig> = {}) =>
+      ({
+        mode: "edit",
+        admin: false,
+        originalCipher: storedCipher(),
+        userId: otherUserId,
+        ...overrides,
+      }) as CipherFormConfig;
+
+    /** Every account a mock was called for, wherever the account sits in its arguments. */
+    const accountsUsed = () =>
+      [
+        cipherServiceMock.createWithServer,
+        cipherServiceMock.updateWithServer,
+        cipherServiceMock.shareWithServer,
+        cipherServiceMock.saveCollectionsWithServer,
+        cipherServiceMock.encrypt,
+        cipherServiceMock.decrypt,
+        pendingTasks$,
+        markAsCompleteMock,
+      ].flatMap((fn) =>
+        fn.mock.calls.flatMap((args: unknown[]) =>
+          args.filter((arg) => arg === activeUserId || arg === otherUserId),
+        ),
+      );
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      cipherServiceMock.encrypt.mockResolvedValue({ cipher: storedCipher() } as EncryptionContext);
+      cipherServiceMock.decrypt.mockResolvedValue(editedView("old-password"));
+      cipherServiceMock.updateWithServer.mockResolvedValue(editedView());
+    });
+
+    it("creates a new cipher in that account's vault", async () => {
+      const newCipher = new CipherView();
+      newCipher.type = CipherType.Login;
+
+      await service.saveCipher(newCipher, configFor({ mode: "add", originalCipher: undefined }));
+
+      expect(cipherServiceMock.createWithServer).toHaveBeenCalledWith(
+        newCipher,
+        otherUserId,
+        false,
+      );
+    });
+
+    it("saves an edit to that account's vault", async () => {
+      const edited = editedView();
+
+      await service.saveCipher(edited, configFor());
+
+      expect(cipherServiceMock.decrypt).toHaveBeenCalledWith(expect.any(Cipher), otherUserId);
+      expect(cipherServiceMock.updateWithServer).toHaveBeenCalledWith(
+        edited,
+        otherUserId,
+        expect.any(CipherView),
+        false,
+      );
+      expect(accountsUsed()).not.toContain(activeUserId);
+    });
+
+    it("completes that account's at-risk password task", async () => {
+      pendingTasks$.mockReturnValue(
+        of([{ id: "task-1", type: SecurityTaskType.UpdateAtRiskCredential, cipherId }]),
+      );
+
+      await service.saveCipher(editedView(), configFor());
+
+      expect(pendingTasks$).toHaveBeenCalledWith(otherUserId);
+      expect(markAsCompleteMock).toHaveBeenCalledWith("task-1", otherUserId);
+      expect(accountsUsed()).not.toContain(activeUserId);
+    });
+
+    it("saves a collection change to that account's vault", async () => {
+      const edited = editedView();
+      edited.collectionIds = ["collection-2"];
+      cipherServiceMock.saveCollectionsWithServer.mockResolvedValue(storedCipher());
+
+      await service.saveCipher(
+        edited,
+        configFor({ originalCipher: storedCipher(["collection-1"]) }),
+      );
+
+      expect(cipherServiceMock.encrypt).toHaveBeenCalledWith(expect.any(CipherView), otherUserId);
+      expect(cipherServiceMock.saveCollectionsWithServer).toHaveBeenCalledWith(
+        expect.any(Cipher),
+        otherUserId,
+      );
+      expect(accountsUsed()).not.toContain(activeUserId);
+    });
+
+    it("shares to an organization from that account's vault", async () => {
+      const edited = editedView();
+      edited.organizationId = "org-1";
+      edited.collectionIds = ["collection-1"];
+      cipherServiceMock.shareWithServer.mockResolvedValue(storedCipher());
+
+      await service.saveCipher(edited, configFor());
+
+      expect(cipherServiceMock.shareWithServer).toHaveBeenCalledWith(
+        edited,
+        "org-1",
+        ["collection-1"],
+        otherUserId,
+        expect.any(CipherView),
+      );
+      expect(accountsUsed()).not.toContain(activeUserId);
+    });
+
+    it("reveals a restricted cipher for that account", async () => {
+      const restricted = storedCipher();
+      restricted.partialData = "{}";
+      revealedCipherServiceMock.getOrReveal.mockResolvedValue(editedView("secret"));
+
+      await service.decryptCipher(restricted, otherUserId);
+
+      expect(revealedCipherServiceMock.getOrReveal).toHaveBeenCalledWith(otherUserId, cipherId);
+    });
+
+    it("saves to the active account's vault when the config names no account", async () => {
+      const edited = editedView();
+
+      await service.saveCipher(edited, configFor({ userId: undefined }));
+
+      expect(cipherServiceMock.updateWithServer).toHaveBeenCalledWith(
+        edited,
+        activeUserId,
+        expect.any(CipherView),
+        false,
+      );
+      expect(accountsUsed()).not.toContain(otherUserId);
+    });
+  });
 });

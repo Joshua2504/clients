@@ -52,6 +52,7 @@ import {
 
 import { DownloadAttachmentComponent } from "../../../components/download-attachment/download-attachment.component";
 import { TruncatedFilenameComponent } from "../../../components/truncated-filename";
+import { CipherAccountContext } from "../../../services/cipher-account-context";
 
 import { DeleteAttachmentComponent } from "./delete-attachment/delete-attachment.component";
 
@@ -63,6 +64,7 @@ type CipherAttachmentForm = FormGroup<{
   selector: "app-cipher-attachments",
   templateUrl: "./cipher-attachments.component.html",
   changeDetection: ChangeDetectionStrategy.OnPush,
+  providers: [CipherAccountContext],
   imports: [
     AsyncActionsModule,
     ButtonModule,
@@ -92,6 +94,16 @@ export class CipherAttachmentsComponent {
   /** The organization ID if this cipher belongs to an organization */
   readonly organizationId = input<OrganizationId>();
 
+  /**
+   * The account whose vault holds the cipher. Its attachments are listed, uploaded, downloaded
+   * and deleted, and its organizations and permissions apply. Defaults to the active account.
+   */
+  readonly userId = input<UserId | undefined>(undefined);
+
+  private readonly cipherAccountContext = inject(CipherAccountContext, { self: true }).bind(
+    this.userId,
+  );
+
   /** Denotes if the action is occurring from within the admin console */
   readonly admin = input<boolean>(false);
 
@@ -120,7 +132,13 @@ export class CipherAttachmentsComponent {
   protected readonly canDeleteAttachments = toSignal(
     toObservable(this.cipher).pipe(
       switchMap((cipher) =>
-        cipher ? this.cipherAuthorizationService.canDeleteCipher$(cipher, this.admin()) : of(false),
+        cipher
+          ? this.cipherAuthorizationService.canDeleteCipher$(
+              cipher,
+              this.admin(),
+              this.cipherAccountContext.explicitUserId(),
+            )
+          : of(false),
       ),
     ),
     { initialValue: false },
@@ -164,7 +182,8 @@ export class CipherAttachmentsComponent {
         return;
       }
 
-      this.activeUserId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+      this.activeUserId =
+        this.userId() ?? (await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId)));
       // Get the organization to check admin permissions
       this.organization.set(await this.getOrganization());
       this.cipherDomain = await this.getCipher(cipherId);

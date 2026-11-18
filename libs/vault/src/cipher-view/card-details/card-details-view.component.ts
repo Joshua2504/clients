@@ -1,7 +1,7 @@
 // FIXME: Update this file to be type safe and remove this and next line
 // @ts-strict-ignore
 import { CommonModule } from "@angular/common";
-import { Component, Input, OnChanges, SimpleChanges } from "@angular/core";
+import { Component, inject, Input, OnChanges, SimpleChanges } from "@angular/core";
 
 import { JslibModule } from "@bitwarden/angular/jslib.module";
 import { EventCollectionService, EventType } from "@bitwarden/common/dirt/event-logs";
@@ -15,6 +15,7 @@ import {
 } from "@bitwarden/components";
 
 import { CreditCardNumberPipe } from "../../pipes/credit-card-number.pipe";
+import { CipherAccountContext } from "../../services/cipher-account-context";
 import { ReadOnlyCipherCardComponent } from "../read-only-cipher-card/read-only-cipher-card.component";
 
 // FIXME(https://bitwarden.atlassian.net/browse/CL-764): Migrate to OnPush
@@ -34,6 +35,8 @@ import { ReadOnlyCipherCardComponent } from "../read-only-cipher-card/read-only-
   ],
 })
 export class CardDetailsComponent implements OnChanges {
+  private readonly cipherAccountContext = inject(CipherAccountContext);
+
   // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
   // eslint-disable-next-line @angular-eslint/prefer-signals
   @Input() cipher: CipherView;
@@ -77,6 +80,7 @@ export class CardDetailsComponent implements OnChanges {
         this.cipher.id,
         false,
         this.cipher.organizationId,
+        this.cipherAccountContext.explicitUserId(),
       );
     }
   }

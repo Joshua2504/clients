@@ -9,7 +9,7 @@ import { AccountService } from "../../auth/abstractions/account.service";
 import { getOptionalUserId, getUserId } from "../../auth/services/account.service";
 import { uuidAsString } from "../../platform/abstractions/sdk/sdk.service";
 import { getByIds } from "../../platform/misc";
-import { CipherId } from "../../types/guid";
+import { CipherId, UserId } from "../../types/guid";
 import { RevealedCipherService } from "../abstractions/revealed-cipher.service";
 import { CipherView } from "../models/view/cipher.view";
 import { CipherLike } from "../types/cipher-like";
@@ -24,12 +24,14 @@ export abstract class CipherAuthorizationService {
    *
    * @param {CipherLike} cipher - The cipher object to evaluate for deletion permissions.
    * @param {boolean} isAdminConsoleAction - Optional. A flag indicating if the action is being performed from the admin console.
+   * @param {UserId} userId - Optional. The account whose vault holds the cipher. Defaults to the active account.
    *
    * @returns {Observable<boolean>} - An observable that emits a boolean value indicating if the user can delete the cipher.
    */
   abstract canDeleteCipher$: (
     cipher: CipherLike,
     isAdminConsoleAction?: boolean,
+    userId?: UserId,
   ) => Observable<boolean>;
 
   /**
@@ -37,12 +39,14 @@ export abstract class CipherAuthorizationService {
    *
    * @param {CipherLike} cipher - The cipher object to evaluate for restore permissions.
    * @param {boolean} isAdminConsoleAction - Optional. A flag indicating if the action is being performed from the admin console.
+   * @param {UserId} userId - Optional. The account whose vault holds the cipher. Defaults to the active account.
    *
    * @returns {Observable<boolean>} - An observable that emits a boolean value indicating if the user can restore the cipher.
    */
   abstract canRestoreCipher$: (
     cipher: CipherLike,
     isAdminConsoleAction?: boolean,
+    userId?: UserId,
   ) => Observable<boolean>;
 
   /**
@@ -50,12 +54,14 @@ export abstract class CipherAuthorizationService {
    *
    * @param {CipherLike} cipher - The cipher object to evaluate for cloning permissions.
    * @param {boolean} isAdminConsoleAction - Optional. A flag indicating if the action is being performed from the admin console.
+   * @param {UserId} userId - Optional. The account whose vault holds the cipher. Defaults to the active account.
    *
    * @returns {Observable<boolean>} - An observable that emits a boolean value indicating if the user can clone the cipher.
    */
   abstract canCloneCipher$: (
     cipher: CipherLike,
     isAdminConsoleAction?: boolean,
+    userId?: UserId,
   ) => Observable<boolean>;
 
   /**
@@ -63,12 +69,14 @@ export abstract class CipherAuthorizationService {
    *
    * @param {CipherLike} cipher - The cipher object to evaluate for edit permissions.
    * @param {boolean} isAdminConsoleAction - Optional. A flag indicating if the action is being performed from the admin console.
+   * @param {UserId} userId - Optional. The account whose vault holds the cipher. Defaults to the active account.
    *
    * @returns {Observable<boolean>} - An observable that emits a boolean value indicating if the user can edit the cipher.
    */
   abstract canEditCipher$: (
     cipher: CipherLike,
     isAdminConsoleAction?: boolean,
+    userId?: UserId,
   ) => Observable<boolean>;
 }
 
@@ -83,10 +91,13 @@ export class DefaultCipherAuthorizationService implements CipherAuthorizationSer
     private revealedCipherService: RevealedCipherService,
   ) {}
 
-  /** The active user's live revealed view of `cipher`, if any. */
-  private revealed$ = (cipher: CipherLike): Observable<CipherView | undefined> =>
-    this.accountService.activeAccount$.pipe(
-      getOptionalUserId,
+  /** `userId` when given, else the active user, which must exist. */
+  private userId$ = (userId?: UserId): Observable<UserId> =>
+    userId != null ? of(userId) : this.accountService.activeAccount$.pipe(getUserId);
+
+  /** The live revealed view of `cipher` held by `userId`, or by the active user, if any. */
+  private revealed$ = (cipher: CipherLike, userId?: UserId): Observable<CipherView | undefined> =>
+    (userId != null ? of(userId) : this.accountService.activeAccount$.pipe(getOptionalUserId)).pipe(
       switchMap((userId) =>
         userId == null || cipher.id == null
           ? of(new Map<CipherId, CipherView>())
@@ -95,9 +106,8 @@ export class DefaultCipherAuthorizationService implements CipherAuthorizationSer
       map((revealed) => revealed.get(cipher.id as CipherId)),
     );
 
-  private organization$ = (cipher: CipherLike) =>
-    this.accountService.activeAccount$.pipe(
-      getUserId,
+  private organization$ = (cipher: CipherLike, userId?: UserId) =>
+    this.userId$(userId).pipe(
       switchMap((userId) => this.organizationService.organizations$(userId)),
       map((orgs) => orgs.find((org) => org.id === cipher.organizationId)),
     );
@@ -106,11 +116,15 @@ export class DefaultCipherAuthorizationService implements CipherAuthorizationSer
    *
    * {@link CipherAuthorizationService.canDeleteCipher$}
    */
-  canDeleteCipher$(cipher: CipherLike, isAdminConsoleAction?: boolean): Observable<boolean> {
-    return this.revealed$(cipher).pipe(
+  canDeleteCipher$(
+    cipher: CipherLike,
+    isAdminConsoleAction?: boolean,
+    userId?: UserId,
+  ): Observable<boolean> {
+    return this.revealed$(cipher, userId).pipe(
       switchMap((revealed) =>
         RestrictedCipherPolicy.allows(cipher, RestrictedCipherAction.Delete, revealed)
-          ? this.deletePermitted$(cipher, isAdminConsoleAction)
+          ? this.deletePermitted$(cipher, isAdminConsoleAction, userId)
           : of(false),
       ),
     );
@@ -119,8 +133,9 @@ export class DefaultCipherAuthorizationService implements CipherAuthorizationSer
   private deletePermitted$(
     cipher: CipherLike,
     isAdminConsoleAction?: boolean,
+    userId?: UserId,
   ): Observable<boolean> {
-    return this.organization$(cipher).pipe(
+    return this.organization$(cipher, userId).pipe(
       map((organization) => {
         if (isAdminConsoleAction) {
           // If the user is an admin, they can delete an unassigned cipher
@@ -142,11 +157,15 @@ export class DefaultCipherAuthorizationService implements CipherAuthorizationSer
    *
    * {@link CipherAuthorizationService.canRestoreCipher$}
    */
-  canRestoreCipher$(cipher: CipherLike, isAdminConsoleAction?: boolean): Observable<boolean> {
-    return this.revealed$(cipher).pipe(
+  canRestoreCipher$(
+    cipher: CipherLike,
+    isAdminConsoleAction?: boolean,
+    userId?: UserId,
+  ): Observable<boolean> {
+    return this.revealed$(cipher, userId).pipe(
       switchMap((revealed) =>
         RestrictedCipherPolicy.allows(cipher, RestrictedCipherAction.Restore, revealed)
-          ? this.restorePermitted$(cipher, isAdminConsoleAction)
+          ? this.restorePermitted$(cipher, isAdminConsoleAction, userId)
           : of(false),
       ),
     );
@@ -155,8 +174,9 @@ export class DefaultCipherAuthorizationService implements CipherAuthorizationSer
   private restorePermitted$(
     cipher: CipherLike,
     isAdminConsoleAction?: boolean,
+    userId?: UserId,
   ): Observable<boolean> {
-    return this.organization$(cipher).pipe(
+    return this.organization$(cipher, userId).pipe(
       map((organization) => {
         if (isAdminConsoleAction) {
           // If the user is an admin, they can restore an unassigned cipher
@@ -178,18 +198,26 @@ export class DefaultCipherAuthorizationService implements CipherAuthorizationSer
    *
    * {@link CipherAuthorizationService.canEditCipher$}
    */
-  canEditCipher$(cipher: CipherLike, isAdminConsoleAction: boolean = false): Observable<boolean> {
-    return this.revealed$(cipher).pipe(
+  canEditCipher$(
+    cipher: CipherLike,
+    isAdminConsoleAction: boolean = false,
+    userId?: UserId,
+  ): Observable<boolean> {
+    return this.revealed$(cipher, userId).pipe(
       switchMap((revealed) =>
         RestrictedCipherPolicy.allows(cipher, RestrictedCipherAction.Edit, revealed)
-          ? this.editPermitted$(cipher, isAdminConsoleAction)
+          ? this.editPermitted$(cipher, isAdminConsoleAction, userId)
           : of(false),
       ),
     );
   }
 
-  private editPermitted$(cipher: CipherLike, isAdminConsoleAction?: boolean): Observable<boolean> {
-    return this.organization$(cipher).pipe(
+  private editPermitted$(
+    cipher: CipherLike,
+    isAdminConsoleAction?: boolean,
+    userId?: UserId,
+  ): Observable<boolean> {
+    return this.organization$(cipher, userId).pipe(
       map((organization) => {
         if (isAdminConsoleAction) {
           // If the user is an admin, they can edit an unassigned cipher
@@ -210,25 +238,30 @@ export class DefaultCipherAuthorizationService implements CipherAuthorizationSer
   /**
    * {@link CipherAuthorizationService.canCloneCipher$}
    */
-  canCloneCipher$(cipher: CipherLike, isAdminConsoleAction?: boolean): Observable<boolean> {
-    return this.revealed$(cipher).pipe(
+  canCloneCipher$(
+    cipher: CipherLike,
+    isAdminConsoleAction?: boolean,
+    userId?: UserId,
+  ): Observable<boolean> {
+    return this.revealed$(cipher, userId).pipe(
       switchMap((revealed) =>
         RestrictedCipherPolicy.allows(cipher, RestrictedCipherAction.Clone, revealed)
-          ? this.clonePermitted$(cipher, isAdminConsoleAction)
+          ? this.clonePermitted$(cipher, isAdminConsoleAction, userId)
           : of(false),
       ),
     );
   }
 
-  private clonePermitted$(cipher: CipherLike, isAdminConsoleAction?: boolean): Observable<boolean> {
+  private clonePermitted$(
+    cipher: CipherLike,
+    isAdminConsoleAction?: boolean,
+    userId?: UserId,
+  ): Observable<boolean> {
     if (cipher.organizationId == null) {
       return of(true);
     }
 
-    return combineLatest([
-      this.organization$(cipher),
-      this.accountService.activeAccount$.pipe(getUserId),
-    ]).pipe(
+    return combineLatest([this.organization$(cipher, userId), this.userId$(userId)]).pipe(
       switchMap(([organization, userId]) => {
         // Admins and custom users can always clone when in the Admin Console
         if (

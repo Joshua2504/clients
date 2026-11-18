@@ -1,5 +1,6 @@
 import { mock } from "jest-mock-extended";
 
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherType } from "@bitwarden/common/vault/enums";
 
 import { BrowserApi } from "../../../platform/browser/browser-api";
@@ -14,9 +15,12 @@ import {
   openVaultItemPasswordRepromptPopout,
   VaultPopoutType,
   closeViewVaultItemPopout,
+  viewVaultItemPopoutKey,
 } from "./vault-popout-window";
 
 describe("VaultPopoutWindow", () => {
+  const userId = "f2c1e6a0-0000-4000-8000-000000000001" as UserId;
+
   const openPopoutSpy = jest
     .spyOn(BrowserPopupUtils, "openPopout")
     .mockResolvedValue(mock<chrome.windows.Window>({ id: 10 }));
@@ -59,6 +63,34 @@ describe("VaultPopoutWindow", () => {
         },
       );
     });
+
+    it("opens the popout for the account that owns the item", async () => {
+      const senderTab = { id: 1, windowId: 2 } as chrome.tabs.Tab;
+
+      await openViewVaultItemPopout(senderTab, {
+        cipherId: "cipherId",
+        action: "action",
+        userId,
+      });
+
+      expect(openPopoutSpy).toHaveBeenCalledWith(
+        `popup/index.html#/view-cipher?cipherId=cipherId&senderTabId=1&action=action&userId=${userId}`,
+        {
+          singleActionKey: `${VaultPopoutType.viewVaultItem}_${userId}_cipherId`,
+          senderWindowId: 2,
+          forceCloseExistingWindows: undefined,
+        },
+      );
+    });
+
+    it("keys the popouts of one item in two accounts apart", () => {
+      const activeKey = viewVaultItemPopoutKey("cipherId");
+      const accountKey = viewVaultItemPopoutKey("cipherId", userId);
+
+      expect(activeKey).toBe(`${VaultPopoutType.viewVaultItem}_cipherId`);
+      expect(accountKey.startsWith(activeKey)).toBe(false);
+      expect(activeKey.startsWith(accountKey)).toBe(false);
+    });
   });
 
   describe("closeViewVaultItemPopout", () => {
@@ -86,6 +118,27 @@ describe("VaultPopoutWindow", () => {
           forceCloseExistingWindows: true,
         },
       );
+    });
+
+    it("opens the re-prompt for the account that owns the item", async () => {
+      const senderTab = { id: 3, windowId: 1 } as chrome.tabs.Tab;
+      const tabSendMessageData = jest.spyOn(BrowserApi, "tabSendMessageData").mockResolvedValue();
+
+      await openVaultItemPasswordRepromptPopout(senderTab, {
+        cipherId: "cipherId",
+        action: "autofill",
+        userId,
+      });
+
+      expect(openPopoutSpy).toHaveBeenCalledWith(
+        `popup/index.html#/view-cipher?cipherId=cipherId&senderTabId=3&action=autofill&userId=${userId}`,
+        {
+          singleActionKey: `${VaultPopoutType.viewVaultItem}_${userId}_cipherId`,
+          senderWindowId: 1,
+          forceCloseExistingWindows: true,
+        },
+      );
+      expect(tabSendMessageData).toHaveBeenCalledWith(senderTab, "bgVaultItemRepromptPopoutOpened");
     });
   });
 
@@ -162,6 +215,90 @@ describe("VaultPopoutWindow", () => {
         data: { cipherId: undefined, cipherType: CipherType.Login },
       });
       expect(updateWindowSpy).toHaveBeenCalledWith(456, { focused: true });
+    });
+
+    it("opens a popout that adds an item to a given account", async () => {
+      await openAddEditVaultItemPopout(
+        mock<chrome.tabs.Tab>({ id: 2, windowId: 1, url: "https://jest-testing-website.com" }),
+        { cipherType: CipherType.Login, userId },
+      );
+
+      expect(openPopoutSpy).toHaveBeenCalledWith(
+        `popup/index.html#/edit-cipher?type=${CipherType.Login}&uri=https://jest-testing-website.com&senderTabId=2&userId=${userId}`,
+        {
+          singleActionKey: `${VaultPopoutType.addEditVaultItem}_${userId}_${CipherType.Login}`,
+          senderWindowId: 1,
+        },
+      );
+    });
+
+    it("opens a popout that edits an item of a given account", async () => {
+      await openAddEditVaultItemPopout(
+        mock<chrome.tabs.Tab>({ id: 2, windowId: 1, url: "https://jest-testing-website.com" }),
+        { cipherId: "cipherId", userId },
+      );
+
+      expect(openPopoutSpy).toHaveBeenCalledWith(
+        `popup/index.html#/edit-cipher?cipherId=cipherId&uri=https://jest-testing-website.com&senderTabId=2&userId=${userId}`,
+        {
+          singleActionKey: `${VaultPopoutType.addEditVaultItem}_${userId}_cipherId`,
+          senderWindowId: 1,
+        },
+      );
+    });
+
+    it("names the account in the refresh message and focuses that account's popout", async () => {
+      const popoutOf = (windowId: number, key: string, query: string) =>
+        ({
+          id: windowId,
+          windowId,
+          url: `chrome-extension://extension-id/popup/index.html?singleActionPopout=${key}#/edit-cipher?${query}`,
+        }) as chrome.tabs.Tab;
+      jest
+        .spyOn(BrowserApi, "tabsQuery")
+        .mockResolvedValue([
+          popoutOf(456, `${VaultPopoutType.addEditVaultItem}_${CipherType.Login}`, "type=1"),
+          popoutOf(
+            789,
+            `${VaultPopoutType.addEditVaultItem}_${userId}_${CipherType.Login}`,
+            `type=1&userId=${userId}`,
+          ),
+        ]);
+      const sendMessageSpy = jest.spyOn(chrome.runtime, "sendMessage");
+      const updateWindowSpy = jest.spyOn(BrowserApi, "updateWindowProperties");
+
+      await openAddEditVaultItemPopout(
+        mock<chrome.tabs.Tab>({ windowId: 1, url: "https://jest-testing-website.com" }),
+        { cipherType: CipherType.Login, userId },
+      );
+
+      expect(sendMessageSpy).toHaveBeenCalledWith({
+        command: "reloadAddEditCipherData",
+        data: { cipherId: undefined, cipherType: CipherType.Login, userId },
+      });
+      expect(updateWindowSpy).toHaveBeenCalledWith(789, { focused: true });
+      expect(openPopoutSpy).not.toHaveBeenCalled();
+    });
+
+    it("does not take another account's popout for the active account's", async () => {
+      jest.spyOn(BrowserApi, "tabsQuery").mockResolvedValue([
+        {
+          id: 789,
+          windowId: 789,
+          url: `chrome-extension://extension-id/popup/index.html?singleActionPopout=${VaultPopoutType.addEditVaultItem}_${userId}_${CipherType.Login}#/edit-cipher?type=1&userId=${userId}`,
+        } as chrome.tabs.Tab,
+      ]);
+      const updateWindowSpy = jest.spyOn(BrowserApi, "updateWindowProperties");
+
+      await openAddEditVaultItemPopout(
+        mock<chrome.tabs.Tab>({ id: 2, windowId: 1, url: "https://jest-testing-website.com" }),
+      );
+
+      expect(updateWindowSpy).not.toHaveBeenCalled();
+      expect(openPopoutSpy).toHaveBeenCalledWith(
+        "popup/index.html#/edit-cipher?uri=https://jest-testing-website.com&senderTabId=2",
+        { singleActionKey: VaultPopoutType.addEditVaultItem, senderWindowId: 1 },
+      );
     });
   });
 

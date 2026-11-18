@@ -15,6 +15,10 @@
     <app-pop-out slot="end" />
   </popup-header>
 
+  @if (itemAccount.accountHint(); as accountEmail) {
+    <app-item-account-hint slot="above-scroll-area" [email]="accountEmail" />
+  }
+
   @if (!loading) {
     <vault-cipher-form
       formId="cipherForm"
@@ -26,6 +30,7 @@
       <app-open-attachments
         slot="attachment-button"
         [cipherId]="originalCipherId"
+        [userId]="itemAccount.explicitUserId()"
       ></app-open-attachments>
     </vault-cipher-form>
   }

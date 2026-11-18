@@ -13,6 +13,7 @@ import {
 } from "@bitwarden/components";
 
 import { CopyCipherFieldDirective } from "../../components/copy-cipher-field.directive";
+import { CipherAccountContext } from "../../services/cipher-account-context";
 import { ReadOnlyCipherCardComponent } from "../read-only-cipher-card/read-only-cipher-card.component";
 
 @Component({
@@ -32,6 +33,8 @@ import { ReadOnlyCipherCardComponent } from "../read-only-cipher-card/read-only-
   ],
 })
 export class DriversLicenseViewComponent {
+  private readonly cipherAccountContext = inject(CipherAccountContext);
+
   private readonly eventCollectionService = inject(EventCollectionService);
   private readonly datePipe = inject(DatePipe);
 
@@ -62,6 +65,7 @@ export class DriversLicenseViewComponent {
         this.cipher().id,
         false,
         this.cipher().organizationId,
+        this.cipherAccountContext.explicitUserId(),
       );
     }
   }

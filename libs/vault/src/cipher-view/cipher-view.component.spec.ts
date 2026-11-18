@@ -3,7 +3,7 @@ import { ChangeDetectionStrategy, Component, input, NO_ERRORS_SCHEMA } from "@an
 import { ComponentFixture, TestBed, fakeAsync, tick } from "@angular/core/testing";
 import { By } from "@angular/platform-browser";
 import { mock } from "jest-mock-extended";
-import { BehaviorSubject } from "rxjs";
+import { BehaviorSubject, of } from "rxjs";
 
 // eslint-disable-next-line no-restricted-imports
 import { CollectionService } from "@bitwarden/admin-console/common";
@@ -14,6 +14,7 @@ import { BillingAccountProfileStateService } from "@bitwarden/common/billing/abs
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
 import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
 import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
+import { UserId } from "@bitwarden/common/types/guid";
 import { ChangeLoginPasswordService } from "@bitwarden/common/vault/abstractions/change-login-password.service";
 import { CipherRiskService } from "@bitwarden/common/vault/abstractions/cipher-risk.service";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
@@ -26,6 +27,7 @@ import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 import { LoginUriView } from "@bitwarden/common/vault/models/view/login-uri.view";
 import { TaskService } from "@bitwarden/common/vault/tasks";
 
+import { CipherAccountContext } from "../services/cipher-account-context";
 import { CIPHER_VIEW_BANNER } from "../tokens/cipher-view-banner.token";
 
 import { CipherViewComponent } from "./cipher-view.component";
@@ -591,6 +593,122 @@ describe("CipherViewComponent", () => {
       fixture.detectChanges();
 
       expect(component.showChangePasswordLink()).toBe(false);
+    }));
+  });
+
+  describe("userId input", () => {
+    const activeUserId = "test-user-id" as UserId;
+    const otherUserId = "other-user-id" as UserId;
+
+    const createCipher = (): CipherView => {
+      const cipher = new CipherView();
+      cipher.id = "cipher-id";
+      cipher.name = "Test Login";
+      cipher.type = CipherType.Login;
+      cipher.edit = true;
+      cipher.folderId = "folder-id";
+      cipher.collectionIds = ["collection-id"];
+      cipher.login = { password: "test-password", hasUris: true, uris: [{}] } as any;
+      return cipher;
+    };
+
+    const render = (userId?: UserId, cipher = createCipher()) => {
+      fixture = TestBed.createComponent(CipherViewComponent);
+      component = fixture.componentInstance;
+      fixture.componentRef.setInput("cipher", cipher);
+      if (userId !== undefined) {
+        fixture.componentRef.setInput("userId", userId);
+      }
+      fixture.detectChanges();
+      tick();
+      fixture.detectChanges();
+    };
+
+    beforeEach(() => {
+      mockCollectionService.decryptedCollections$ = jest.fn().mockReturnValue(of([]));
+      mockOrganizationService.organizations$ = jest.fn().mockReturnValue(of([]));
+      mockFolderService.getDecrypted$ = jest.fn().mockReturnValue(of(undefined));
+      mockCipherService.ciphers$ = jest.fn().mockReturnValue(of({}));
+      mockTaskService.pendingTasks$ = jest.fn().mockReturnValue(of([]));
+      mockVaultSettingsService.showAtRiskPasswordNotificationsFor$ = jest
+        .fn()
+        .mockReturnValue(of(true));
+      mockCipherRiskService.computeCipherRiskForUser = jest.fn().mockResolvedValue({
+        password_strength: 1,
+        exposed_result: { type: "NotFound" },
+        reuse_count: 1,
+      });
+    });
+
+    it("reads everything from the vault of the given account", fakeAsync(() => {
+      render(otherUserId);
+
+      expect(mockCollectionService.decryptedCollections$).toHaveBeenCalledWith(otherUserId);
+      expect(mockFolderService.getDecrypted$).toHaveBeenCalledWith("folder-id", otherUserId);
+      expect(mockBillingAccountProfileStateService.hasPremiumFromAnySource$).toHaveBeenCalledWith(
+        otherUserId,
+      );
+      expect(mockCipherRiskService.computeCipherRiskForUser).toHaveBeenCalledWith(
+        "cipher-id",
+        otherUserId,
+        true,
+      );
+      expect(mockVaultSettingsService.showAtRiskPasswordNotificationsFor$).toHaveBeenCalledWith(
+        otherUserId,
+      );
+    }));
+
+    it("reads the organization and tasks of the given account", fakeAsync(() => {
+      const cipher = createCipher();
+      cipher.organizationId = "org-id";
+
+      render(otherUserId, cipher);
+
+      expect(mockOrganizationService.organizations$).toHaveBeenCalledWith(otherUserId);
+      expect(mockCipherService.ciphers$).toHaveBeenCalledWith(otherUserId);
+      expect(mockTaskService.pendingTasks$).toHaveBeenCalledWith(otherUserId);
+    }));
+
+    it("never reads the active account's vault for a cipher of another account", fakeAsync(() => {
+      const cipher = createCipher();
+      cipher.organizationId = "org-id";
+
+      render(otherUserId, cipher);
+
+      for (const read of [
+        mockCollectionService.decryptedCollections$,
+        mockOrganizationService.organizations$,
+        mockCipherService.ciphers$,
+        mockTaskService.pendingTasks$,
+        mockBillingAccountProfileStateService.hasPremiumFromAnySource$,
+      ]) {
+        expect(read).not.toHaveBeenCalledWith(activeUserId);
+      }
+      expect(mockFolderService.getDecrypted$).not.toHaveBeenCalledWith("folder-id", activeUserId);
+    }));
+
+    it("hands the given account to the components it renders", fakeAsync(() => {
+      render(otherUserId);
+
+      const context = fixture.debugElement.injector.get(CipherAccountContext);
+      expect(context.explicitUserId()).toBe(otherUserId);
+      expect(TestBed.inject(CipherAccountContext).explicitUserId()).toBeUndefined();
+    }));
+
+    it("reads the active account's vault without a userId", fakeAsync(() => {
+      render();
+
+      expect(mockCollectionService.decryptedCollections$).toHaveBeenCalledWith(activeUserId);
+      expect(mockFolderService.getDecrypted$).toHaveBeenCalledWith("folder-id", activeUserId);
+      expect(mockCipherRiskService.computeCipherRiskForUser).toHaveBeenCalledWith(
+        "cipher-id",
+        activeUserId,
+        true,
+      );
+      expect(mockVaultSettingsService.showAtRiskPasswordNotificationsFor$).not.toHaveBeenCalled();
+      expect(fixture.debugElement.injector.get(CipherAccountContext).explicitUserId()).toBe(
+        undefined,
+      );
     }));
   });
 });

@@ -1,15 +1,13 @@
 // FIXME: Update this file to be type safe and remove this and next line
 // @ts-strict-ignore
 import { CommonModule } from "@angular/common";
-import { Component, Input } from "@angular/core";
+import { Component, inject, Input } from "@angular/core";
 import { takeUntilDestroyed } from "@angular/core/rxjs-interop";
 import { NEVER, switchMap } from "rxjs";
 
 import { JslibModule } from "@bitwarden/angular/jslib.module";
-import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { BillingAccountProfileStateService } from "@bitwarden/common/billing/abstractions";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
-import { StateProvider } from "@bitwarden/common/platform/state";
 import { EmergencyAccessId, OrganizationId } from "@bitwarden/common/types/guid";
 import { OrgKey } from "@bitwarden/common/types/key";
 import { AttachmentView } from "@bitwarden/common/vault/models/view/attachment.view";
@@ -24,6 +22,7 @@ import { KeyService } from "@bitwarden/key-management";
 
 import { DownloadAttachmentComponent } from "../../components/download-attachment/download-attachment.component";
 import { TruncatedFilenameComponent } from "../../components/truncated-filename";
+import { CipherAccountContext } from "../../services/cipher-account-context";
 
 // FIXME(https://bitwarden.atlassian.net/browse/CL-764): Migrate to OnPush
 // eslint-disable-next-line @angular-eslint/prefer-on-push-component-change-detection
@@ -58,11 +57,12 @@ export class AttachmentsV2ViewComponent {
   canAccessPremium: boolean;
   orgKey: OrgKey;
 
+  /** The account of the surrounding cipher view, which is the active account unless it names one. */
+  private readonly userId$ = inject(CipherAccountContext).userId$;
+
   constructor(
     private keyService: KeyService,
     private billingAccountProfileStateService: BillingAccountProfileStateService,
-    private stateProvider: StateProvider,
-    private accountService: AccountService,
     private i18nService: I18nService,
   ) {
     this.subscribeToHasPremiumCheck();
@@ -70,10 +70,12 @@ export class AttachmentsV2ViewComponent {
   }
 
   subscribeToHasPremiumCheck() {
-    this.accountService.activeAccount$
+    this.userId$
       .pipe(
-        switchMap((account) =>
-          this.billingAccountProfileStateService.hasPremiumFromAnySource$(account.id),
+        switchMap((userId) =>
+          userId != null
+            ? this.billingAccountProfileStateService.hasPremiumFromAnySource$(userId)
+            : NEVER,
         ),
         takeUntilDestroyed(),
       )
@@ -83,7 +85,7 @@ export class AttachmentsV2ViewComponent {
   }
 
   subscribeToOrgKey() {
-    this.stateProvider.activeUserId$
+    this.userId$
       .pipe(
         switchMap((userId) => (userId != null ? this.keyService.orgKeys$(userId) : NEVER)),
         takeUntilDestroyed(),

@@ -61,7 +61,7 @@ describe("AdditionalOptionsSectionComponent", () => {
 
     cipherFormProvider = mock<CipherFormContainer>({
       getInitialCipherView,
-      config: { mode: "edit", cipherType: CipherType.Login } as CipherFormConfig,
+      config: { mode: "edit", cipherType: CipherType.Login, userId: undefined } as CipherFormConfig,
     });
     cipherFormProvider.formStatusChange$ = formStatusChange$.asObservable();
     passwordRepromptService = mock<PasswordRepromptService>();

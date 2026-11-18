@@ -1,7 +1,17 @@
 import { CommonModule } from "@angular/common";
 import { Component, computed, inject, input, resource } from "@angular/core";
 import { toObservable, toSignal } from "@angular/core/rxjs-interop";
-import { combineLatest, of, switchMap, map, catchError, from, Observable, startWith } from "rxjs";
+import {
+  combineLatest,
+  of,
+  switchMap,
+  map,
+  catchError,
+  from,
+  Observable,
+  startWith,
+  shareReplay,
+} from "rxjs";
 
 // This import has been flagged as unallowed for this class. It may be involved in a circular dependency loop.
 // eslint-disable-next-line no-restricted-imports
@@ -9,8 +19,6 @@ import { CollectionService } from "@bitwarden/admin-console/common";
 import { JslibModule } from "@bitwarden/angular/jslib.module";
 import { OrganizationService } from "@bitwarden/common/admin-console/abstractions/organization/organization.service.abstraction";
 import { CollectionView } from "@bitwarden/common/admin-console/models/collections";
-import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
-import { getOptionalUserId } from "@bitwarden/common/auth/services/account.service";
 import { isCardExpired } from "@bitwarden/common/autofill/utils";
 import { BillingAccountProfileStateService } from "@bitwarden/common/billing/abstractions";
 import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
@@ -30,6 +38,7 @@ import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 import { SecurityTaskType, TaskService } from "@bitwarden/common/vault/tasks";
 import { CalloutModule, SearchModule, TypographyModule } from "@bitwarden/components";
 
+import { CipherAccountContext } from "../services/cipher-account-context";
 import { CIPHER_VIEW_BANNER, CipherViewBanner } from "../tokens/cipher-view-banner.token";
 
 import { AdditionalOptionsComponent } from "./additional-options/additional-options.component";
@@ -51,6 +60,7 @@ import { ViewIdentitySectionsComponent } from "./view-identity-sections/view-ide
 @Component({
   selector: "app-cipher-view",
   templateUrl: "cipher-view.component.html",
+  providers: [CipherAccountContext],
   imports: [
     CalloutModule,
     CommonModule,
@@ -104,7 +114,25 @@ export class CipherViewComponent {
    */
   readonly isAdminConsole = input<boolean>(false);
 
-  readonly activeUserId$ = getOptionalUserId(this.accountService.activeAccount$);
+  /**
+   * The account whose vault holds the cipher. Everything the view reads and does then belongs to
+   * that account: collections, organization, folder, premium, tasks, password risk, the
+   * re-prompt and TOTP of its copy buttons, attachments and collected events. Defaults to the
+   * active account.
+   */
+  readonly userId = input<UserId | undefined>(undefined);
+
+  private readonly cipherAccountContext = inject(CipherAccountContext, { self: true }).bind(
+    this.userId,
+  );
+
+  /**
+   * The account the view shows: {@link userId} when given, else the active account. Null when
+   * there is neither, as in an anonymous context.
+   */
+  readonly activeUserId$: Observable<UserId | null> = this.cipherAccountContext.userId$.pipe(
+    shareReplay({ bufferSize: 1, refCount: true }),
+  );
 
   /**
    * Optional input for manually specifying whether the user can be considered
@@ -130,7 +158,6 @@ export class CipherViewComponent {
     private organizationService: OrganizationService,
     private collectionService: CollectionService,
     private folderService: FolderService,
-    private accountService: AccountService,
     private defaultTaskService: TaskService,
     private platformUtilsService: PlatformUtilsService,
     private changeLoginPasswordService: ChangeLoginPasswordService,
@@ -341,7 +368,13 @@ export class CipherViewComponent {
   });
 
   readonly showAtRiskPasswordNotifications = toSignal(
-    this.vaultSettingsService.showAtRiskPasswordNotifications$,
+    toObservable(this.userId).pipe(
+      switchMap((userId) =>
+        userId == null
+          ? this.vaultSettingsService.showAtRiskPasswordNotifications$
+          : this.vaultSettingsService.showAtRiskPasswordNotificationsFor$(userId),
+      ),
+    ),
   );
 
   protected readonly changePasswordUrl = resource({

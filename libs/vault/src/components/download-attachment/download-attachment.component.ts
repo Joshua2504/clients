@@ -1,5 +1,5 @@
 import { CommonModule } from "@angular/common";
-import { ChangeDetectionStrategy, Component, computed, input } from "@angular/core";
+import { ChangeDetectionStrategy, Component, computed, inject, input } from "@angular/core";
 import { firstValueFrom } from "rxjs";
 
 import { JslibModule } from "@bitwarden/angular/jslib.module";
@@ -16,6 +16,8 @@ import {
   isCipherAdminGetAttachmentDownloadUrlError,
   isCipherGetAttachmentDownloadUrlError,
 } from "@bitwarden/sdk-internal";
+
+import { CipherAccountContext } from "../../services/cipher-account-context";
 
 type DownloadOptions = { asAdmin?: boolean; emergencyAccessId?: EmergencyAccessId };
 
@@ -41,6 +43,14 @@ export class DownloadAttachmentComponent {
   /** When owners/admins can manage all items and when accessing from the admin console, use the admin endpoint */
   readonly admin = input<boolean>(false);
 
+  /**
+   * The account whose vault holds the cipher. Defaults to the account of the surrounding
+   * {@link CipherAccountContext}, which is the active account unless a host named another one.
+   */
+  readonly userId = input<UserId | undefined>(undefined);
+
+  private readonly cipherAccountContext = inject(CipherAccountContext);
+
   constructor(
     private readonly i18nService: I18nService,
     private readonly fileDownloadService: FileDownloadService,
@@ -62,7 +72,10 @@ export class DownloadAttachmentComponent {
       return;
     }
 
-    const userId = await firstValueFrom(this.stateProvider.activeUserId$);
+    const userId =
+      this.userId() ??
+      this.cipherAccountContext.explicitUserId() ??
+      (await firstValueFrom(this.stateProvider.activeUserId$));
     if (!userId) {
       this.showErrorToast();
       return;

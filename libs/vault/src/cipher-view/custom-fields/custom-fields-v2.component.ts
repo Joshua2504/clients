@@ -1,5 +1,5 @@
 import { CommonModule } from "@angular/common";
-import { Component, Input, OnChanges, OnInit, SimpleChanges } from "@angular/core";
+import { Component, inject, Input, OnChanges, OnInit, SimpleChanges } from "@angular/core";
 
 import { JslibModule } from "@bitwarden/angular/jslib.module";
 import { EventCollectionService, EventType } from "@bitwarden/common/dirt/event-logs";
@@ -23,6 +23,7 @@ import {
 } from "@bitwarden/components";
 
 import { VaultAutosizeReadOnlyTextArea } from "../../directives/readonly-textarea.directive";
+import { CipherAccountContext } from "../../services/cipher-account-context";
 
 // FIXME(https://bitwarden.atlassian.net/browse/CL-764): Migrate to OnPush
 // eslint-disable-next-line @angular-eslint/prefer-on-push-component-change-detection
@@ -44,6 +45,8 @@ import { VaultAutosizeReadOnlyTextArea } from "../../directives/readonly-textare
   ],
 })
 export class CustomFieldV2Component implements OnInit, OnChanges {
+  private readonly cipherAccountContext = inject(CipherAccountContext);
+
   // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
   // eslint-disable-next-line @angular-eslint/prefer-signals
   @Input({ required: true }) cipher!: CipherView;
@@ -113,6 +116,7 @@ export class CustomFieldV2Component implements OnInit, OnChanges {
         this.cipher.id,
         false,
         this.cipher.organizationId,
+        this.cipherAccountContext.explicitUserId(),
       );
     }
   }
@@ -123,6 +127,7 @@ export class CustomFieldV2Component implements OnInit, OnChanges {
       this.cipher.id,
       false,
       this.cipher.organizationId,
+      this.cipherAccountContext.explicitUserId(),
     );
   }
 

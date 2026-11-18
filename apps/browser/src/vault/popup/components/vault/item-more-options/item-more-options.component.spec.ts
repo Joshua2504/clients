@@ -16,15 +16,18 @@ import {
 } from "@bitwarden/common/models/domain/domain-service";
 import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
-import { CipherId } from "@bitwarden/common/types/guid";
+import { CipherId, UserId } from "@bitwarden/common/types/guid";
 import { CipherArchiveService } from "@bitwarden/common/vault/abstractions/cipher-archive.service";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
 import { RevealedCipherService } from "@bitwarden/common/vault/abstractions/revealed-cipher.service";
-import { CipherType } from "@bitwarden/common/vault/enums";
+import { CipherRepromptType, CipherType } from "@bitwarden/common/vault/enums";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 import { CipherAuthorizationService } from "@bitwarden/common/vault/services/cipher-authorization.service";
 import { RestrictedItemTypesService } from "@bitwarden/common/vault/services/restricted-item-types.service";
-import { CipherViewLike } from "@bitwarden/common/vault/utils/cipher-view-like-utils";
+import {
+  CipherViewLike,
+  CipherViewLikeUtils,
+} from "@bitwarden/common/vault/utils/cipher-view-like-utils";
 import { RestrictedCipherAction } from "@bitwarden/common/vault/utils/restricted-cipher-policy";
 import { DialogService, ToastService } from "@bitwarden/components";
 import { ShareLinkService } from "@bitwarden/tools-share";
@@ -684,6 +687,129 @@ describe("ItemMoreOptionsComponent", () => {
       await expect(setup()).rejects.toThrow(
         'VAULT_ROW_ACTIONS action ID "edit" is already in use.',
       );
+    });
+  });
+
+  describe("for the account given as `userId`", () => {
+    const otherUserId = "OtherUserId" as UserId;
+    let navigate: jest.SpyInstance;
+
+    beforeEach(() => {
+      // Earlier tests leave the shared cipher protected and the re-prompt failing.
+      baseCipher.reprompt = CipherRepromptType.None;
+      passwordRepromptService.passwordRepromptCheck.mockResolvedValue(true);
+      dialogService.openSimpleDialog.mockResolvedValue(true);
+      domainSettingsService.getUrlEquivalentDomains.mockReturnValue(of(new Set<string>()));
+      component.userId = otherUserId;
+      navigate = jest.spyOn(TestBed.inject(Router), "navigate");
+      (passwordRepromptService as any).showPasswordPrompt = jest.fn().mockResolvedValue(true);
+      (autofillSvc as any).doAutofillForAccount = jest.fn().mockResolvedValue(true);
+      (domainSettingsService as any).resolvedDefaultUriMatchStrategyFor$ = jest
+        .fn()
+        .mockReturnValue(of(UriMatchStrategy.Domain));
+      cipherService.get.mockResolvedValue({ id: "cipher-1" });
+      cipherService.decrypt.mockResolvedValue({ ...baseCipher });
+    });
+
+    it("opens the view page for that account after its re-prompt", async () => {
+      await component.onView();
+
+      expect(passwordRepromptService.passwordRepromptCheck).toHaveBeenCalledWith(
+        baseCipher,
+        otherUserId,
+      );
+      expect(navigate).toHaveBeenCalledWith(["/view-cipher"], {
+        queryParams: { cipherId: "cipher-1", type: CipherType.Login, userId: otherUserId },
+      });
+    });
+
+    it("opens the edit page for that account", async () => {
+      component.cipher = { ...baseCipher, reprompt: CipherRepromptType.Password };
+
+      await component["edit"]();
+
+      expect((passwordRepromptService as any).showPasswordPrompt).toHaveBeenCalledWith(otherUserId);
+      expect(navigate).toHaveBeenCalledWith(["/edit-cipher"], {
+        queryParams: { cipherId: "cipher-1", type: CipherType.Login, userId: otherUserId },
+      });
+    });
+
+    it("opens the clone and assign collections pages for that account", async () => {
+      await component.clone();
+      await component.conditionallyNavigateToAssignCollections();
+
+      expect(navigate).toHaveBeenCalledWith(["/clone-cipher"], {
+        queryParams: expect.objectContaining({ cipherId: "cipher-1", userId: otherUserId }),
+      });
+      expect(navigate).toHaveBeenCalledWith(["/assign-collections"], {
+        queryParams: { cipherId: "cipher-1", userId: otherUserId },
+      });
+    });
+
+    it("toggles the favourite in that account's vault", async () => {
+      await component.toggleFavorite();
+
+      expect(cipherService.get).toHaveBeenCalledWith("cipher-1", otherUserId);
+      expect(cipherService.decrypt).toHaveBeenCalledWith({ id: "cipher-1" }, otherUserId);
+      expect(cipherService.updateWithServer).toHaveBeenCalledWith(
+        expect.objectContaining({ favorite: true }),
+        otherUserId,
+      );
+    });
+
+    it("deletes from that account's vault after its re-prompt", async () => {
+      await component["delete"]();
+
+      expect(passwordRepromptService.passwordRepromptCheck).toHaveBeenCalledWith(
+        baseCipher,
+        otherUserId,
+      );
+      expect(cipherService.softDeleteWithServer).toHaveBeenCalledWith("cipher-1", otherUserId);
+    });
+
+    it("archives in that account's vault", async () => {
+      const archiveWithServer = jest.fn().mockResolvedValue(undefined);
+      (TestBed.inject(CipherArchiveService) as any).archiveWithServer = archiveWithServer;
+
+      await component.archive();
+
+      expect(archiveWithServer).toHaveBeenCalledWith("cipher-1", otherUserId);
+    });
+
+    it("fills from that account's vault and does not offer to save the URL", async () => {
+      autofillSvc.currentAutofillTab$.next({ url: "https://page.example.com" });
+      const openSpy = mockConfirmDialogResult(AutofillConfirmationDialogResult.AutofilledOnly);
+      jest.spyOn(CipherViewLikeUtils, "matchesUri").mockReturnValue(false);
+
+      await component.doAutofill();
+
+      expect(cipherService.getFullCipherView).toHaveBeenCalledWith(baseCipher, otherUserId);
+      expect(
+        (domainSettingsService as any).resolvedDefaultUriMatchStrategyFor$,
+      ).toHaveBeenCalledWith(otherUserId);
+      // `doAutofillForAccount` asks for the re-prompt of that account itself.
+      expect(passwordRepromptService.passwordRepromptCheck).not.toHaveBeenCalled();
+      expect(domainSettingsService.getUrlEquivalentDomains).toHaveBeenCalledWith(
+        "https://page.example.com",
+        otherUserId,
+      );
+      expect(openSpy.mock.calls[0][1].data.viewOnly).toBe(true);
+      expect((autofillSvc as any).doAutofillForAccount).toHaveBeenCalledWith(
+        { userId: otherUserId, cipher: expect.objectContaining({ id: "cipher-1" }) },
+        true,
+      );
+      expect(autofillSvc.doAutofill).not.toHaveBeenCalled();
+      expect(autofillSvc.doAutofillAndSave).not.toHaveBeenCalled();
+    });
+
+    it("does not offer actions that can only act on the active account", async () => {
+      expect(component["otherAccount"]()).toBe(true);
+
+      component.userId = "UserId" as UserId;
+      expect(component["otherAccount"]()).toBe(false);
+
+      component.userId = undefined;
+      expect(component["otherAccount"]()).toBe(false);
     });
   });
 });

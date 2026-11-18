@@ -211,6 +211,7 @@ export class LoginDetailsSectionComponent implements OnInit {
       originalCipher.id,
       false,
       originalCipher.organizationId,
+      this.cipherFormContainer.config.userId,
     );
   };
 

@@ -86,6 +86,7 @@ describe("DriversLicenseViewComponent", () => {
         cipher.id,
         false,
         cipher.organizationId,
+        undefined,
       );
     });
 

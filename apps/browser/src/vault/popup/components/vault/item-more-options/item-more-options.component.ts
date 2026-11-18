@@ -23,12 +23,13 @@ import { getUserId } from "@bitwarden/common/auth/services/account.service";
 import { DomainSettingsService } from "@bitwarden/common/autofill/services/domain-settings.service";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
 import { uuidAsString } from "@bitwarden/common/platform/abstractions/sdk/sdk.service";
-import { CipherId } from "@bitwarden/common/types/guid";
+import { CipherId, UserId } from "@bitwarden/common/types/guid";
 import { CipherArchiveService } from "@bitwarden/common/vault/abstractions/cipher-archive.service";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
 import { PremiumUpgradePromptService } from "@bitwarden/common/vault/abstractions/premium-upgrade-prompt.service";
 import { RevealedCipherService } from "@bitwarden/common/vault/abstractions/revealed-cipher.service";
 import { CipherRepromptType, CipherType } from "@bitwarden/common/vault/enums";
+import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 import { CipherAuthorizationService } from "@bitwarden/common/vault/services/cipher-authorization.service";
 import { RestrictedItemTypesService } from "@bitwarden/common/vault/services/restricted-item-types.service";
 import {
@@ -56,6 +57,7 @@ import {
 } from "@bitwarden/vault";
 
 import { VaultPopupAutofillService } from "../../../services/vault-popup-autofill.service";
+import { itemAccountQueryParams } from "../../../services/vault-popup-item-account.service";
 import { AddEditQueryParams } from "../add-edit/add-edit.component";
 import {
   AutofillConfirmationDialogComponent,
@@ -113,6 +115,46 @@ export class ItemMoreOptionsComponent {
     return this._cipher$.value;
   }
 
+  private _userId$ = new BehaviorSubject<UserId | undefined>(undefined);
+
+  /**
+   * The account whose vault holds the cipher. Every action of the menu then runs for that
+   * account: permissions, premium, the master password re-prompt, favourite, archive, delete, and
+   * the pages it opens. Defaults to the active account.
+   */
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-signals
+  @Input()
+  set userId(userId: UserId | undefined) {
+    this._userId$.next(userId ?? undefined);
+  }
+
+  get userId(): UserId | undefined {
+    return this._userId$.value;
+  }
+
+  /** {@link userId} when given, else the active account. */
+  private readonly userId$: Observable<UserId> = this._userId$.pipe(
+    switchMap((userId) =>
+      userId != null ? of(userId) : this.accountService.activeAccount$.pipe(getUserId),
+    ),
+  );
+
+  /**
+   * True while {@link userId} names an account other than the active one. Actions that can only
+   * act on the active account are not offered then.
+   */
+  protected readonly otherAccount = toSignal(
+    this._userId$.pipe(
+      switchMap((userId) =>
+        userId == null
+          ? of(false)
+          : this.accountService.activeAccount$.pipe(map((account) => account?.id !== userId)),
+      ),
+    ),
+    { initialValue: false },
+  );
+
   /**
    * Flag to show the autofill menu option.
    * When true, the "Autofill" option appears in the menu.
@@ -139,7 +181,7 @@ export class ItemMoreOptionsComponent {
 
   /** The live revealed view of this row's restricted cipher, if any. */
   private readonly revealedView = toSignal(
-    combineLatest([this._cipher$, this.accountService.activeAccount$.pipe(getUserId)]).pipe(
+    combineLatest([this._cipher$, this.userId$]).pipe(
       switchMap(([cipher, userId]) =>
         cipher?.id == null
           ? of(undefined)
@@ -157,7 +199,13 @@ export class ItemMoreOptionsComponent {
    */
   protected canClone$ = combineLatest([
     this._cipher$,
-    this.restrictedItemTypesService.restricted$,
+    this._userId$.pipe(
+      switchMap((userId) =>
+        userId == null
+          ? this.restrictedItemTypesService.restricted$
+          : this.restrictedItemTypesService.restrictedFor$(userId),
+      ),
+    ),
   ]).pipe(
     filter(([c]) => c != null),
     switchMap(([c, restrictedTypes]) => {
@@ -166,15 +214,14 @@ export class ItemMoreOptionsComponent {
         (restrictType) => restrictType.cipherType === CipherViewLikeUtils.getType(c),
       );
       if (!isItemRestricted) {
-        return this.cipherAuthorizationService.canCloneCipher$(c);
+        return this.cipherAuthorizationService.canCloneCipher$(c, undefined, this.userId);
       }
       return new BehaviorSubject(false);
     }),
   );
 
   /** Observable Boolean dependent on the current user having access to an organization and editable collections */
-  protected canAssignCollections$ = this.accountService.activeAccount$.pipe(
-    getUserId,
+  protected canAssignCollections$ = this.userId$.pipe(
     switchMap((userId) => {
       return combineLatest([
         this.organizationService.hasOrganizations(userId),
@@ -188,13 +235,14 @@ export class ItemMoreOptionsComponent {
     }),
   );
 
-  protected canArchive$: Observable<boolean> = this.accountService.activeAccount$.pipe(
-    getUserId,
+  protected canArchive$: Observable<boolean> = this.userId$.pipe(
     switchMap((userId) => this.cipherArchiveService.userCanArchive$(userId)),
   );
 
-  protected canDelete$ = this._cipher$.pipe(
-    switchMap((cipher) => this.cipherAuthorizationService.canDeleteCipher$(cipher)),
+  protected canDelete$ = combineLatest([this._cipher$, this._userId$]).pipe(
+    switchMap(([cipher, userId]) =>
+      this.cipherAuthorizationService.canDeleteCipher$(cipher, undefined, userId),
+    ),
   );
 
   constructor(
@@ -269,20 +317,41 @@ export class ItemMoreOptionsComponent {
   }
 
   async doAutofillAndSave() {
-    const cipher = await this.cipherService.getFullCipherView(this.cipher);
+    const cipher = await this.cipherService.getFullCipherView(this.cipher, this.userId);
+    if (this.userId != null) {
+      // Saving the URL writes to the active account's vault, so another account's cipher is
+      // filled without it.
+      await this.fill(cipher);
+      return;
+    }
     await this.vaultPopupAutofillService.doAutofillAndSave(cipher);
   }
 
-  async doAutofill() {
-    const cipher = await this.cipherService.getFullCipherView(this.cipher);
+  /**
+   * Fills the cipher from the vault of {@link userId}. Without one it fills from the active
+   * account as it always has, the re-prompt having been answered by the caller.
+   */
+  private fill(cipher: CipherView): Promise<boolean> {
+    const userId = this.userId;
+    return userId == null
+      ? this.vaultPopupAutofillService.doAutofill(cipher, true, true)
+      : this.vaultPopupAutofillService.doAutofillForAccount({ userId, cipher }, true);
+  }
 
-    if (!(await this.passwordRepromptService.passwordRepromptCheck(this.cipher))) {
+  async doAutofill() {
+    const cipher = await this.cipherService.getFullCipherView(this.cipher, this.userId);
+
+    // `doAutofillForAccount` asks for the re-prompt of another account itself.
+    if (
+      this.userId == null &&
+      !(await this.passwordRepromptService.passwordRepromptCheck(this.cipher))
+    ) {
       return;
     }
 
     //for non login types that are still auto-fillable
     if (CipherViewLikeUtils.getType(cipher) !== CipherType.Login) {
-      await this.vaultPopupAutofillService.doAutofill(cipher, true, true);
+      await this.fill(cipher);
       return;
     }
 
@@ -300,7 +369,7 @@ export class ItemMoreOptionsComponent {
     }
 
     if (await this._domainMatched(currentTab.url)) {
-      await this.vaultPopupAutofillService.doAutofill(cipher, true, true);
+      await this.fill(cipher);
       return;
     }
 
@@ -312,7 +381,9 @@ export class ItemMoreOptionsComponent {
         viewOnly:
           !this.cipher.edit ||
           RestrictedCipherPolicy.isRestricted(this.cipher) ||
-          this.revealedView() != null,
+          this.revealedView() != null ||
+          // Adding the URL saves to the active account's vault.
+          this.userId != null,
       },
     });
 
@@ -322,7 +393,7 @@ export class ItemMoreOptionsComponent {
       case AutofillConfirmationDialogResult.Canceled:
         return;
       case AutofillConfirmationDialogResult.AutofilledOnly:
-        await this.vaultPopupAutofillService.doAutofill(cipher, true, true);
+        await this.fill(cipher);
         return;
       case AutofillConfirmationDialogResult.AutofillAndUrlAdded:
         await this.vaultPopupAutofillService.doAutofillAndSave(cipher, false, true);
@@ -331,23 +402,35 @@ export class ItemMoreOptionsComponent {
   }
 
   private async _domainMatched(url: string): Promise<boolean> {
+    const userId = this.userId;
     const equivalentDomains = await firstValueFrom(
-      this.domainSettingsService.getUrlEquivalentDomains(url),
+      userId == null
+        ? this.domainSettingsService.getUrlEquivalentDomains(url)
+        : this.domainSettingsService.getUrlEquivalentDomains(url, userId),
     );
     const defaultMatch = await firstValueFrom(
-      this.domainSettingsService.resolvedDefaultUriMatchStrategy$,
+      userId == null
+        ? this.domainSettingsService.resolvedDefaultUriMatchStrategy$
+        : this.domainSettingsService.resolvedDefaultUriMatchStrategyFor$(userId),
     );
 
     return CipherViewLikeUtils.matchesUri(this.cipher, url, equivalentDomains, defaultMatch);
   }
 
   async onView() {
-    const repromptPassed = await this.passwordRepromptService.passwordRepromptCheck(this.cipher);
+    const repromptPassed = await this.passwordRepromptService.passwordRepromptCheck(
+      this.cipher,
+      this.userId,
+    );
     if (!repromptPassed) {
       return;
     }
     await this.router.navigate(["/view-cipher"], {
-      queryParams: { cipherId: this.cipher.id, type: CipherViewLikeUtils.getType(this.cipher) },
+      queryParams: {
+        cipherId: this.cipher.id,
+        type: CipherViewLikeUtils.getType(this.cipher),
+        ...itemAccountQueryParams(this.userId),
+      },
     });
   }
 
@@ -355,7 +438,7 @@ export class ItemMoreOptionsComponent {
    * Toggles the favorite status of the cipher and updates it on the server.
    */
   async toggleFavorite() {
-    const activeUserId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+    const activeUserId = await firstValueFrom(this.userId$);
     // Change the stored copy, not the row: a revealed row is the shared revealed view.
     const stored = await this.cipherService.get(uuidAsString(this.cipher.id!), activeUserId);
     const cipher = await this.cipherService.decrypt(stored, activeUserId);
@@ -383,7 +466,7 @@ export class ItemMoreOptionsComponent {
   async clone() {
     if (
       this.cipher.reprompt === CipherRepromptType.Password &&
-      !(await this.passwordRepromptService.showPasswordPrompt())
+      !(await this.passwordRepromptService.showPasswordPrompt(this.userId))
     ) {
       return;
     }
@@ -405,33 +488,47 @@ export class ItemMoreOptionsComponent {
         clone: true.toString(),
         cipherId: this.cipher.id,
         type: CipherViewLikeUtils.getType(this.cipher).toString(),
+        ...itemAccountQueryParams(this.userId),
       } as AddEditQueryParams,
     });
   }
 
   /** Prompts for password when necessary then navigates to the assign collections route */
   async conditionallyNavigateToAssignCollections() {
-    if (this.cipher.reprompt && !(await this.passwordRepromptService.showPasswordPrompt())) {
+    if (
+      this.cipher.reprompt &&
+      !(await this.passwordRepromptService.showPasswordPrompt(this.userId))
+    ) {
       return;
     }
 
     await this.router.navigate(["/assign-collections"], {
-      queryParams: { cipherId: this.cipher.id },
+      queryParams: { cipherId: this.cipher.id, ...itemAccountQueryParams(this.userId) },
     });
   }
 
   protected async edit() {
-    if (this.cipher.reprompt && !(await this.passwordRepromptService.showPasswordPrompt())) {
+    if (
+      this.cipher.reprompt &&
+      !(await this.passwordRepromptService.showPasswordPrompt(this.userId))
+    ) {
       return;
     }
 
     await this.router.navigate(["/edit-cipher"], {
-      queryParams: { cipherId: this.cipher.id, type: CipherViewLikeUtils.getType(this.cipher) },
+      queryParams: {
+        cipherId: this.cipher.id,
+        type: CipherViewLikeUtils.getType(this.cipher),
+        ...itemAccountQueryParams(this.userId),
+      },
     });
   }
 
   protected async delete() {
-    const repromptPassed = await this.passwordRepromptService.passwordRepromptCheck(this.cipher);
+    const repromptPassed = await this.passwordRepromptService.passwordRepromptCheck(
+      this.cipher,
+      this.userId,
+    );
     if (!repromptPassed) {
       return;
     }
@@ -446,7 +543,7 @@ export class ItemMoreOptionsComponent {
       return;
     }
 
-    const activeUserId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+    const activeUserId = await firstValueFrom(this.userId$);
 
     await this.cipherService.softDeleteWithServer(this.cipher.id as CipherId, activeUserId);
 
@@ -457,7 +554,10 @@ export class ItemMoreOptionsComponent {
   }
 
   async archive() {
-    const repromptPassed = await this.passwordRepromptService.passwordRepromptCheck(this.cipher);
+    const repromptPassed = await this.passwordRepromptService.passwordRepromptCheck(
+      this.cipher,
+      this.userId,
+    );
     if (!repromptPassed) {
       return;
     }
@@ -473,7 +573,7 @@ export class ItemMoreOptionsComponent {
       return;
     }
 
-    const activeUserId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+    const activeUserId = await firstValueFrom(this.userId$);
     await this.cipherArchiveService.archiveWithServer(this.cipher.id as CipherId, activeUserId);
     this.toastService.showToast({
       variant: "success",

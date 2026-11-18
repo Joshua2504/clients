@@ -206,6 +206,7 @@ describe("LoginCredentialsViewComponent", () => {
           cipher.id,
           false,
           cipher.organizationId,
+          undefined,
         );
       });
     });

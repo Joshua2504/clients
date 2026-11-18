@@ -13,6 +13,7 @@ import {
 import { I18nPipe } from "@bitwarden/ui-common";
 
 import { CopyCipherFieldDirective } from "../../components/copy-cipher-field.directive";
+import { CipherAccountContext } from "../../services/cipher-account-context";
 import { ReadOnlyCipherCardComponent } from "../read-only-cipher-card/read-only-cipher-card.component";
 
 @Component({
@@ -30,6 +31,8 @@ import { ReadOnlyCipherCardComponent } from "../read-only-cipher-card/read-only-
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class PassportViewComponent {
+  private readonly cipherAccountContext = inject(CipherAccountContext);
+
   private readonly eventCollectionService = inject(EventCollectionService);
   private readonly datePipe = inject(DatePipe);
 
@@ -47,6 +50,7 @@ export class PassportViewComponent {
         this.cipher().id,
         false,
         this.cipher().organizationId,
+        this.cipherAccountContext.explicitUserId(),
       );
     }
   }
@@ -60,6 +64,7 @@ export class PassportViewComponent {
         this.cipher().id,
         false,
         this.cipher().organizationId,
+        this.cipherAccountContext.explicitUserId(),
       );
     }
   }

@@ -4,7 +4,7 @@ import { CommonModule } from "@angular/common";
 import { ChangeDetectorRef, Component, inject, Input, OnInit, ViewChild } from "@angular/core";
 import { takeUntilDestroyed, toSignal } from "@angular/core/rxjs-interop";
 import { FormBuilder, ReactiveFormsModule } from "@angular/forms";
-import { combineLatest, concatMap, filter, firstValueFrom, map, shareReplay } from "rxjs";
+import { combineLatest, concatMap, defer, filter, firstValueFrom, map, shareReplay } from "rxjs";
 
 import { JslibModule } from "@bitwarden/angular/jslib.module";
 import { AutofillSettingsServiceAbstraction } from "@bitwarden/common/autofill/services/autofill-settings.service";
@@ -61,9 +61,16 @@ export class AdditionalOptionsSectionComponent implements OnInit {
     httpAuthentication: this.httpAuthenticationService.httpAuthenticationControl,
   });
 
-  passwordRepromptEnabled$ = this.passwordRepromptService.enabled$.pipe(
-    shareReplay({ refCount: false, bufferSize: 1 }),
-  );
+  /** The account the form reads and writes when its config names one. */
+  private get userId() {
+    return this.cipherFormContainer.config?.userId;
+  }
+
+  passwordRepromptEnabled$ = defer(() =>
+    this.userId == null
+      ? this.passwordRepromptService.enabled$
+      : this.passwordRepromptService.enabled(this.userId),
+  ).pipe(shareReplay({ refCount: false, bufferSize: 1 }));
 
   /**
    * Emits true when the HTTP authentication setting is shown: for logins, while HTTP authentication is
@@ -71,15 +78,18 @@ export class AdditionalOptionsSectionComponent implements OnInit {
    * answer HTTP authentication challenges itself. The cipher-level controls are also gated behind a dev
    * flag until every cipher format saves the setting.
    */
-  private readonly showHTTPAuthenticationCipherSetting$ =
-    this.autofillSettingsService.httpAuthenticationAvailable$.pipe(
-      map(
-        (httpAuthenticationAvailable) =>
-          httpAuthenticationAvailable &&
-          devFlagEnabled("httpAuthenticationCipherControls") &&
-          this.cipherFormContainer.config.cipherType === CipherType.Login,
-      ),
-    );
+  private readonly showHTTPAuthenticationCipherSetting$ = defer(() =>
+    this.userId == null
+      ? this.autofillSettingsService.httpAuthenticationAvailable$
+      : this.autofillSettingsService.httpAuthenticationAvailableFor$(this.userId),
+  ).pipe(
+    map(
+      (httpAuthenticationAvailable) =>
+        httpAuthenticationAvailable &&
+        devFlagEnabled("httpAuthenticationCipherControls") &&
+        this.cipherFormContainer.config.cipherType === CipherType.Login,
+    ),
+  );
 
   /** True when the HTTP authentication setting is shown */
   protected readonly showHTTPAuthenticationCipherSetting = toSignal(

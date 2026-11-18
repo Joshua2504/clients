@@ -1,5 +1,6 @@
 // FIXME: Update this file to be type safe and remove this and next line
 // @ts-strict-ignore
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherType } from "@bitwarden/common/vault/enums";
 
 import { BrowserApi } from "../../../platform/browser/browser-api";
@@ -12,10 +13,33 @@ const VaultPopoutType = {
 } as const;
 
 /**
+ * The single action key of the popout that views a vault item.
+ *
+ * @param cipherId - The cipher the popout shows.
+ * @param userId - The account the popout was opened for, as given to
+ * {@link openViewVaultItemPopout}. A cipher id does not identify an account, so the popouts of
+ * one shared item in two accounts have different keys, and neither key starts with the other:
+ * popouts are found by the start of their key.
+ */
+function viewVaultItemPopoutKey(cipherId: string, userId?: UserId): string {
+  return userId
+    ? `${VaultPopoutType.viewVaultItem}_${userId}_${cipherId}`
+    : `${VaultPopoutType.viewVaultItem}_${cipherId}`;
+}
+
+/** The account a vault item popout was opened for, read from its URL. */
+function popoutAccount(url: string | undefined): string | undefined {
+  return url?.match(/[?&]userId=([^&#]*)/)?.[1] || undefined;
+}
+
+/**
  * Opens a popout window that facilitates viewing a vault item.
  *
  * @param senderTab - The tab that sent the request.
- * @param cipherOptions - The cipher id and action to perform.
+ * @param cipherOptions - The cipher id and action to perform. `userId` names the account whose
+ * vault holds the cipher: the popout then shows, re-prompts for and acts on that account without
+ * making it the active one. It must be an unlocked autofill account, or the popout closes.
+ * Without it the popout shows the active account's vault.
  */
 async function openViewVaultItemPopout(
   senderTab: chrome.tabs.Tab,
@@ -23,9 +47,10 @@ async function openViewVaultItemPopout(
     cipherId: string;
     action: string;
     forceCloseExistingWindows?: boolean;
+    userId?: UserId;
   },
 ) {
-  const { cipherId, action, forceCloseExistingWindows } = cipherOptions;
+  const { cipherId, action, forceCloseExistingWindows, userId } = cipherOptions;
   let promptWindowPath = "popup/index.html#/view-cipher";
   let queryParamToken = "?";
   const formatQueryString = (key: string, value: string) => {
@@ -43,9 +68,12 @@ async function openViewVaultItemPopout(
   if (action) {
     promptWindowPath += formatQueryString("action", action);
   }
+  if (userId) {
+    promptWindowPath += formatQueryString("userId", userId);
+  }
 
   await BrowserPopupUtils.openPopout(promptWindowPath, {
-    singleActionKey: `${VaultPopoutType.viewVaultItem}_${cipherId}`,
+    singleActionKey: viewVaultItemPopoutKey(cipherId, userId),
     senderWindowId: senderTab.windowId,
     forceCloseExistingWindows,
   });
@@ -66,13 +94,16 @@ async function closeViewVaultItemPopout(singleActionKey: string, delayClose = 0)
  * the password of a vault item.
  *
  * @param senderTab - The tab that sent the request.
- * @param cipherOptions - The cipher id and action to perform.
+ * @param cipherOptions - The cipher id and action to perform. `userId` names the account whose
+ * vault holds the cipher: the popout asks for that account's master password and performs the
+ * action for it, without making it the active account. Without it, the active account.
  */
 async function openVaultItemPasswordRepromptPopout(
   senderTab: chrome.tabs.Tab,
   cipherOptions: {
     cipherId: string;
     action: string;
+    userId?: UserId;
   },
 ) {
   await openViewVaultItemPopout(senderTab, {
@@ -86,15 +117,25 @@ async function openVaultItemPasswordRepromptPopout(
  * Opens a popout window that facilitates adding or editing a vault item.
  *
  * @param senderTab - The window id of the sender.
- * @param cipherOptions - Options passed as query params to the popout.
+ * @param cipherOptions - Options passed as query params to the popout. `userId` names the account
+ * whose vault the item is added to or edited in, without making it the active account. It must be
+ * an unlocked autofill account, or the popout closes. Without it, the active account.
  */
 async function openAddEditVaultItemPopout(
   senderTab: chrome.tabs.Tab,
-  cipherOptions: { cipherId?: string; cipherType?: CipherType; fillAfterSave?: boolean } = {},
+  cipherOptions: {
+    cipherId?: string;
+    cipherType?: CipherType;
+    fillAfterSave?: boolean;
+    userId?: UserId;
+  } = {},
 ) {
-  const { cipherId, cipherType, fillAfterSave } = cipherOptions;
+  const { cipherId, cipherType, fillAfterSave, userId } = cipherOptions;
   const { url, windowId } = senderTab;
-  let singleActionKey = VaultPopoutType.addEditVaultItem;
+  // A popout of another account is a different popout than the active account's.
+  let singleActionKey: string = userId
+    ? `${VaultPopoutType.addEditVaultItem}_${userId}`
+    : VaultPopoutType.addEditVaultItem;
   let addEditCipherUrl = "popup/index.html#/edit-cipher";
   let queryParamToken = "?";
   const formatQueryString = (key: string, value: string) => {
@@ -120,17 +161,23 @@ async function openAddEditVaultItemPopout(
   if (fillAfterSave) {
     addEditCipherUrl += formatQueryString("fillAfterSave", "true");
   }
+  if (userId) {
+    addEditCipherUrl += formatQueryString("userId", userId);
+  }
 
   const extensionUrl = chrome.runtime.getURL("popup/index.html");
   const existingPopupTabs = await BrowserApi.tabsQuery({ url: `${extensionUrl}*` });
-  const existingPopup = existingPopupTabs.find((tab) =>
-    tab.url?.includes(`singleActionPopout=${singleActionKey}`),
+  const existingPopup = existingPopupTabs.find(
+    (tab) =>
+      tab.url?.includes(`singleActionPopout=${singleActionKey}`) &&
+      // Popouts are found by the start of their key, which the plain key is for every popout.
+      popoutAccount(tab.url) === (userId || undefined),
   );
   // Check if the an existing popup is already open
   try {
     await chrome.runtime.sendMessage({
       command: "reloadAddEditCipherData",
-      data: { cipherId, cipherType },
+      data: { cipherId, cipherType, userId },
     });
     await BrowserApi.updateWindowProperties(existingPopup.windowId, {
       focused: true,
@@ -201,6 +248,7 @@ async function closeFido2Popout(sessionId: string): Promise<void> {
 
 export {
   VaultPopoutType,
+  viewVaultItemPopoutKey,
   openViewVaultItemPopout,
   closeViewVaultItemPopout,
   openVaultItemPasswordRepromptPopout,

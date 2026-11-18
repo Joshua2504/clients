@@ -387,6 +387,8 @@ export abstract class CipherService implements UserKeyRotationDataProvider<Ciphe
   /**
    * Decrypts the full `CipherView` for a given `CipherViewLike`.
    * When a `CipherView` instance is passed, it returns it as is.
+   * @param c The cipher, in either form.
+   * @param userId The account whose vault holds the cipher. Defaults to the active account.
    */
-  abstract getFullCipherView(c: CipherViewLike): Promise<CipherView>;
+  abstract getFullCipherView(c: CipherViewLike, userId?: UserId): Promise<CipherView>;
 }

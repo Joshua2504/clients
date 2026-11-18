@@ -1,12 +1,10 @@
 // FIXME: Update this file to be type safe and remove this and next line
 // @ts-strict-ignore
 import { CommonModule } from "@angular/common";
-import { Component, Input } from "@angular/core";
+import { Component, inject, Input } from "@angular/core";
 import { firstValueFrom } from "rxjs";
 
 import { JslibModule } from "@bitwarden/angular/jslib.module";
-import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
-import { getOptionalUserId } from "@bitwarden/common/auth/services/account.service";
 import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
 import { LoginUriView } from "@bitwarden/common/vault/models/view/login-uri.view";
@@ -17,6 +15,8 @@ import {
   SectionHeaderComponent,
   TypographyModule,
 } from "@bitwarden/components";
+
+import { CipherAccountContext } from "../../services/cipher-account-context";
 
 // FIXME(https://bitwarden.atlassian.net/browse/CL-764): Migrate to OnPush
 // eslint-disable-next-line @angular-eslint/prefer-on-push-component-change-detection
@@ -41,12 +41,12 @@ export class AutofillOptionsViewComponent {
   // eslint-disable-next-line @angular-eslint/prefer-signals
   @Input() cipherId: string;
 
-  readonly activeUserId$ = getOptionalUserId(this.accountService.activeAccount$);
+  /** The account of the surrounding cipher view, which is the active account unless it names one. */
+  readonly activeUserId$ = inject(CipherAccountContext).userId$;
 
   constructor(
     private platformUtilsService: PlatformUtilsService,
     private cipherService: CipherService,
-    private accountService: AccountService,
   ) {}
 
   async openWebsite(selectedUri: string) {

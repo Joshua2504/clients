@@ -9,8 +9,6 @@ import { firstValueFrom, map, Observable, switchMap } from "rxjs";
 
 import { JslibModule } from "@bitwarden/angular/jslib.module";
 import { BrowserPremiumUpgradePromptService } from "@bitwarden/browser/billing/popup/services/browser-premium-upgrade-prompt.service";
-import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
-import { getUserId } from "@bitwarden/common/auth/services/account.service";
 import { EventCollectionService, EventType } from "@bitwarden/common/dirt/event-logs";
 import { FeatureFlag } from "@bitwarden/common/enums/feature-flag.enum";
 import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
@@ -61,11 +59,13 @@ import { BrowserCipherFormGenerationService } from "../../../services/browser-ci
 import { BrowserTotpCaptureService } from "../../../services/browser-totp-capture.service";
 import { VaultPopupAfterDeletionNavigationService } from "../../../services/vault-popup-after-deletion-navigation.service";
 import { VaultPopupAutofillService } from "../../../services/vault-popup-autofill.service";
+import { VaultPopupItemAccount } from "../../../services/vault-popup-item-account.service";
 import {
   fido2PopoutSessionData$,
   Fido2SessionData,
 } from "../../../utils/fido2-popout-session-data";
 import { VaultPopoutType } from "../../../utils/vault-popout-window";
+import { ItemAccountHintComponent } from "../../item-account-hint/item-account-hint.component";
 import { OpenAttachmentsComponent } from "../attachments/open-attachments/open-attachments.component";
 
 /**
@@ -176,6 +176,7 @@ export type AddEditQueryParams = Partial<Record<keyof QueryParams, string>>;
     { provide: TotpCaptureService, useClass: BrowserTotpCaptureService },
     { provide: CipherFormGenerationService, useClass: BrowserCipherFormGenerationService },
     { provide: PremiumUpgradePromptService, useClass: BrowserPremiumUpgradePromptService },
+    VaultPopupItemAccount,
   ],
   imports: [
     CommonModule,
@@ -192,6 +193,7 @@ export type AddEditQueryParams = Partial<Record<keyof QueryParams, string>>;
     ChipActionComponent,
     PopOutComponent,
     IconButtonModule,
+    ItemAccountHintComponent,
   ],
 })
 export class AddEditComponent implements OnInit, OnDestroy {
@@ -219,7 +221,11 @@ export class AddEditComponent implements OnInit, OnDestroy {
   private fido2PopoutSessionData$ = fido2PopoutSessionData$();
   private fido2PopoutSessionData: Fido2SessionData;
 
-  protected userId$ = this.accountService.activeAccount$.pipe(getUserId);
+  /** The account the page operates on: the one the route names, else the active account. */
+  protected readonly itemAccount = inject(VaultPopupItemAccount);
+
+  /** The account whose vault the form reads and writes. Never emits once that account is gone. */
+  protected userId$: Observable<UserId> = this.itemAccount.userId$;
   private readonly revealedCipherService = inject(RevealedCipherService);
   protected userCanArchive$ = this.userId$.pipe(
     switchMap((userId) => this.archiveService.userCanArchive$(userId)),
@@ -251,7 +257,6 @@ export class AddEditComponent implements OnInit, OnDestroy {
     private toastService: ToastService,
     private dialogService: DialogService,
     protected cipherAuthorizationService: CipherAuthorizationService,
-    private accountService: AccountService,
     private archiveService: CipherArchiveService,
     private afterDeletionNavigationService: VaultPopupAfterDeletionNavigationService,
     private configService: ConfigService,
@@ -272,6 +277,11 @@ export class AddEditComponent implements OnInit, OnDestroy {
     // Listen for messages to reload cipher data when the pop up is already open
     this.messageListener = async (message: any) => {
       if (message?.command === "reloadAddEditCipherData") {
+        // The request is for the popout of one account. The cipher info it announces is that
+        // account's, so the popout of another account leaves it alone.
+        if ((message.data?.userId ?? undefined) !== this.itemAccount.explicitUserId()) {
+          return;
+        }
         try {
           await this.reloadCipherData();
         } catch (error) {
@@ -297,7 +307,10 @@ export class AddEditComponent implements OnInit, OnDestroy {
       return;
     }
 
-    const activeUserId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+    const activeUserId = await this.itemAccount.userId();
+    if (activeUserId == null) {
+      return;
+    }
 
     const latestCipherInfo = await firstValueFrom(
       this.cipherService.addEditCipherInfo$(activeUserId),
@@ -362,7 +375,10 @@ export class AddEditComponent implements OnInit, OnDestroy {
 
     if (this.inSingleActionPopout) {
       if (this.fillOnSuccessfulSave) {
-        await this.vaultPopupAutofillService.doAutofill(cipher, false, true);
+        const userId = this.itemAccount.explicitUserId();
+        await (userId == null
+          ? this.vaultPopupAutofillService.doAutofill(cipher, false, true)
+          : this.vaultPopupAutofillService.doAutofillForAccount({ userId, cipher }, false));
       }
       if (this.saveAndFillEnabled) {
         await this.showLoginSavedNotification(cipher);
@@ -379,8 +395,10 @@ export class AddEditComponent implements OnInit, OnDestroy {
       this.config.originalCipher != null &&
       RestrictedCipherPolicy.isRestricted(this.config.originalCipher)
     ) {
-      const userId = await firstValueFrom(this.userId$);
-      await this.revealedCipherService.refresh(userId, cipher.id as CipherId);
+      const userId = await this.itemAccount.userId();
+      if (userId != null) {
+        await this.revealedCipherService.refresh(userId, cipher.id as CipherId);
+      }
     }
 
     // When the cipher is in edit / partial edit, the previous page was the view-cipher page.
@@ -392,7 +410,7 @@ export class AddEditComponent implements OnInit, OnDestroy {
     } else {
       await this.router.navigate(["/view-cipher"], {
         replaceUrl: true,
-        queryParams: { cipherId: cipher.id },
+        queryParams: { cipherId: cipher.id, ...this.itemAccount.queryParams() },
       });
       // Clear popup history so after closing/reopening, Back won’t return to the add-edit form
       await this.popupRouterCacheService.setHistory([]);
@@ -409,7 +427,7 @@ export class AddEditComponent implements OnInit, OnDestroy {
     await BrowserApi.sendMessage("showLoginSavedNotification", {
       // The account the cipher was just saved to, so "View" in the confirmation opens it there
       // even when the active account changes before it is clicked.
-      userId: await firstValueFrom(this.userId$),
+      userId: (await this.itemAccount.userId()) ?? undefined,
       cipherId: cipher.id,
       itemName: cipher.name,
       senderTabId: senderTab.id,
@@ -440,18 +458,24 @@ export class AddEditComponent implements OnInit, OnDestroy {
 
           this.saveAndFillEnabled = params.fillAfterSave;
 
+          const activeUserId = await this.itemAccount.userId();
+          if (activeUserId == null) {
+            // The named account does not serve. The page is being left and shows no form.
+            return null;
+          }
+          const explicitUserId = this.itemAccount.explicitUserId();
+
           const config = await this.addEditFormConfigService.buildConfig(
             mode,
             params.cipherId,
             params.type,
+            explicitUserId,
           );
 
           if (config.mode === "edit" && !config.originalCipher.edit) {
             config.mode = "partial-edit";
           }
           config.initialValues = await this.setInitialValuesFromParams(params);
-
-          const activeUserId = await firstValueFrom(this.userId$);
 
           // The browser notification bar and overlay use addEditCipherInfo$ to pass modified cipher details to the form
           // Attempt to fetch them here and overwrite the initialValues if present
@@ -472,6 +496,8 @@ export class AddEditComponent implements OnInit, OnDestroy {
           if (["edit", "partial-edit"].includes(config.mode) && config.originalCipher?.id) {
             this.canDeleteCipher$ = this.cipherAuthorizationService.canDeleteCipher$(
               config.originalCipher,
+              undefined,
+              explicitUserId,
             );
 
             await this.eventCollectionService.collect(
@@ -479,6 +505,7 @@ export class AddEditComponent implements OnInit, OnDestroy {
               config.originalCipher.id,
               false,
               config.originalCipher.organizationId,
+              explicitUserId,
             );
           }
 
@@ -493,6 +520,9 @@ export class AddEditComponent implements OnInit, OnDestroy {
         }),
       )
       .subscribe((config) => {
+        if (config == null) {
+          return;
+        }
         this.config = config;
         this.headerText = this.setHeader(config.mode, config.cipherType);
       });
@@ -572,7 +602,10 @@ export class AddEditComponent implements OnInit, OnDestroy {
     }
 
     try {
-      const activeUserId = await firstValueFrom(this.userId$);
+      const activeUserId = await this.itemAccount.userId();
+      if (activeUserId == null) {
+        return false;
+      }
       await this.deleteCipher(activeUserId);
     } catch (e) {
       this.logService.error(e);

@@ -12,6 +12,7 @@ import { firstValueFrom } from "rxjs";
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { getUserId } from "@bitwarden/common/auth/services/account.service";
 import { uuidAsString } from "@bitwarden/common/platform/abstractions/sdk/sdk.service";
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 import {
@@ -20,6 +21,7 @@ import {
 } from "@bitwarden/common/vault/utils/cipher-view-like-utils";
 import { MenuItemComponent, BitIconButtonComponent } from "@bitwarden/components";
 
+import { CipherAccountContext } from "../services/cipher-account-context";
 import { CopyAction, CopyCipherFieldService } from "../services/copy-cipher-field.service";
 
 /**
@@ -33,6 +35,13 @@ import { CopyAction, CopyCipherFieldService } from "../services/copy-cipher-fiel
  * @example
  * ```html
  * <button appCopyField="username" [cipher]="cipher">Copy Username</button>
+ * ```
+ *
+ * The cipher is taken to be in the vault of the account given as `userId`, else of the account of
+ * the surrounding {@link CipherAccountContext}, else of the active account.
+ * @example
+ * ```html
+ * <button appCopyField="username" [cipher]="cipher" [userId]="userId">Copy Username</button>
  * ```
  */
 @Directive({
@@ -53,6 +62,17 @@ export class CopyCipherFieldDirective implements OnChanges {
   cipher!: CipherViewLike;
 
   /**
+   * The account whose vault holds {@link cipher}. Its master password answers the re-prompt, its
+   * premium status decides on TOTP, and the event is collected for it. Defaults to the account of
+   * the surrounding {@link CipherAccountContext}, which is the active account unless a host named
+   * another one.
+   */
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-signals
+  @Input()
+  userId?: UserId;
+
+  /**
    * Externally-forced disabled state, e.g. while the containing list is refreshing. This is
    * combined with the field-availability check so the directive remains the sole writer of the
    * host and icon-button disabled state. Binding `[disabled]` directly on the same element would
@@ -70,6 +90,7 @@ export class CopyCipherFieldDirective implements OnChanges {
     private cipherService: CipherService,
     @Optional() private menuItemComponent?: MenuItemComponent,
     @Optional() private iconButtonComponent?: BitIconButtonComponent,
+    @Optional() private cipherAccountContext?: CipherAccountContext,
   ) {}
 
   @HostBinding("attr.disabled")
@@ -92,7 +113,18 @@ export class CopyCipherFieldDirective implements OnChanges {
       return;
     }
     const value = await this.getValueToCopy();
-    await this.copyCipherFieldService.copy(value ?? "", this.action, this.cipher);
+    await this.copyCipherFieldService.copy(
+      value ?? "",
+      this.action,
+      this.cipher,
+      false,
+      this.explicitUserId(),
+    );
+  }
+
+  /** The account named for the cipher, undefined when it is the active account's by default. */
+  private explicitUserId(): UserId | undefined {
+    return this.userId ?? this.cipherAccountContext?.explicitUserId();
   }
 
   async ngOnChanges() {
@@ -103,7 +135,8 @@ export class CopyCipherFieldDirective implements OnChanges {
     const unavailable =
       !this.cipher ||
       !this.hasValueToCopy() ||
-      (this.action === "totp" && !(await this.copyCipherFieldService.totpAllowed(this.cipher)));
+      (this.action === "totp" &&
+        !(await this.copyCipherFieldService.totpAllowed(this.cipher, this.explicitUserId())));
 
     this.hostDisabled = this.disabled || unavailable ? true : null;
 
@@ -129,14 +162,11 @@ export class CopyCipherFieldDirective implements OnChanges {
 
     if (CipherViewLikeUtils.isCipherListView(this.cipher)) {
       // When the cipher is of type `CipherListView`, the full cipher needs to be decrypted
-      const activeAccountId = await firstValueFrom(
-        this.accountService.activeAccount$.pipe(getUserId),
-      );
-      const encryptedCipher = await this.cipherService.get(
-        uuidAsString(this.cipher.id!),
-        activeAccountId,
-      );
-      _cipher = await this.cipherService.decrypt(encryptedCipher, activeAccountId);
+      const userId =
+        this.explicitUserId() ??
+        (await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId)));
+      const encryptedCipher = await this.cipherService.get(uuidAsString(this.cipher.id!), userId);
+      _cipher = await this.cipherService.decrypt(encryptedCipher, userId);
     } else {
       _cipher = this.cipher;
     }

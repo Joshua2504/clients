@@ -9,6 +9,10 @@
     </ng-container>
   </popup-header>
 
+  @if (itemAccount.accountHint(); as accountEmail) {
+    <app-item-account-hint slot="above-scroll-area" [email]="accountEmail" />
+  }
+
   <bit-card>
     @if (params) {
       <assign-collections

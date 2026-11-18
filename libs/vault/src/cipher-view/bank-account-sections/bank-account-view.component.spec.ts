@@ -88,6 +88,7 @@ describe("BankAccountViewComponent", () => {
         "test-id",
         false,
         "org-id",
+        undefined,
       );
     });
 
@@ -115,6 +116,7 @@ describe("BankAccountViewComponent", () => {
         "test-id",
         false,
         "org-id",
+        undefined,
       );
     });
 

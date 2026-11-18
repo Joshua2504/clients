@@ -16,7 +16,7 @@ import {
 } from "@angular/core";
 import { takeUntilDestroyed } from "@angular/core/rxjs-interop";
 import { FormBuilder, FormGroup, ReactiveFormsModule } from "@angular/forms";
-import { BehaviorSubject, firstValueFrom, Subject, switchMap } from "rxjs";
+import { BehaviorSubject, firstValueFrom, of, Subject, switchMap } from "rxjs";
 
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { getUserId } from "@bitwarden/common/auth/services/account.service";
@@ -281,11 +281,13 @@ export class CipherFormComponent implements AfterViewInit, OnInit, OnChanges, Ci
 
       this.originalCipherView = await this.addEditFormService.decryptCipher(
         this.config.originalCipher,
+        this.config.userId,
       );
 
       // decryptCipher again to ensure we have a separate instance of CipherView
       this.updatedCipherView = await this.addEditFormService.decryptCipher(
         this.config.originalCipher,
+        this.config.userId,
       );
 
       if (this.config.mode === "clone") {
@@ -409,10 +411,10 @@ export class CipherFormComponent implements AfterViewInit, OnInit, OnChanges, Ci
     }
 
     const userCanArchive = await firstValueFrom(
-      this.accountService.activeAccount$.pipe(
-        getUserId,
-        switchMap((userId) => this.cipherArchiveService.userCanArchive$(userId)),
-      ),
+      (this.config.userId != null
+        ? of(this.config.userId)
+        : this.accountService.activeAccount$.pipe(getUserId)
+      ).pipe(switchMap((userId) => this.cipherArchiveService.userCanArchive$(userId))),
     );
 
     // If the item is archived but user has lost archive permissions, unarchive the item.

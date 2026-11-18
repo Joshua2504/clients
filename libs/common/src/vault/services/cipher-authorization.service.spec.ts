@@ -447,4 +447,75 @@ describe("CipherAuthorizationService", () => {
       });
     });
   });
+
+  describe("for a given account", () => {
+    const otherUserId = Utils.newGuid() as UserId;
+
+    /** Only `otherUserId` belongs to the organization, where it may edit every cipher. */
+    const onlyOtherAccountIsAdmin = () =>
+      mockOrganizationService.organizations$.mockImplementation(
+        (userId) =>
+          of(
+            userId === otherUserId ? [createMockOrganization({ canEditAllCiphers: true })] : [],
+          ) as Observable<Organization[]>,
+      );
+
+    it("checks delete, restore and edit against that account's organizations", async () => {
+      onlyOtherAccountIsAdmin();
+      const cipher = createMockCipher("org1", ["col1"], false) as CipherView;
+
+      for (const can$ of [
+        cipherAuthorizationService.canDeleteCipher$,
+        cipherAuthorizationService.canRestoreCipher$,
+        cipherAuthorizationService.canEditCipher$,
+      ]) {
+        await expect(
+          firstValueFrom(can$.call(cipherAuthorizationService, cipher, true, otherUserId)),
+        ).resolves.toBe(true);
+        await expect(
+          firstValueFrom(can$.call(cipherAuthorizationService, cipher, true)),
+        ).resolves.toBe(false);
+      }
+
+      expect(mockOrganizationService.organizations$).toHaveBeenCalledWith(otherUserId);
+    });
+
+    it("checks clone against that account's collections", async () => {
+      mockOrganizationService.organizations$.mockReturnValue(of([]) as Observable<Organization[]>);
+      mockCollectionService.decryptedCollections$.mockImplementation(
+        (userId) =>
+          of([createMockCollection("col1", userId === otherUserId)]) as Observable<
+            CollectionView[]
+          >,
+      );
+      const cipher = createMockCipher("org1", ["col1"]) as CipherView;
+
+      await expect(
+        firstValueFrom(cipherAuthorizationService.canCloneCipher$(cipher, false, otherUserId)),
+      ).resolves.toBe(true);
+      await expect(
+        firstValueFrom(cipherAuthorizationService.canCloneCipher$(cipher, false)),
+      ).resolves.toBe(false);
+    });
+
+    it("reads that account's revealed view of a restricted cipher", async () => {
+      mockOrganizationService.organizations$.mockReturnValue(of([]) as Observable<Organization[]>);
+      const cipher = { ...createMockCipher(null, []), id: "cipher-1" } as CipherView;
+
+      await firstValueFrom(cipherAuthorizationService.canDeleteCipher$(cipher, false, otherUserId));
+
+      expect(mockRevealedCipherService.revealed$).toHaveBeenCalledWith(otherUserId);
+      expect(mockRevealedCipherService.revealed$).not.toHaveBeenCalledWith(mockUserId);
+    });
+
+    it("does not need an active account", async () => {
+      mockAccountService.activeAccountSubject.next(null);
+      onlyOtherAccountIsAdmin();
+      const cipher = createMockCipher("org1", ["col1"], false) as CipherView;
+
+      await expect(
+        firstValueFrom(cipherAuthorizationService.canDeleteCipher$(cipher, true, otherUserId)),
+      ).resolves.toBe(true);
+    });
+  });
 });

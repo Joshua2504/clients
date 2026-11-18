@@ -1,7 +1,7 @@
 // FIXME: Update this file to be type safe and remove this and next line
 // @ts-strict-ignore
 import { CommonModule, Location } from "@angular/common";
-import { Component } from "@angular/core";
+import { Component, inject } from "@angular/core";
 import { takeUntilDestroyed } from "@angular/core/rxjs-interop";
 import { ReactiveFormsModule } from "@angular/forms";
 import { ActivatedRoute } from "@angular/router";
@@ -9,8 +9,6 @@ import { Observable, combineLatest, filter, first, switchMap } from "rxjs";
 
 import { CollectionService } from "@bitwarden/admin-console/common";
 import { JslibModule } from "@bitwarden/angular/jslib.module";
-import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
-import { getUserId } from "@bitwarden/common/auth/services/account.service";
 import { CipherId, OrganizationId } from "@bitwarden/common/types/guid";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
@@ -31,6 +29,8 @@ import { PopOutComponent } from "../../../../../platform/popup/components/pop-ou
 import { PopupFooterComponent } from "../../../../../platform/popup/layout/popup-footer.component";
 import { PopupHeaderComponent } from "../../../../../platform/popup/layout/popup-header.component";
 import { PopupPageComponent } from "../../../../../platform/popup/layout/popup-page.component";
+import { VaultPopupItemAccount } from "../../../services/vault-popup-item-account.service";
+import { ItemAccountHintComponent } from "../../item-account-hint/item-account-hint.component";
 
 // FIXME(https://bitwarden.atlassian.net/browse/CL-764): Migrate to OnPush
 // eslint-disable-next-line @angular-eslint/prefer-on-push-component-change-detection
@@ -52,7 +52,9 @@ import { PopupPageComponent } from "../../../../../platform/popup/layout/popup-p
     PopupFooterComponent,
     PopOutComponent,
     Vfo1I18nPipe,
+    ItemAccountHintComponent,
   ],
+  providers: [VaultPopupItemAccount],
 })
 // FIXME(https://bitwarden.atlassian.net/browse/PM-28231): Use Component suffix
 // eslint-disable-next-line @angular-eslint/component-class-suffix
@@ -62,14 +64,16 @@ export class AssignCollections {
 
   protected submitButtonText: string;
 
+  /** The account the page operates on: the one the route names, else the active account. */
+  protected readonly itemAccount = inject(VaultPopupItemAccount);
+
   constructor(
     private location: Location,
     private collectionService: CollectionService,
     private cipherService: CipherService,
-    private accountService: AccountService,
     route: ActivatedRoute,
   ) {
-    const userId$ = this.accountService.activeAccount$.pipe(getUserId);
+    const userId$ = this.itemAccount.userId$;
 
     const cipher$: Observable<CipherView> = userId$.pipe(
       switchMap((userId) =>
@@ -102,6 +106,7 @@ export class AssignCollections {
           ciphers: [cipherView],
           organizationId,
           availableCollections,
+          userId: this.itemAccount.explicitUserId(),
         };
       });
   }

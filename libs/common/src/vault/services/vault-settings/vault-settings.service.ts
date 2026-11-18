@@ -1,6 +1,7 @@
 import { Observable, combineLatest, map } from "rxjs";
 
 import { ActiveUserState, GlobalState, StateProvider } from "../../../platform/state";
+import { UserId } from "../../../types/guid";
 import { VaultSettingsService as VaultSettingsServiceAbstraction } from "../../abstractions/vault-settings/vault-settings.service";
 import { CipherType } from "../../enums";
 import {
@@ -56,6 +57,15 @@ export class VaultSettingsService implements VaultSettingsServiceAbstraction {
    */
   readonly showAtRiskPasswordNotifications$: Observable<boolean> =
     this.showAtRiskPasswordNotificationsState.state$.pipe(map((x) => x ?? true));
+
+  /**
+   * {@link VaultSettingsServiceAbstraction.showAtRiskPasswordNotificationsFor$}
+   */
+  showAtRiskPasswordNotificationsFor$(userId: UserId): Observable<boolean> {
+    return this.stateProvider
+      .getUser(userId, SHOW_AT_RISK_PASSWORD_NOTIFICATIONS)
+      .state$.pipe(map((x) => x ?? true));
+  }
 
   constructor(
     private stateProvider: StateProvider,

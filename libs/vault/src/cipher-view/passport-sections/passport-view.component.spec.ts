@@ -142,6 +142,7 @@ describe("PassportViewComponent", () => {
         "test-id",
         false,
         "org-id",
+        undefined,
       );
     });
 

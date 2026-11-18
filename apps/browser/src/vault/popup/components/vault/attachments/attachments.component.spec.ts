@@ -8,6 +8,7 @@ import { BehaviorSubject } from "rxjs";
 import { ApiService } from "@bitwarden/common/abstractions/api.service";
 import { OrganizationService } from "@bitwarden/common/admin-console/abstractions/organization/organization.service.abstraction";
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
 import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
@@ -23,6 +24,7 @@ import { CipherAttachmentsComponent } from "@bitwarden/vault";
 import { PopupFooterComponent } from "../../../../../platform/popup/layout/popup-footer.component";
 import { PopupHeaderComponent } from "../../../../../platform/popup/layout/popup-header.component";
 import { PopupRouterCacheService } from "../../../../../platform/popup/view-cache/popup-router-cache.service";
+import { PopupCloseWarningService } from "../../../../../popup/services/popup-close-warning.service";
 
 import { AttachmentsComponent } from "./attachments.component";
 
@@ -70,6 +72,8 @@ describe("AttachmentsComponent", () => {
         { provide: PopupRouterCacheService, useValue: { back } },
         { provide: I18nService, useValue: { t: (key: string) => key } },
         { provide: Router, useValue: { navigate } },
+        { provide: AutofillAccountsService, useValue: mock<AutofillAccountsService>() },
+        { provide: PopupCloseWarningService, useValue: mock<PopupCloseWarningService>() },
         {
           provide: ActivatedRoute,
           useValue: {

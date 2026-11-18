@@ -124,7 +124,10 @@ describe("ArchiveCipherUtilitiesService", () => {
     it("calls password reprompt check when unarchiving", async () => {
       await service.unarchiveCipher(mockCipher);
 
-      expect(passwordRepromptService.passwordRepromptCheck).toHaveBeenCalledWith(mockCipher);
+      expect(passwordRepromptService.passwordRepromptCheck).toHaveBeenCalledWith(
+        mockCipher,
+        undefined,
+      );
     });
 
     it("returns early when password reprompt fails on unarchive", async () => {

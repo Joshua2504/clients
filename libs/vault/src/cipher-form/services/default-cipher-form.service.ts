@@ -31,8 +31,9 @@ export class DefaultCipherFormService implements CipherFormService {
   private revealedCipherService: RevealedCipherService = inject(RevealedCipherService);
 
   /** A restricted cipher resolves to a copy of its revealed view, since the form mutates it. */
-  async decryptCipher(cipher: Cipher): Promise<CipherView> {
-    const activeUserId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+  async decryptCipher(cipher: Cipher, userId?: UserId): Promise<CipherView> {
+    const activeUserId =
+      userId ?? (await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId)));
     if (cipher.isPartial) {
       const revealed = await this.revealedCipherService.getOrReveal(
         activeUserId,
@@ -46,7 +47,9 @@ export class DefaultCipherFormService implements CipherFormService {
   }
 
   async saveCipher(cipher: CipherView, config: CipherFormConfig): Promise<CipherView> {
-    const activeUserId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+    // The account the form was built for, so a save never lands in another account's vault.
+    const activeUserId =
+      config.userId ?? (await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId)));
 
     let savedCipher: Cipher;
 
@@ -59,7 +62,7 @@ export class DefaultCipherFormService implements CipherFormService {
       throw new Error("Original cipher is required for updating an existing cipher");
     }
     // For a restricted cipher this is a copy of the revealed view, the original its edit needs.
-    const originalCipherView = await this.decryptCipher(config.originalCipher);
+    const originalCipherView = await this.decryptCipher(config.originalCipher, activeUserId);
 
     // Updating an existing cipher
 
@@ -147,7 +150,7 @@ export class DefaultCipherFormService implements CipherFormService {
     updatedCipher: CipherView,
     config: CipherFormConfig,
   ) {
-    const decryptedOriginalCipherCipher = await this.decryptCipher(config.originalCipher);
+    const decryptedOriginalCipherCipher = await this.decryptCipher(config.originalCipher, userId);
 
     const associatedPendingTask = await firstValueFrom(
       this.taskService
