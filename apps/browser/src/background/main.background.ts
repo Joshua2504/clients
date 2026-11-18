@@ -78,6 +78,10 @@ import { TokenService } from "@bitwarden/common/auth/services/token.service";
 import { UserVerificationApiService } from "@bitwarden/common/auth/services/user-verification/user-verification-api.service";
 import { UserVerificationService } from "@bitwarden/common/auth/services/user-verification/user-verification.service";
 import {
+  AutofillAccountsService,
+  DefaultAutofillAccountsService,
+} from "@bitwarden/common/autofill/services/autofill-accounts.service";
+import {
   AutofillSettingsService,
   AutofillSettingsServiceAbstraction,
 } from "@bitwarden/common/autofill/services/autofill-settings.service";
@@ -368,12 +372,14 @@ import {
 import { AutofillLifecycleService } from "../autofill/services/abstractions/autofill-lifecycle.service";
 import { AutofillService as AutofillServiceAbstraction } from "../autofill/services/abstractions/autofill.service";
 import { FillCipherPolicy } from "../autofill/services/abstractions/fill-cipher-policy";
+import { MultiAccountFillCipherPolicy } from "../autofill/services/abstractions/multi-account-fill-cipher-policy";
 import { AutofillBadgeUpdaterService } from "../autofill/services/autofill-badge-updater.service";
 import { DefaultAutofillLifecycleService } from "../autofill/services/autofill-lifecycle.service";
 import { AutofillTriageService } from "../autofill/services/autofill-triage.service";
 import AutofillService from "../autofill/services/autofill.service";
 import { ClipboardNotificationBadgeUpdaterService } from "../autofill/services/clipboard-notification-badge-updater.service";
 import { DefaultFillCipherPolicy } from "../autofill/services/default-fill-cipher-policy";
+import { DefaultMultiAccountFillCipherPolicy } from "../autofill/services/default-multi-account-fill-cipher-policy";
 import { InlineMenuFieldQualificationService } from "../autofill/services/inline-menu-field-qualification.service";
 import { TargetingRulesDataService } from "../autofill/services/targeting-rules-data.service";
 import { WebmapperDraftService } from "../autofill/services/webmapper-draft.service";
@@ -456,6 +462,8 @@ export default class MainBackground {
   cipherSdkService: CipherSdkService;
   revealedCipherService: RevealedCipherService;
   fillCipherPolicy: FillCipherPolicy;
+  autofillAccountsService: AutofillAccountsService;
+  multiAccountFillCipherPolicy: MultiAccountFillCipherPolicy;
   cipherService: CipherServiceAbstraction;
   folderService: InternalFolderServiceAbstraction;
   userDecryptionOptionsService: InternalUserDecryptionOptionsServiceAbstraction;
@@ -1249,6 +1257,16 @@ export default class MainBackground {
         cipherService: this.cipherService,
         revealedCipherService: this.revealedCipherService,
       }) ?? new DefaultFillCipherPolicy(this.cipherService);
+    this.autofillAccountsService = new DefaultAutofillAccountsService(
+      this.stateProvider,
+      this.accountService,
+      this.authService,
+    );
+    this.multiAccountFillCipherPolicy = new DefaultMultiAccountFillCipherPolicy(
+      this.fillCipherPolicy,
+      this.autofillAccountsService,
+      this.autofillSettingsService,
+    );
     this.folderService = new FolderService(
       this.keyService,
       this.encryptService,

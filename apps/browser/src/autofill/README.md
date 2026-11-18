@@ -26,4 +26,5 @@ production builds pay no cost.
   - [The Monitoring Lifecycle](./lifecycle.design.md)
   - [Fill Orchestration](./orchestrator.design.md)
   - [Fill Mechanics](./autofill.design.md)
+  - [Multi-account Autofill](./multi-account.design.md)
   - [Content Script Performance](./content/performance.design.md)

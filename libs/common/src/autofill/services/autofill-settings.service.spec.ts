@@ -64,6 +64,33 @@ describe("AutofillSettingsService", () => {
     jest.restoreAllMocks();
   });
 
+  describe("autofillOnPageLoadDefaultFor$", () => {
+    const storedDefault = (value: boolean | null) =>
+      jest.spyOn(stateProvider, "getUser").mockReturnValue({
+        state$: new BehaviorSubject(value) as Observable<boolean | null>,
+      } as SingleUserState<any>);
+
+    it("reads the page-load default of the given user, not the active one", async () => {
+      storedDefault(false);
+
+      await expect(
+        firstValueFrom(autofillSettingsService.autofillOnPageLoadDefaultFor$(otherUserId)),
+      ).resolves.toBe(false);
+      expect(stateProvider.getUser).toHaveBeenCalledWith(
+        otherUserId,
+        expect.objectContaining({ key: "autofillOnPageLoadDefault" }),
+      );
+    });
+
+    it("defaults to true when the user never set it", async () => {
+      storedDefault(null);
+
+      await expect(
+        firstValueFrom(autofillSettingsService.autofillOnPageLoadDefaultFor$(otherUserId)),
+      ).resolves.toBe(true);
+    });
+  });
+
   describe("resolvedEnableBasicAuthResponse$", () => {
     it("emits true when the feature flag and the user setting are both enabled", async () => {
       await expect(

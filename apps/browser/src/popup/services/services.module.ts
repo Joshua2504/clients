@@ -66,6 +66,10 @@ import { OrganizationInviteService } from "@bitwarden/common/auth/organization-i
 import { PendingAuthRequestsStateService } from "@bitwarden/common/auth/services/auth-request-answering/pending-auth-requests.state";
 import { SsoUrlService } from "@bitwarden/common/auth/sso-login";
 import {
+  AutofillAccountsService,
+  DefaultAutofillAccountsService,
+} from "@bitwarden/common/autofill/services/autofill-accounts.service";
+import {
   AutofillSettingsService,
   AutofillSettingsServiceAbstraction,
 } from "@bitwarden/common/autofill/services/autofill-settings.service";
@@ -217,8 +221,10 @@ import { ExtensionTwoFactorAuthWebAuthnComponentService } from "../../auth/servi
 import { AutofillLifecycleService } from "../../autofill/services/abstractions/autofill-lifecycle.service";
 import { AutofillService as AutofillServiceAbstraction } from "../../autofill/services/abstractions/autofill.service";
 import { FillCipherPolicy } from "../../autofill/services/abstractions/fill-cipher-policy";
+import { MultiAccountFillCipherPolicy } from "../../autofill/services/abstractions/multi-account-fill-cipher-policy";
 import AutofillService from "../../autofill/services/autofill.service";
 import { DefaultFillCipherPolicy } from "../../autofill/services/default-fill-cipher-policy";
+import { DefaultMultiAccountFillCipherPolicy } from "../../autofill/services/default-multi-account-fill-cipher-policy";
 import { InlineMenuFieldQualificationService } from "../../autofill/services/inline-menu-field-qualification.service";
 import { NoopAutofillLifecycleService } from "../../autofill/services/noop-autofill-lifecycle.service";
 import { WebmapperDraftService } from "../../autofill/services/webmapper-draft.service";
@@ -503,6 +509,16 @@ const safeProviders: SafeProvider[] = [
     provide: FillCipherPolicy,
     useClass: DefaultFillCipherPolicy,
     deps: [CipherService],
+  }),
+  safeProvider({
+    provide: AutofillAccountsService,
+    useClass: DefaultAutofillAccountsService,
+    deps: [StateProvider, AccountService, AuthService],
+  }),
+  safeProvider({
+    provide: MultiAccountFillCipherPolicy,
+    useClass: DefaultMultiAccountFillCipherPolicy,
+    deps: [FillCipherPolicy, AutofillAccountsService, AutofillSettingsServiceAbstraction],
   }),
   safeProvider({
     provide: AutofillService,

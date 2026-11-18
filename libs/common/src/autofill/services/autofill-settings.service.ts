@@ -17,6 +17,7 @@ import {
   StateProvider,
   UserKeyDefinition,
 } from "../../platform/state";
+import { UserId } from "../../types/guid";
 import { CipherType } from "../../vault/enums";
 import { RestrictedItemTypesService } from "../../vault/services/restricted-item-types.service";
 import { ClearClipboardDelay, AutofillOverlayVisibility } from "../constants";
@@ -154,6 +155,11 @@ export abstract class AutofillSettingsServiceAbstraction {
   autofillOnPageLoad$: Observable<boolean>;
   setAutofillOnPageLoad: (newValue: boolean) => Promise<void>;
   autofillOnPageLoadDefault$: Observable<boolean>;
+  /**
+   * {@link autofillOnPageLoadDefault$} for `userId` instead of the active user: whether a login
+   * without its own page-load setting fills on page load.
+   */
+  autofillOnPageLoadDefaultFor$: (userId: UserId) => Observable<boolean>;
   setAutofillOnPageLoadDefault: (newValue: boolean) => Promise<void>;
   autofillOnPageLoadCalloutIsDismissed$: Observable<boolean>;
   setAutofillOnPageLoadCalloutIsDismissed: (newValue: boolean) => Promise<void>;
@@ -419,6 +425,12 @@ export class AutofillSettingsService implements AutofillSettingsServiceAbstracti
 
   async setAutofillOnPageLoad(newValue: boolean): Promise<void> {
     await this.autofillOnPageLoadState.update(() => newValue);
+  }
+
+  autofillOnPageLoadDefaultFor$(userId: UserId): Observable<boolean> {
+    return this.stateProvider
+      .getUser(userId, AUTOFILL_ON_PAGE_LOAD_DEFAULT)
+      .state$.pipe(map((x) => x ?? true));
   }
 
   async setAutofillOnPageLoadDefault(newValue: boolean): Promise<void> {
