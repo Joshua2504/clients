@@ -133,6 +133,18 @@ describe("OpenAttachmentsComponent", () => {
     expect(premiumUpgradeService.promptForPremium).toHaveBeenCalled();
   });
 
+  it("prompts for the premium of the account that holds the cipher", async () => {
+    const premiumUpgradeService = TestBed.inject(PremiumUpgradePromptService);
+    const otherUserId = Utils.newGuid() as UserId;
+    component.userId = otherUserId;
+    component.canAccessAttachments = false;
+
+    await component.openAttachments();
+
+    expect(premiumUpgradeService.promptForPremium).toHaveBeenCalledWith(undefined, otherUserId);
+    expect(router.navigate).not.toHaveBeenCalled();
+  });
+
   it("disables attachments when the edit form is disabled", () => {
     formStatusChange$.next("disabled");
     fixture.detectChanges();

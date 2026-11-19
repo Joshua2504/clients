@@ -201,11 +201,6 @@ export type InlineMenuCipherData = {
    * autofill, so the inline menu can tell their ciphers apart.
    */
   accountLabel?: string;
-  /**
-   * False when the vault item view cannot show the cipher, because it belongs to an account
-   * other than the active one. Absent otherwise.
-   */
-  canView?: false;
   login?: {
     totp?: string;
     totpField?: boolean;

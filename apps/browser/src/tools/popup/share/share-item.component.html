@@ -6,8 +6,12 @@
     [backAction]="onBackClick.bind(this)"
   ></popup-header>
 
+  @if (itemAccount.accountHint(); as accountEmail) {
+    <app-item-account-hint slot="above-scroll-area" [email]="accountEmail" />
+  }
+
   @if (cipher(); as c) {
-    <app-share-item-form [cipher]="c"></app-share-item-form>
+    <app-share-item-form [cipher]="c" [userId]="itemAccount.explicitUserId()"></app-share-item-form>
   }
 
   <popup-footer slot="footer">

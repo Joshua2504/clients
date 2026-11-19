@@ -5,6 +5,7 @@ import { NoopAnimationsModule } from "@angular/platform-browser/animations";
 import { mock, MockProxy } from "jest-mock-extended";
 
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+import { UserId } from "@bitwarden/common/types/guid";
 import { DIALOG_DATA, DialogRef } from "@bitwarden/components";
 import { AlgorithmInfo } from "@bitwarden/generator-core";
 import { CipherFormGeneratorComponent } from "@bitwarden/vault";
@@ -39,6 +40,9 @@ class MockCipherFormGenerator {
   // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
   // eslint-disable-next-line @angular-eslint/prefer-output-emitter-ref
   @Output() valueGenerated = new EventEmitter<string>();
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-signals
+  @Input() userId?: string;
 }
 
 describe("VaultGeneratorDialogComponent", () => {
@@ -81,6 +85,23 @@ describe("VaultGeneratorDialogComponent", () => {
       By.css("vault-cipher-form-generator"),
     ).componentInstance;
     expect(generator.type).toBe("password");
+  });
+
+  it("leaves the generator on the active account when the dialog names no account", () => {
+    const generator = fixture.debugElement.query(
+      By.css("vault-cipher-form-generator"),
+    ).componentInstance;
+    expect(generator.userId).toBeUndefined();
+  });
+
+  it("passes the account of the cipher form to the generator", () => {
+    dialogData.userId = "form-account" as UserId;
+    fixture.detectChanges();
+
+    const generator = fixture.debugElement.query(
+      By.css("vault-cipher-form-generator"),
+    ).componentInstance;
+    expect(generator.userId).toBe("form-account");
   });
 
   it("should enable select button when value is generated", () => {

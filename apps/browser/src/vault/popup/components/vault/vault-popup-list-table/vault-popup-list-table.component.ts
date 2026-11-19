@@ -12,6 +12,7 @@ import {
   inject,
   Injector,
   isDevMode,
+  reflectComponentType,
   viewChild,
 } from "@angular/core";
 import { takeUntilDestroyed, toObservable, toSignal } from "@angular/core/rxjs-interop";
@@ -29,7 +30,7 @@ import { getUserId } from "@bitwarden/common/auth/services/account.service";
 import { FeatureFlag } from "@bitwarden/common/enums/feature-flag.enum";
 import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
-import { CipherId } from "@bitwarden/common/types/guid";
+import { CipherId, UserId } from "@bitwarden/common/types/guid";
 import { CipherType } from "@bitwarden/common/vault/enums";
 import { FolderView } from "@bitwarden/common/vault/models/view/folder.view";
 import {
@@ -88,6 +89,7 @@ import { VaultPopupAutofillService } from "../../../services/vault-popup-autofil
 import { VaultPopupItemsService } from "../../../services/vault-popup-items.service";
 import { VaultPopupListTableFiltersService } from "../../../services/vault-popup-list-table-filters.service";
 import {
+  VaultAccountSection,
   VaultPopupListTableService,
   VaultTableRow,
 } from "../../../services/vault-popup-list-table.service";
@@ -130,6 +132,12 @@ function contributedFilter(filter: VaultItemFilter | null): VaultItemFilter | nu
   }
   return null;
 }
+
+/**
+ * The sections the table declares for further autofill accounts: the extension holds up to five
+ * accounts, one of which is the active one.
+ */
+const FURTHER_ACCOUNT_SECTIONS = 4;
 
 @Component({
   selector: "app-vault-popup-list-table",
@@ -207,6 +215,24 @@ export class VaultPopupListTableComponent {
   /** The host's icon after a row's name. Unprovided, rows show no extra icon. */
   protected readonly rowIcon: VaultRowIcon | null = inject(VAULT_ROW_ICON, { optional: true });
 
+  /**
+   * Whether the host's row icon takes the account of a row (a `userId` input). One that does not
+   * can only answer for the active account, so it is left off the rows of another account.
+   */
+  private readonly rowIconTakesAccount =
+    this.rowIcon != null &&
+    (reflectComponentType(this.rowIcon)?.inputs.some((i) => i.templateName === "userId") ?? false);
+
+  /** Whether the host's row icon renders on `row`. */
+  protected showRowIcon(row: VaultTableRow): boolean {
+    return this.rowIcon != null && (row.userId == null || this.rowIconTakesAccount);
+  }
+
+  /** The inputs of the host's row icon for `row`. */
+  protected rowIconInputs(row: VaultTableRow): Record<string, unknown> {
+    return row.userId == null ? { cipher: row.cipher } : { cipher: row.cipher, userId: row.userId };
+  }
+
   /** The projected `bit-table-v2`, used to seed and observe chip selections. */
   private readonly tableEl = viewChild(BitTableV2Component);
 
@@ -258,6 +284,40 @@ export class VaultPopupListTableComponent {
 
   protected readonly rows = computed(() => (this.showDeactivatedOrg() ? [] : this.allRows()));
 
+  /**
+   * The further autofill accounts with suggestions for the current tab, in display order. Empty
+   * while no account has opted in.
+   */
+  protected readonly accountSections = toSignal(this.listTableService.accountSections$, {
+    initialValue: [] as VaultAccountSection[],
+  });
+
+  /**
+   * One section per further autofill account. `bit-table-v2` takes its sections as they are
+   * declared in the template, in that order, so the sections are declared up front: one slot per
+   * account the extension can hold besides the active one. A slot without an account matches no
+   * row and renders nothing.
+   */
+  protected readonly accountSlots = Array.from({ length: FURTHER_ACCOUNT_SECTIONS }, (_, slot) => ({
+    /** The rows of this slot's account. The last slot takes the accounts beyond it, if any. */
+    match: (row: VaultTableRow) =>
+      row._section === "accountAutofill" &&
+      this.slotAccounts(slot).some((account) => account.userId === row.userId),
+    /** The email of this slot's account, for the section's title. */
+    email: computed(() =>
+      this.slotAccounts(slot)
+        .map((account) => account.email)
+        .join(", "),
+    ),
+  }));
+
+  private slotAccounts(slot: number): VaultAccountSection[] {
+    const accounts = this.accountSections();
+    return slot === FURTHER_ACCOUNT_SECTIONS - 1
+      ? accounts.slice(slot)
+      : accounts.slice(slot, slot + 1);
+  }
+
   protected readonly table = defineTable<VaultTableRow, "name">(this.rows);
 
   /**
@@ -273,11 +333,14 @@ export class VaultPopupListTableComponent {
       [contributedKey: string]: unknown;
     },
   ): boolean =>
-    matchesType(row.cipher, values.cipherType) &&
-    matchesVault(row.cipher, values.organization) &&
-    matchesSharedFolder(row.cipher, values.collection) &&
-    matchesFolder(row.cipher, values.folder) &&
-    this.matchesContributedFilter(row.cipher, this.contributedSelection(values));
+    // The chips describe the active account's vault: its types, vaults and folders. A suggestion
+    // of another autofill account is not narrowed by them.
+    row.userId != null ||
+    (matchesType(row.cipher, values.cipherType) &&
+      matchesVault(row.cipher, values.organization) &&
+      matchesSharedFolder(row.cipher, values.collection) &&
+      matchesFolder(row.cipher, values.folder) &&
+      this.matchesContributedFilter(row.cipher, this.contributedSelection(values)));
 
   /** The contributed chip's selected option IDs in `values`, keyed by the filter's own key. */
   private contributedSelection(values: Record<string, unknown>): string[] | undefined {
@@ -703,7 +766,10 @@ export class VaultPopupListTableComponent {
    * both the autofill/favorites sections and all-items, so a bare `cipher.id` would collide.
    */
   protected readonly trackRow = (_: number, row: VaultTableRow) =>
-    `${row._section}:${row.cipher.id}`;
+    // One shared item can be suggested from the vaults of two accounts.
+    row.userId == null
+      ? `${row._section}:${row.cipher.id}`
+      : `${row._section}:${row.userId}:${row.cipher.id}`;
 
   protected readonly isAutofill = (row: VaultTableRow) => row._section === "autofill";
   protected readonly isFavorites = (row: VaultTableRow) => row._section === "favorites";
@@ -799,17 +865,30 @@ export class VaultPopupListTableComponent {
    * Primary click action for a row: autofill for autofill-section rows, otherwise navigate to view.
    */
   onCipherSelect(row: VaultTableRow) {
+    if (row.userId != null) {
+      // A row of another autofill account: fill or view for that account.
+      return row.actions.primaryAutofill
+        ? this.listTableService.doAutofill(row.cipher, row.userId)
+        : this.listTableService.viewCipher(row.cipher, row.userId);
+    }
+
     return row.actions.primaryAutofill
       ? this.listTableService.doAutofill(row.cipher)
       : this.listTableService.viewCipher(row.cipher);
   }
 
-  launchCipher(cipher: CipherViewLike) {
-    return this.listTableService.launchCipher(cipher);
+  /** @param userId The account of the row when it is not the active account. */
+  launchCipher(cipher: CipherViewLike, userId?: UserId) {
+    return userId == null
+      ? this.listTableService.launchCipher(cipher)
+      : this.listTableService.launchCipher(cipher, userId);
   }
 
-  doAutofill(cipher: PopupCipherViewLike) {
-    return this.listTableService.doAutofill(cipher);
+  /** @param userId The account of the row when it is not the active account. */
+  doAutofill(cipher: PopupCipherViewLike, userId?: UserId) {
+    return userId == null
+      ? this.listTableService.doAutofill(cipher)
+      : this.listTableService.doAutofill(cipher, userId);
   }
 
   /** Refreshes the current tab so the autofill suggestions repopulate. */

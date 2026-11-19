@@ -7,11 +7,13 @@ import {
   map,
   merge,
   Observable,
+  of,
   Subject,
   switchMap,
   take,
   takeUntil,
   throwError,
+  timeout,
 } from "rxjs";
 
 import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
@@ -19,6 +21,7 @@ import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authenticatio
 import { AccountCipherRef } from "@bitwarden/common/autofill/types/account-cipher";
 import { UserRequestedFallbackAbortReason } from "@bitwarden/common/platform/abstractions/fido2/fido2-client.service.abstraction";
 import {
+  Fido2RetryAnswer,
   Fido2UserInterfaceService as Fido2UserInterfaceServiceAbstraction,
   Fido2UserInterfaceSession,
   NewCredentialParams,
@@ -44,12 +47,26 @@ export const BrowserFido2MessageTypes = {
   ConfirmNewCredentialResponse: "ConfirmNewCredentialResponse",
   InformExcludedCredentialRequest: "InformExcludedCredentialRequest",
   InformCredentialNotFoundRequest: "InformCredentialNotFoundRequest",
+  AccountUnlockedResponse: "AccountUnlockedResponse",
   AbortRequest: "AbortRequest",
   AbortResponse: "AbortResponse",
 } as const;
 
 export type BrowserFido2MessageTypeValue =
   (typeof BrowserFido2MessageTypes)[keyof typeof BrowserFido2MessageTypes];
+
+/**
+ * The query param with which the popout returns from the lock screen: the account the user
+ * unlocked there. The popout then answers the pending request with
+ * {@link BrowserFido2MessageTypes.AccountUnlockedResponse}.
+ */
+export const FIDO2_UNLOCKED_ACCOUNT_QUERY_PARAM = "unlockedUserId";
+
+/**
+ * How long a request waits for an account the popout reports as unlocked to serve passkeys in
+ * the background, before it runs again without it.
+ */
+const UNLOCKED_ACCOUNT_SERVES_TIMEOUT_MS = 5000;
 
 export class SessionClosedError extends Error {
   constructor() {
@@ -77,6 +94,8 @@ export type BrowserFido2Message = { sessionId: string } & (
       cipherRefs: AccountCipherRef[];
       userVerification: boolean;
       fallbackSupported: boolean;
+      /** The locked accounts that could hold further credentials, for the user to unlock. */
+      lockedUserIds?: UserId[];
     }
   | {
       type: typeof BrowserFido2MessageTypes.PickCredentialResponse;
@@ -96,6 +115,8 @@ export type BrowserFido2Message = { sessionId: string } & (
       rpId: string;
       /** The accounts the passkey may be saved to, the default first. */
       userIds: UserId[];
+      /** The locked accounts the passkey could be saved to once the user unlocked them. */
+      lockedUserIds?: UserId[];
     }
   | {
       type: typeof BrowserFido2MessageTypes.ConfirmNewCredentialResponse;
@@ -117,6 +138,17 @@ export type BrowserFido2Message = { sessionId: string } & (
   | {
       type: typeof BrowserFido2MessageTypes.InformCredentialNotFoundRequest;
       fallbackSupported: boolean;
+      /** The locked accounts that could hold a credential, for the user to unlock. */
+      lockedUserIds?: UserId[];
+    }
+  /**
+   * The popout's answer to a request that named `lockedUserIds`, in place of the answer the
+   * request asks for: the user unlocked `userId` on the lock screen and the popout is back.
+   * The request is then run again and sent anew.
+   **/
+  | {
+      type: typeof BrowserFido2MessageTypes.AccountUnlockedResponse;
+      userId: UserId;
     }
   | {
       type: typeof BrowserFido2MessageTypes.AbortRequest;
@@ -281,7 +313,10 @@ export class BrowserFido2UserInterfaceSession implements Fido2UserInterfaceSessi
     userVerification,
     assumeUserPresence,
     masterPasswordRepromptRequired,
-  }: PickCredentialParams): Promise<{ cipherId: string; userVerified: boolean; userId: UserId }> {
+    lockedUserIds,
+  }: PickCredentialParams): Promise<
+    { cipherId: string | undefined; userVerified: boolean; userId?: UserId } & Fido2RetryAnswer
+  > {
     if (cipherRefs == undefined) {
       // A cipher id does not say which account's credential would be shown to the user.
       throw new Error("Cannot pick a credential without knowing the account of each cipher");
@@ -301,10 +336,17 @@ export class BrowserFido2UserInterfaceSession implements Fido2UserInterfaceSessi
       sessionId: this.sessionId,
       userVerification,
       fallbackSupported: this.fallbackSupported,
+      ...lockedAccounts(lockedUserIds),
     };
 
     await this.send(data);
-    const response = await this.receive(BrowserFido2MessageTypes.PickCredentialResponse);
+    const response = await this.receiveOrUnlocked(
+      BrowserFido2MessageTypes.PickCredentialResponse,
+      lockedUserIds,
+    );
+    if (response.type === BrowserFido2MessageTypes.AccountUnlockedResponse) {
+      return { cipherId: undefined, userVerified: false, retry: true };
+    }
 
     return {
       cipherId: response.cipherId,
@@ -320,7 +362,10 @@ export class BrowserFido2UserInterfaceSession implements Fido2UserInterfaceSessi
     userVerification,
     rpId,
     userIds,
-  }: NewCredentialParams): Promise<{ cipherId: string; userVerified: boolean; userId?: UserId }> {
+    lockedUserIds,
+  }: NewCredentialParams): Promise<
+    { cipherId?: string; userVerified: boolean; userId?: UserId } & Fido2RetryAnswer
+  > {
     const data: BrowserFido2Message = {
       type: BrowserFido2MessageTypes.ConfirmNewCredentialRequest,
       sessionId: this.sessionId,
@@ -331,10 +376,17 @@ export class BrowserFido2UserInterfaceSession implements Fido2UserInterfaceSessi
       fallbackSupported: this.fallbackSupported,
       rpId,
       userIds: userIds ?? [],
+      ...lockedAccounts(lockedUserIds),
     };
 
     await this.send(data);
-    const response = await this.receive(BrowserFido2MessageTypes.ConfirmNewCredentialResponse);
+    const response = await this.receiveOrUnlocked(
+      BrowserFido2MessageTypes.ConfirmNewCredentialResponse,
+      lockedUserIds,
+    );
+    if (response.type === BrowserFido2MessageTypes.AccountUnlockedResponse) {
+      return { userVerified: false, retry: true };
+    }
 
     return {
       cipherId: response.cipherId,
@@ -364,8 +416,9 @@ export class BrowserFido2UserInterfaceSession implements Fido2UserInterfaceSessi
 
   /**
    * Opens the popout for the user to unlock when no vault can answer the request. An account
-   * that serves passkeys can, so the user is then not asked to unlock the active account: its
-   * passkeys are not found until it is unlocked.
+   * that serves passkeys can, so the user is then not asked to unlock the active account up
+   * front. The request names it as locked instead, and the popout offers to unlock it wherever
+   * its passkeys could matter.
    */
   async ensureUnlockedVault(): Promise<void> {
     if (
@@ -379,15 +432,30 @@ export class BrowserFido2UserInterfaceSession implements Fido2UserInterfaceSessi
     }
   }
 
-  async informCredentialNotFound(): Promise<void> {
+  /**
+   * Tells the user that no passkey was found. With `lockedUserIds` the popout also offers to
+   * unlock those accounts; the request is concluded only when the user closes the popout
+   * without doing so.
+   */
+  async informCredentialNotFound(
+    _abortController?: AbortController,
+    options?: { lockedUserIds?: UserId[] },
+  ): Promise<void | Fido2RetryAnswer> {
     const data: BrowserFido2Message = {
       type: BrowserFido2MessageTypes.InformCredentialNotFoundRequest,
       sessionId: this.sessionId,
       fallbackSupported: this.fallbackSupported,
+      ...lockedAccounts(options?.lockedUserIds),
     };
 
     await this.send(data);
-    await this.receive(BrowserFido2MessageTypes.AbortResponse);
+    const response = await this.receiveOrUnlocked(
+      BrowserFido2MessageTypes.AbortResponse,
+      options?.lockedUserIds,
+    );
+    if (response.type === BrowserFido2MessageTypes.AccountUnlockedResponse) {
+      return { retry: true };
+    }
   }
 
   async close() {
@@ -427,6 +495,63 @@ export class BrowserFido2UserInterfaceSession implements Fido2UserInterfaceSessi
     }
   }
 
+  /**
+   * The popout's answer of `type`, or its report that the user unlocked one of `lockedUserIds`
+   * instead. A report that names another account is not an answer to this request and is
+   * ignored. The report is returned once the unlocked account serves passkeys here, so that the
+   * request finds it when it runs again.
+   */
+  private async receiveOrUnlocked<T extends BrowserFido2Message["type"]>(
+    type: T,
+    lockedUserIds: UserId[] | undefined,
+  ): Promise<
+    BrowserFido2Message & { type: T | typeof BrowserFido2MessageTypes.AccountUnlockedResponse }
+  > {
+    try {
+      const response = await firstValueFrom(
+        this.messages$.pipe(
+          filter(
+            (msg) =>
+              msg.type === type ||
+              (msg.type === BrowserFido2MessageTypes.AccountUnlockedResponse &&
+                (lockedUserIds ?? []).includes(msg.userId)),
+          ),
+          takeUntil(this.destroy$),
+        ),
+      );
+      if (response.type === BrowserFido2MessageTypes.AccountUnlockedResponse) {
+        await this.serves(response.userId);
+      }
+      return response as BrowserFido2Message & {
+        type: T | typeof BrowserFido2MessageTypes.AccountUnlockedResponse;
+      };
+    } catch (error) {
+      if (error instanceof EmptyError) {
+        throw new SessionClosedError();
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Waits until `userId` serves passkeys. The popout reports the unlock as soon as it sees it,
+   * which may be before the account's new state has reached the background.
+   */
+  private async serves(userId: UserId): Promise<void> {
+    if (this.servedUserIds$ == undefined) {
+      return;
+    }
+
+    await firstValueFrom(
+      this.servedUserIds$.pipe(
+        filter((userIds) => userIds.includes(userId)),
+        timeout({ first: UNLOCKED_ACCOUNT_SERVES_TIMEOUT_MS, with: () => of(undefined) }),
+        takeUntil(this.destroy$),
+      ),
+      { defaultValue: undefined },
+    );
+  }
+
   private async connect(): Promise<void> {
     if (this.closed) {
       throw new Error("Cannot re-open closed session");
@@ -464,4 +589,9 @@ export class BrowserFido2UserInterfaceSession implements Fido2UserInterfaceSessi
 
     await connectPromise;
   }
+}
+
+/** The `lockedUserIds` of a request message; left out when there are none. */
+function lockedAccounts(lockedUserIds: UserId[] | undefined): { lockedUserIds?: UserId[] } {
+  return lockedUserIds != undefined && lockedUserIds.length > 0 ? { lockedUserIds } : {};
 }

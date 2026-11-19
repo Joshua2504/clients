@@ -25,7 +25,7 @@ import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.servic
 import { uuidAsString } from "@bitwarden/common/platform/abstractions/sdk/sdk.service";
 import { CipherId, UserId } from "@bitwarden/common/types/guid";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
-import { CipherRepromptType, CipherType } from "@bitwarden/common/vault/enums";
+import { CipherType } from "@bitwarden/common/vault/enums";
 import {
   CipherViewLike,
   CipherViewLikeUtils,
@@ -54,6 +54,7 @@ import {
 import { BrowserApi } from "../../../../../platform/browser/browser-api";
 import BrowserPopupUtils from "../../../../../platform/browser/browser-popup-utils";
 import { VaultPopupAutofillService } from "../../../services/vault-popup-autofill.service";
+import { itemAccountQueryParams } from "../../../services/vault-popup-item-account.service";
 import {
   VaultPopupSectionService,
   PopupSectionOpen,
@@ -234,7 +235,7 @@ export class VaultListItemsContainerComponent {
       const login = CipherViewLikeUtils.getLogin(cipher);
       const hasUsername = login?.username != null;
       // Use autofill title when autofill is the primary action
-      const key = this.canAutofillCipher(cipher) ? "autofillTitle" : "viewItemTitle";
+      const key = this.canAutofill() ? "autofillTitle" : "viewItemTitle";
       return hasUsername ? `${key}WithField` : key;
     };
   });
@@ -246,7 +247,9 @@ export class VaultListItemsContainerComponent {
 
   /**
    * The account that owns the ciphers when it is not the active account: a further autofill
-   * account. Every action on a row then runs for this account. Leave unset for the active account.
+   * account. Every action on a row then runs for this account, without making it the active one:
+   * fill, view, launch, the copy actions and the more-options menu. Leave unset for the active
+   * account.
    */
   readonly accountUserId = input<UserId | undefined>(undefined);
 
@@ -308,20 +311,8 @@ export class VaultListItemsContainerComponent {
     private accountService: AccountService,
   ) {}
 
-  /**
-   * Whether selecting the cipher fills it. A cipher of another account that requires a master
-   * password reprompt is opened in its own account instead: the reprompt verifies the active
-   * account only.
-   */
-  protected canAutofillCipher(cipher: CipherViewLike): boolean {
-    return (
-      this.canAutofill() &&
-      (this.accountUserId() == null || cipher.reprompt === CipherRepromptType.None)
-    );
-  }
-
   onCipherSelect(cipher: PopupCipherViewLike) {
-    return this.canAutofillCipher(cipher) ? this.doAutofill(cipher) : this.onViewCipher(cipher);
+    return this.canAutofill() ? this.doAutofill(cipher) : this.onViewCipher(cipher);
   }
 
   /**
@@ -376,7 +367,10 @@ export class VaultListItemsContainerComponent {
     await this.vaultPopupAutofillService.doAutofill(cipherView);
   }
 
-  /** Fills a cipher of a further autofill account, for that account. */
+  /**
+   * Fills a cipher of a further autofill account, for that account. A cipher that requires a
+   * master password reprompt asks for that account's master password first.
+   */
   private async doAutofillForAccount(cipher: PopupCipherViewLike, userId: UserId) {
     const cipherView = CipherViewLikeUtils.isCipherListView(cipher)
       ? await firstValueFrom(
@@ -397,24 +391,8 @@ export class VaultListItemsContainerComponent {
       return;
     }
 
-    // The view page shows the active account, so a cipher of another account switches to it first.
+    // Undefined for the active account, which the reprompt and the view page default to.
     const accountUserId = this.accountUserId();
-    if (accountUserId != null) {
-      this.viewCipherTimeout = window.setTimeout(
-        async () => {
-          try {
-            await this.vaultPopupAutofillService.viewAccountCipher({
-              userId: accountUserId,
-              cipher,
-            });
-          } finally {
-            this.viewCipherTimeout = undefined;
-          }
-        },
-        CipherViewLikeUtils.canLaunch(cipher) ? 200 : 0,
-      );
-      return;
-    }
 
     // Wrap in a timeout to allow for double click to launch
     this.viewCipherTimeout = window.setTimeout(
@@ -427,12 +405,19 @@ export class VaultListItemsContainerComponent {
             return;
           }
 
-          const repromptPassed = await this.passwordRepromptService.passwordRepromptCheck(cipher);
+          const repromptPassed =
+            accountUserId == null
+              ? await this.passwordRepromptService.passwordRepromptCheck(cipher)
+              : await this.passwordRepromptService.passwordRepromptCheck(cipher, accountUserId);
           if (!repromptPassed) {
             return;
           }
           await this.router.navigate(["/view-cipher"], {
-            queryParams: { cipherId: cipher.id, type: cipher.type },
+            queryParams: {
+              cipherId: cipher.id,
+              type: cipher.type,
+              ...itemAccountQueryParams(accountUserId),
+            },
           });
         } finally {
           // Ensure the timeout is always cleared

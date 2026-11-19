@@ -1,5 +1,5 @@
 import { TestBed } from "@angular/core/testing";
-import { Route, Router } from "@angular/router";
+import { ActivatedRouteSnapshot, convertToParamMap, Route, Router } from "@angular/router";
 
 import { IMPORT_DESTINATION_ROUTE_PATH } from "@bitwarden/importer-ui";
 
@@ -43,5 +43,28 @@ describe("browser import routes", () => {
     const legacyRoutes = findRoute(routes, "import");
     expect(legacyRoutes).toHaveLength(1);
     expect(legacyRoutes[0].canActivate).toContain(importUpgradeRedirectGuard);
+  });
+});
+
+describe("browser lock route", () => {
+  let lockRoute: Route;
+
+  const showAcctSwitcher = (queryParams: Record<string, string>) =>
+    (lockRoute.resolve?.["showAcctSwitcher"] as (route: ActivatedRouteSnapshot) => boolean)({
+      queryParamMap: convertToParamMap(queryParams),
+    } as ActivatedRouteSnapshot);
+
+  beforeEach(() => {
+    TestBed.configureTestingModule({ imports: [AppRoutingModule] });
+    [lockRoute] = findRoute(TestBed.inject(Router).config, "lock");
+  });
+
+  it("shows the account switcher on the active account's lock screen", () => {
+    expect(lockRoute.data?.["showAcctSwitcher"]).toBe(true);
+    expect(showAcctSwitcher({})).toBe(true);
+  });
+
+  it("hides the account switcher on the lock screen of an account named by the route", () => {
+    expect(showAcctSwitcher({ userId: "other-user-id" })).toBe(false);
   });
 });

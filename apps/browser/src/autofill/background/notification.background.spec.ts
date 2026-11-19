@@ -31,6 +31,7 @@ import { CipherId, UserId } from "@bitwarden/common/types/guid";
 import { ChangeLoginPasswordService } from "@bitwarden/common/vault/abstractions/change-login-password.service";
 import { CipherType } from "@bitwarden/common/vault/enums";
 import { CipherRepromptType } from "@bitwarden/common/vault/enums/cipher-reprompt-type";
+import { VaultMessages } from "@bitwarden/common/vault/enums/vault-messages.enum";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 import { FolderView } from "@bitwarden/common/vault/models/view/folder.view";
 import { CipherService } from "@bitwarden/common/vault/services/cipher.service";
@@ -129,7 +130,8 @@ describe("NotificationBackground", () => {
   const cipherRefs = (...cipherIds: string[]) =>
     cipherIds.map((cipherId) => ({ userId, cipherId }));
   const autofillAccountsService = mock<AutofillAccountsService>();
-  const switchAccount = jest.fn();
+  // Nothing the notification bar does may change the active account.
+  const switchAccount = accountService.switchAccount;
 
   beforeEach(() => {
     intraprocessMessageSender = new IntraprocessMessageSender();
@@ -195,7 +197,6 @@ describe("NotificationBackground", () => {
         mock<AutofillSettingsServiceAbstraction>(),
       ),
       autofillAccountsService,
-      switchAccount,
     );
   });
 
@@ -2878,6 +2879,7 @@ describe("NotificationBackground", () => {
           );
           expect(openAddEditVaultItemPopoutSpy).toHaveBeenCalledWith(sender.tab, {
             cipherId: cipherView.id,
+            userId: "testId",
           });
         });
 
@@ -3104,7 +3106,7 @@ describe("NotificationBackground", () => {
         const { cipher } = setAddEditCipherInfoSpy.mock.calls[0][0];
         expect(cipher.login.username).toBe("test");
         expect(cipher.login.password).toBe("");
-        expect(openAddEditVaultItemPopoutSpy).toHaveBeenCalledWith(tab);
+        expect(openAddEditVaultItemPopoutSpy).toHaveBeenCalledWith(tab, { userId });
       });
 
       it("keeps the password in the draft when the fill cipher policy offers the form", async () => {
@@ -3113,7 +3115,7 @@ describe("NotificationBackground", () => {
 
         const { cipher } = setAddEditCipherInfoSpy.mock.calls[0][0];
         expect(cipher.login.password).toBe("revealed");
-        expect(openAddEditVaultItemPopoutSpy).toHaveBeenCalledWith(tab);
+        expect(openAddEditVaultItemPopoutSpy).toHaveBeenCalledWith(tab, { userId });
       });
     });
 
@@ -3663,34 +3665,101 @@ describe("NotificationBackground", () => {
         );
       });
 
-      it("makes the owning account the active one for a master password reprompt", async () => {
-        vaults[otherUserId] = [
-          { ...login("other-cipher", "frodo", "old"), reprompt: CipherRepromptType.Password },
-        ] as CipherView[];
-        await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+      describe("a master password reprompt before the update", () => {
+        const protectedLogin = (id: string) =>
+          ({
+            ...login(id, "frodo", "old"),
+            reprompt: CipherRepromptType.Password,
+          }) as CipherView;
+        const answer = (message: Partial<NotificationBackgroundExtensionMessage>) =>
+          notificationBackground.handleCipherUpdateRepromptResponse({
+            command: "bgHandleReprompt",
+            tab,
+            success: true,
+            ...message,
+          });
 
-        await saveCipher({ cipherId: "other-cipher" });
+        it("asks for the owning account's master password without switching to it", async () => {
+          vaults[otherUserId] = [protectedLogin("other-cipher")];
+          await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
 
-        expect(switchAccount).toHaveBeenCalledWith(otherUserId);
-        expect(autofillService.isPasswordRepromptRequired).toHaveBeenCalledWith(
-          expect.objectContaining({ id: "other-cipher" }),
-          tab,
-          otherUserId,
-          "update-password",
-        );
-        expect(cipherService.updateWithServer).not.toHaveBeenCalled();
+          await saveCipher({ cipherId: "other-cipher" });
 
-        await notificationBackground.handleCipherUpdateRepromptResponse({
-          command: "bgHandleReprompt",
-          tab,
-          cipherId: "other-cipher",
-          success: true,
+          expect(autofillService.isPasswordRepromptRequired).toHaveBeenCalledWith(
+            expect.objectContaining({ id: "other-cipher" }),
+            tab,
+            otherUserId,
+            "update-password",
+          );
+          expect(cipherService.updateWithServer).not.toHaveBeenCalled();
+
+          // The popout names the account whose master password answered.
+          await answer({ cipherId: "other-cipher", userId: otherUserId });
+
+          expect(cipherService.updateWithServer).toHaveBeenCalledTimes(1);
+          expect(cipherService.updateWithServer).toHaveBeenCalledWith(
+            expect.objectContaining({ id: "other-cipher" }),
+            otherUserId,
+          );
+          expect(switchAccount).not.toHaveBeenCalled();
         });
 
-        expect(cipherService.updateWithServer).toHaveBeenCalledWith(
-          expect.objectContaining({ id: "other-cipher" }),
-          otherUserId,
-        );
+        it("updates a shared item only in the account whose master password answered", async () => {
+          vaults[userId] = [protectedLogin("shared-cipher")];
+          vaults[otherUserId] = [protectedLogin("shared-cipher")];
+          await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+          await saveCipher({ cipherId: "shared-cipher", userId: otherUserId });
+
+          // An answer that names no account names two ciphers. Neither is updated on a guess.
+          await answer({ cipherId: "shared-cipher" });
+          expect(cipherService.updateWithServer).not.toHaveBeenCalled();
+
+          await answer({ cipherId: "shared-cipher", userId: otherUserId });
+          expect(cipherService.updateWithServer).toHaveBeenCalledTimes(1);
+          expect(cipherService.updateWithServer).toHaveBeenCalledWith(
+            vaults[otherUserId][0],
+            otherUserId,
+          );
+          expect(vaults[userId][0].login.password).toBe("old");
+        });
+
+        it("does not update the cipher of an account other than the one that answered", async () => {
+          vaults[otherUserId] = [protectedLogin("other-cipher")];
+          await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+          await saveCipher({ cipherId: "other-cipher" });
+
+          // The active account's master password does not release another account's cipher.
+          await answer({ cipherId: "other-cipher", userId });
+
+          expect(cipherService.updateWithServer).not.toHaveBeenCalled();
+        });
+
+        it("saves nothing when the owning account locks before the popout answers", async () => {
+          vaults[otherUserId] = [protectedLogin("other-cipher")];
+          await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+          await saveCipher({ cipherId: "other-cipher" });
+
+          otherAutofillUserIds$.next([]);
+          await answer({ cipherId: "other-cipher", userId: otherUserId });
+
+          expect(cipherService.updateWithServer).not.toHaveBeenCalled();
+          expect(cipherService.createWithServer).not.toHaveBeenCalled();
+          expect(queue()).toHaveLength(0);
+          expect(switchAccount).not.toHaveBeenCalled();
+        });
+
+        it("saves nothing when the reprompt fails", async () => {
+          vaults[otherUserId] = [protectedLogin("other-cipher")];
+          await notificationBackground.triggerCipherNotification(formData("frodo", "ring"), tab);
+          await saveCipher({ cipherId: "other-cipher" });
+
+          await answer({ cipherId: "other-cipher", userId: otherUserId, success: false });
+
+          expect(cipherService.updateWithServer).not.toHaveBeenCalled();
+          expect(tabSendMessageDataSpy).toHaveBeenCalledWith(tab, "saveCipherAttemptCompleted", {
+            error: "Password reprompt failed",
+          });
+        });
       });
     });
 
@@ -3973,7 +4042,7 @@ describe("NotificationBackground", () => {
         );
       });
 
-      it("makes the picked account the active one before the edit popout opens", async () => {
+      it("opens the edit popout for the picked account without switching to it", async () => {
         await notificationBackground["selectAccount"](
           { command: "bgSelectAccount", userId: otherUserId },
           sender,
@@ -3981,20 +4050,65 @@ describe("NotificationBackground", () => {
 
         await saveCipher({ edit: true });
 
-        expect(switchAccount).toHaveBeenCalledWith(otherUserId);
         expect(cipherService.setAddEditCipherInfo).toHaveBeenCalledWith(
           expect.anything(),
           otherUserId,
         );
-        expect(openAddEditVaultItemPopoutSpy).toHaveBeenCalled();
+        expect(openAddEditVaultItemPopoutSpy).toHaveBeenCalledWith(
+          tab,
+          expect.objectContaining({ userId: otherUserId }),
+        );
+        expect(switchAccount).not.toHaveBeenCalled();
         expect(cipherService.createWithServer).not.toHaveBeenCalled();
       });
 
-      it("does not switch accounts for a save to the active account", async () => {
+      it("opens the edit popout for the active account for a save to it", async () => {
         await saveCipher({ edit: true });
 
-        expect(switchAccount).not.toHaveBeenCalled();
         expect(cipherService.setAddEditCipherInfo).toHaveBeenCalledWith(expect.anything(), userId);
+        expect(openAddEditVaultItemPopoutSpy).toHaveBeenCalledWith(
+          tab,
+          expect.objectContaining({ userId }),
+        );
+        expect(switchAccount).not.toHaveBeenCalled();
+      });
+
+      it("opens the item form for the picked account when an organization is chosen", async () => {
+        await notificationBackground["selectAccount"](
+          { command: "bgSelectAccount", userId: otherUserId },
+          sender,
+        );
+
+        sendMockExtensionMessage(
+          { command: "bgOpenAddEditVaultItemPopout", organizationId: "org-id" },
+          sender,
+        );
+        await flushPromises();
+
+        expect(cipherService.setAddEditCipherInfo).toHaveBeenCalledWith(
+          { cipher: expect.objectContaining({ organizationId: "org-id" }) },
+          otherUserId,
+        );
+        expect(openAddEditVaultItemPopoutSpy).toHaveBeenCalledWith(tab, { userId: otherUserId });
+        expect(switchAccount).not.toHaveBeenCalled();
+      });
+
+      it("opens no item form once the picked account stopped serving autofill", async () => {
+        await notificationBackground["selectAccount"](
+          { command: "bgSelectAccount", userId: otherUserId },
+          sender,
+        );
+        otherAutofillUserIds$.next([]);
+
+        sendMockExtensionMessage(
+          { command: "bgOpenAddEditVaultItemPopout", organizationId: "org-id" },
+          sender,
+        );
+        await flushPromises();
+
+        expect(cipherService.setAddEditCipherInfo).not.toHaveBeenCalled();
+        expect(openAddEditVaultItemPopoutSpy).not.toHaveBeenCalled();
+        expect(queue()).toHaveLength(0);
       });
     });
 
@@ -4056,12 +4170,35 @@ describe("NotificationBackground", () => {
         );
       });
 
-      it("views the cipher without a switch while its account is still active", async () => {
+      it("views the cipher in the account it was saved to", async () => {
         await showSaved();
 
         await view();
 
         expect(switchAccount).not.toHaveBeenCalled();
+        expect(openViewVaultItemPopoutSpy).toHaveBeenCalledWith(tab, {
+          cipherId: "saved-cipher",
+          action: "",
+          userId,
+        });
+      });
+
+      it("views a cipher saved to an account that is not active without switching to it", async () => {
+        await showSaved({ userId: otherUserId });
+
+        await view();
+
+        expect(switchAccount).not.toHaveBeenCalled();
+        expect(openViewVaultItemPopoutSpy).toHaveBeenCalledWith(tab, {
+          cipherId: "saved-cipher",
+          action: "",
+          userId: otherUserId,
+        });
+      });
+
+      it("views a cipher the tab's notification did not save as before, naming no account", async () => {
+        await view();
+
         expect(openViewVaultItemPopoutSpy).toHaveBeenCalledWith(tab, {
           cipherId: "saved-cipher",
           action: "",
@@ -4075,8 +4212,12 @@ describe("NotificationBackground", () => {
 
         await view();
 
-        expect(switchAccount).toHaveBeenCalledWith(userId);
-        expect(openViewVaultItemPopoutSpy).toHaveBeenCalled();
+        expect(switchAccount).not.toHaveBeenCalled();
+        expect(openViewVaultItemPopoutSpy).toHaveBeenCalledWith(tab, {
+          cipherId: "saved-cipher",
+          action: "",
+          userId,
+        });
       });
 
       it("opens nothing once the account it was saved to no longer serves autofill", async () => {
@@ -4190,6 +4331,81 @@ describe("NotificationBackground", () => {
         expect(createNewTabSpy).toHaveBeenCalledWith(
           "https://example.com/.well-known/change-password",
         );
+      });
+
+      describe("opening the remaining tasks after an update", () => {
+        let openViewVaultItemPopoutSpy: jest.SpyInstance;
+        let setPopup: jest.Mock;
+
+        const openTasks = async () => {
+          sendMockExtensionMessage({ command: "bgOpenAtRiskPasswords" }, sender);
+          await flushPromises();
+        };
+
+        beforeEach(() => {
+          openViewVaultItemPopoutSpy = jest
+            .spyOn(notificationBackground as any, "openViewVaultItemPopout")
+            .mockImplementation();
+          setPopup = jest.fn();
+          jest.spyOn(BrowserApi, "getBrowserAction").mockReturnValue({ setPopup } as any);
+        });
+
+        it("opens the at-risk passwords page for the non-active account without switching to it", async () => {
+          notificationBackground["rememberSavedCipher"](tab, otherUserId, "updated-cipher");
+
+          await openTasks();
+
+          expect(setPopup).toHaveBeenNthCalledWith(1, {
+            popup: `popup/index.html#/at-risk-passwords?userId=${otherUserId}`,
+          });
+          expect(messagingService.send).toHaveBeenCalledWith(VaultMessages.OpenAtRiskPasswords, {
+            userId: otherUserId,
+          });
+          // The popup route is reset for the next time the popup opens.
+          expect(setPopup).toHaveBeenLastCalledWith({ popup: "popup/index.html#/" });
+          expect(openViewVaultItemPopoutSpy).not.toHaveBeenCalled();
+          expect(switchAccount).not.toHaveBeenCalled();
+          expect(tabSendMessageDataSpy).toHaveBeenCalledWith(tab, "closeNotificationBar", {
+            fadeOutNotification: false,
+          });
+        });
+
+        it("opens nothing once that account no longer serves autofill", async () => {
+          notificationBackground["rememberSavedCipher"](tab, otherUserId, "updated-cipher");
+          otherAutofillUserIds$.next([]);
+
+          await openTasks();
+
+          expect(setPopup).not.toHaveBeenCalled();
+          expect(messagingService.send).not.toHaveBeenCalled();
+          expect(switchAccount).not.toHaveBeenCalled();
+          expect(tabSendMessageDataSpy).toHaveBeenCalledWith(tab, "closeNotificationBar", {
+            fadeOutNotification: false,
+          });
+        });
+
+        it("opens the at-risk passwords page for the active account by name", async () => {
+          notificationBackground["rememberSavedCipher"](tab, userId, "updated-cipher");
+
+          await openTasks();
+
+          expect(setPopup).toHaveBeenNthCalledWith(1, {
+            popup: `popup/index.html#/at-risk-passwords?userId=${userId}`,
+          });
+          expect(messagingService.send).toHaveBeenCalledWith(VaultMessages.OpenAtRiskPasswords, {
+            userId,
+          });
+        });
+
+        it("opens the at-risk passwords page naming no account when the tab saved no cipher", async () => {
+          await openTasks();
+
+          expect(setPopup).toHaveBeenNthCalledWith(1, {
+            popup: "popup/index.html#/at-risk-passwords",
+          });
+          expect(messagingService.send).toHaveBeenCalledWith(VaultMessages.OpenAtRiskPasswords);
+          expect(openViewVaultItemPopoutSpy).not.toHaveBeenCalled();
+        });
       });
     });
   });

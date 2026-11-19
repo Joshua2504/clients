@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, input } from "@angular/core";
 import { ComponentFixture, TestBed } from "@angular/core/testing";
 import { By } from "@angular/platform-browser";
+import { ActivatedRoute, Params, Router } from "@angular/router";
 import { mock } from "jest-mock-extended";
 import { BehaviorSubject, firstValueFrom, of } from "rxjs";
 
@@ -10,6 +11,7 @@ import { OrganizationService } from "@bitwarden/common/admin-console/abstraction
 import { Organization } from "@bitwarden/common/admin-console/models/domain/organization";
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { AutofillOverlayVisibility } from "@bitwarden/common/autofill/constants";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { AutofillSettingsServiceAbstraction } from "@bitwarden/common/autofill/services/autofill-settings.service";
 import { InlineMenuVisibilitySetting } from "@bitwarden/common/autofill/types";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
@@ -28,7 +30,10 @@ import { PasswordRepromptService, AtRiskPasswordCalloutService } from "@bitwarde
 
 import { PopupHeaderComponent } from "../../../../platform/popup/layout/popup-header.component";
 import { PopupPageComponent } from "../../../../platform/popup/layout/popup-page.component";
+import { PopupRouterCacheService } from "../../../../platform/popup/view-cache/popup-router-cache.service";
+import { PopupCloseWarningService } from "../../../../popup/services/popup-close-warning.service";
 import { AtRiskCarouselDialogResult } from "../at-risk-carousel-dialog/at-risk-carousel-dialog.component";
+import { ItemAccountHintComponent } from "../item-account-hint/item-account-hint.component";
 
 import { AtRiskPasswordPageService } from "./at-risk-password-page.service";
 import { AtRiskPasswordsComponent } from "./at-risk-passwords.component";
@@ -61,6 +66,7 @@ class MockPopupPageComponent {
 // eslint-disable-next-line @angular-eslint/component-class-suffix
 class MockAppIcon {
   readonly cipher = input<CipherView | undefined>(undefined);
+  readonly userId = input<UserId | undefined>(undefined);
 }
 
 describe("AtRiskPasswordsComponent", () => {
@@ -81,6 +87,18 @@ describe("AtRiskPasswordsComponent", () => {
   const mockAtRiskPasswordPageService = mock<AtRiskPasswordPageService>();
   const mockChangeLoginPasswordService = mock<ChangeLoginPasswordService>();
   const mockDialogService = mock<DialogService>();
+  const otherUserId = "other-user" as UserId;
+  /** The route's query params. `userId` names the account whose at-risk passwords are shown. */
+  let queryParams$: BehaviorSubject<Params>;
+  /** Whether the other account serves autofill, which is what lets the page show it. */
+  let otherAccountServes$: BehaviorSubject<boolean>;
+  const pendingTasks$ = jest.fn();
+  const cipherViews$ = jest.fn();
+  const organizations$ = jest.fn();
+  const unreadNotifications$ = jest.fn();
+  const mockPasswordRepromptService = mock<PasswordRepromptService>();
+  const navigate = jest.fn().mockResolvedValue(true);
+  const setHistory = jest.fn().mockResolvedValue(undefined);
 
   beforeEach(async () => {
     mockTasks$ = new BehaviorSubject<SecurityTask[]>([
@@ -127,7 +145,19 @@ describe("AtRiskPasswordsComponent", () => {
     mockAccountService = {
       activeAccount$: of({ id: "user" as UserId }),
       activeUserId: "user" as UserId,
+      accounts$: of({
+        user: { email: "user@example.com" },
+        [otherUserId]: { email: "other@example.com" },
+      }),
     } as unknown as FakeAccountService;
+    queryParams$ = new BehaviorSubject<Params>({});
+    otherAccountServes$ = new BehaviorSubject<boolean>(true);
+    jest.clearAllMocks();
+    mockAtRiskPasswordPageService.isCalloutDismissed.mockReturnValue(calloutDismissed$);
+    mockAtRiskPasswordCalloutService = { updateAtRiskPasswordState: jest.fn() };
+    mockAtRiskPasswordPageService.isGettingStartedDismissed.mockReturnValue(of(true));
+    navigate.mockResolvedValue(true);
+    setHistory.mockResolvedValue(undefined);
     stateProvider = new FakeStateProvider(mockAccountService);
 
     await TestBed.configureTestingModule({
@@ -136,31 +166,39 @@ describe("AtRiskPasswordsComponent", () => {
         {
           provide: TaskService,
           useValue: {
-            pendingTasks$: () => mockTasks$,
+            pendingTasks$: pendingTasks$.mockImplementation(() => mockTasks$),
           },
         },
         {
           provide: OrganizationService,
           useValue: {
-            organizations$: () => mockOrgs$,
+            organizations$: organizations$.mockImplementation(() => mockOrgs$),
           },
         },
         {
           provide: CipherService,
           useValue: {
-            cipherViews$: () => mockCiphers$,
+            cipherViews$: cipherViews$.mockImplementation(() => mockCiphers$),
           },
         },
         {
           provide: EndUserNotificationService,
           useValue: {
-            unreadNotifications$: () => mockNotifications$,
+            unreadNotifications$: unreadNotifications$.mockImplementation(() => mockNotifications$),
           },
         },
         { provide: I18nService, useValue: { t: (key: string) => key } },
         { provide: AccountService, useValue: mockAccountService },
         { provide: PlatformUtilsService, useValue: mock<PlatformUtilsService>() },
-        { provide: PasswordRepromptService, useValue: mock<PasswordRepromptService>() },
+        { provide: PasswordRepromptService, useValue: mockPasswordRepromptService },
+        { provide: ActivatedRoute, useValue: { queryParams: queryParams$ } },
+        { provide: Router, useValue: { navigate } },
+        {
+          provide: AutofillAccountsService,
+          useValue: { isAutofillUser$: () => otherAccountServes$ },
+        },
+        { provide: PopupRouterCacheService, useValue: { setHistory } },
+        { provide: PopupCloseWarningService, useValue: { disable: jest.fn() } },
         {
           provide: AutofillSettingsServiceAbstraction,
           useValue: {
@@ -401,6 +439,108 @@ describe("AtRiskPasswordsComponent", () => {
       await component.ngOnInit();
       expect(mockDialogService.open).toHaveBeenCalled();
       expect(mockAtRiskPasswordPageService.dismissGettingStarted).toHaveBeenCalled();
+    });
+  });
+
+  describe("for the account named by `userId`", () => {
+    const open = async () => {
+      jest.clearAllMocks();
+      queryParams$.next({ userId: otherUserId });
+      fixture.detectChanges();
+      await fixture.whenStable();
+      fixture.detectChanges();
+    };
+
+    it("reads the tasks, ciphers and organizations of that account alone", async () => {
+      await open();
+
+      const items = await firstValueFrom(component["atRiskItems$"]);
+      await firstValueFrom(component["pageDescription$"]);
+
+      expect(items.map((item) => item.name)).toEqual(["Item 1"]);
+      expect(pendingTasks$).toHaveBeenCalledWith(otherUserId);
+      expect(cipherViews$).toHaveBeenCalledWith(otherUserId);
+      expect(organizations$).toHaveBeenCalledWith(otherUserId);
+      for (const read of [pendingTasks$, cipherViews$, organizations$]) {
+        expect(read).not.toHaveBeenCalledWith("user");
+      }
+    });
+
+    it("says whose vault the passwords are in and fetches the icons from that account", async () => {
+      await open();
+
+      const hint = fixture.debugElement.query(By.directive(ItemAccountHintComponent));
+      expect(hint.componentInstance.email()).toBe("other@example.com");
+      const icon = fixture.debugElement.query(By.directive(MockAppIcon));
+      expect(icon.componentInstance.userId()).toBe(otherUserId);
+    });
+
+    it("keeps the dismissed state and the task notifications of that account", async () => {
+      mockAtRiskPasswordPageService.isGettingStartedDismissed.mockReturnValue(of(true));
+      await open();
+      const updateAtRiskPasswordState = jest
+        .spyOn(component["atRiskPasswordCalloutService"], "updateAtRiskPasswordState")
+        .mockImplementation(() => undefined);
+
+      await component.ngOnInit();
+      await component.dismissCallout();
+      await firstValueFrom(component["showAutofillCallout$"]);
+
+      expect(mockAtRiskPasswordPageService.isGettingStartedDismissed).toHaveBeenCalledWith(
+        otherUserId,
+      );
+      expect(mockAtRiskPasswordPageService.isCalloutDismissed).toHaveBeenCalledWith(otherUserId);
+      expect(mockAtRiskPasswordPageService.dismissCallout).toHaveBeenCalledWith(otherUserId);
+      expect(unreadNotifications$).toHaveBeenCalledWith(otherUserId);
+      expect(updateAtRiskPasswordState).toHaveBeenCalledWith(otherUserId, {
+        hasInteractedWithTasks: true,
+        tasksBannerDismissed: false,
+      });
+    });
+
+    it("opens an item for that account after that account's re-prompt", async () => {
+      mockPasswordRepromptService.passwordRepromptCheck.mockResolvedValue(true);
+      await open();
+      const cipher = { id: "cipher", type: 1 } as CipherView;
+
+      await component.viewCipher(cipher);
+
+      expect(mockPasswordRepromptService.passwordRepromptCheck).toHaveBeenCalledWith(
+        cipher,
+        otherUserId,
+      );
+      expect(navigate).toHaveBeenCalledWith(["/view-cipher"], {
+        queryParams: { cipherId: "cipher", type: 1, userId: otherUserId },
+      });
+    });
+
+    it("leaves when that account stops serving autofill and never shows the active account", async () => {
+      await open();
+
+      otherAccountServes$.next(false);
+      await fixture.whenStable();
+
+      expect(setHistory).toHaveBeenCalledWith([]);
+      expect(navigate).toHaveBeenCalledWith(["/tabs/vault"]);
+      expect(pendingTasks$).not.toHaveBeenCalledWith("user");
+      expect(cipherViews$).not.toHaveBeenCalledWith("user");
+    });
+
+    it("names no account and shows no hint without `userId`", async () => {
+      const cipher = { id: "cipher", type: 1 } as CipherView;
+      mockPasswordRepromptService.passwordRepromptCheck.mockResolvedValue(true);
+
+      await component.viewCipher(cipher);
+
+      expect(fixture.debugElement.query(By.css('[data-testid="item-account-hint"]'))).toBeNull();
+      expect(pendingTasks$).toHaveBeenCalledWith("user");
+      expect(mockPasswordRepromptService.passwordRepromptCheck).toHaveBeenCalledWith(
+        cipher,
+        undefined,
+      );
+      expect(navigate).toHaveBeenCalledWith(["/view-cipher"], {
+        queryParams: { cipherId: "cipher", type: 1 },
+      });
     });
   });
 });

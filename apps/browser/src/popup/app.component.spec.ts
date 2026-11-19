@@ -15,6 +15,7 @@ import { AuthRequestAnsweringService } from "@bitwarden/common/auth/abstractions
 import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
 import { TokenService } from "@bitwarden/common/auth/abstractions/token.service";
 import { PendingAuthRequestsStateService } from "@bitwarden/common/auth/services/auth-request-answering/pending-auth-requests.state";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { PremiumCheckoutPendingService } from "@bitwarden/common/billing/abstractions/account/premium-checkout-pending.service";
 import { AnimationControlService } from "@bitwarden/common/platform/abstractions/animation-control.service";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
@@ -52,6 +53,10 @@ describe("AppComponent (browser popup)", () => {
   let i18nService: MockProxy<I18nService>;
 
   const userId = "user-1" as UserId;
+  /** Whether an account serves autofill: unlocked, and active or opted in. */
+  const isAutofillUser$ = jest.fn();
+  let userDecryptionOptionsService: MockProxy<UserDecryptionOptionsServiceAbstraction>;
+  let keyService: MockProxy<KeyService>;
 
   beforeEach(() => {
     accountService = mock<AccountService>();
@@ -68,6 +73,11 @@ describe("AppComponent (browser popup)", () => {
     ngZone = mock<NgZone>();
     toastService = mock<ToastService>();
     i18nService = mock<I18nService>();
+    userDecryptionOptionsService = mock<UserDecryptionOptionsServiceAbstraction>();
+    userDecryptionOptionsService.userDecryptionOptionsById$.mockReturnValue(of({} as any));
+    keyService = mock<KeyService>();
+    keyService.everHadUserKey$.mockReturnValue(of(true));
+    isAutofillUser$.mockReturnValue(of(false));
     i18nService.t.mockImplementation((key: string, ...params: unknown[]) =>
       [key, ...params].join(":"),
     );
@@ -92,6 +102,7 @@ describe("AppComponent (browser popup)", () => {
       providers: [
         { provide: PopupCompactModeService, useValue: compactModeService },
         { provide: SdkService, useValue: sdkService },
+        { provide: AutofillAccountsService, useValue: { isAutofillUser$ } },
       ],
     });
 
@@ -116,8 +127,8 @@ describe("AppComponent (browser popup)", () => {
           mock<BiometricStateService>(),
           mock<BiometricsService>(),
           deviceTrustToastService,
-          mock<UserDecryptionOptionsServiceAbstraction>(),
-          mock<KeyService>(),
+          userDecryptionOptionsService,
+          keyService,
           mock<DestroyRef>(),
           documentLangSetter,
           popupSizeService,
@@ -216,6 +227,54 @@ describe("AppComponent (browser popup)", () => {
       await flushAsync();
 
       expect(syncService.fullSync).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("locked", () => {
+    const otherUserId = "user-2" as UserId;
+    const flushAsync = () => new Promise(process.nextTick);
+
+    /** The active account locks while the popup shows the page at `url`. */
+    const lockWhileOn = async (url: string) => {
+      (router as any).url = url;
+      const [, query = ""] = url.split("?");
+      router.parseUrl.mockReturnValue({
+        queryParams: Object.fromEntries(new URLSearchParams(query)),
+      } as any);
+      messageListener.allMessages$ = of({ command: "locked", userId }) as any;
+      premiumCheckoutPendingService.consumeCheckoutPending.mockResolvedValue(null);
+      await component.ngOnInit();
+      await flushAsync();
+    };
+
+    it("goes to the lock screen from a page of the active account", async () => {
+      await lockWhileOn("/view-cipher?cipherId=c");
+
+      expect(router.navigate).toHaveBeenCalledWith(["lock"]);
+      expect(isAutofillUser$).not.toHaveBeenCalled();
+    });
+
+    it("stays on a page that was opened for another account that still serves autofill", async () => {
+      isAutofillUser$.mockReturnValue(of(true));
+
+      await lockWhileOn(`/view-cipher?cipherId=c&userId=${otherUserId}`);
+
+      expect(isAutofillUser$).toHaveBeenCalledWith(otherUserId);
+      expect(router.navigate).not.toHaveBeenCalled();
+    });
+
+    it("goes to the lock screen from a page of another account that no longer serves", async () => {
+      await lockWhileOn(`/view-cipher?cipherId=c&userId=${otherUserId}`);
+
+      expect(router.navigate).toHaveBeenCalledWith(["lock"]);
+    });
+
+    it("goes to the lock screen from a page that names the locked account itself", async () => {
+      isAutofillUser$.mockReturnValue(of(true));
+
+      await lockWhileOn(`/view-cipher?cipherId=c&userId=${userId}`);
+
+      expect(router.navigate).toHaveBeenCalledWith(["lock"]);
     });
   });
 

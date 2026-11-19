@@ -22,6 +22,7 @@ import {
   firstValueFrom,
   map,
   Observable,
+  of,
   shareReplay,
   startWith,
   switchMap,
@@ -221,6 +222,17 @@ export class VaultComponent implements OnInit, OnDestroy {
     this.vaultPopupListFiltersService.numberOfAppliedFilters$;
 
   protected filteredCiphers$ = this.vaultPopupItemsService.filteredCiphers$;
+
+  /**
+   * Whether a further autofill account has suggestions for the current tab. They are offered even
+   * while the active account's vault is empty. False while no account has opted in.
+   */
+  protected readonly otherAccountsHaveSuggestions = toSignal(
+    (this.vaultPopupItemsService.otherAccountAutoFillCiphers$ ?? of([])).pipe(
+      map((accounts) => accounts.length > 0),
+    ),
+    { initialValue: false },
+  );
   protected favoriteCiphers$ = this.vaultPopupItemsService.favoriteCiphers$;
   protected allFilters$ = this.vaultPopupListFiltersService.allFilters$;
   private readonly vaultPopupListTableService = inject(VaultPopupListTableService);

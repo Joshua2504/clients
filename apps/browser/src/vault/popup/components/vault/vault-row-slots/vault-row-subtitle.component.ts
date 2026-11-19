@@ -1,8 +1,9 @@
 import { ChangeDetectionStrategy, Component, computed, inject, input } from "@angular/core";
 import { toObservable, toSignal } from "@angular/core/rxjs-interop";
-import { of, switchMap } from "rxjs";
+import { combineLatest, of, switchMap } from "rxjs";
 
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+import { UserId } from "@bitwarden/common/types/guid";
 import {
   CipherViewLike,
   CipherViewLikeUtils,
@@ -19,16 +20,24 @@ import { VAULT_ROW_SUBTITLE, VaultRowSubtitle } from "./vault-row-subtitle.token
 export class VaultRowSubtitleComponent {
   readonly cipher = input<CipherViewLike | null>(null);
 
+  /** The account whose vault holds the cipher, for a row of an account other than the active one. */
+  readonly userId = input<UserId | undefined>(undefined);
+
   private readonly i18nService = inject(I18nService);
   private readonly provider: VaultRowSubtitle | null = inject(VAULT_ROW_SUBTITLE, {
     optional: true,
   });
 
   private readonly contributed = toSignal(
-    toObservable(this.cipher).pipe(
-      switchMap((cipher) =>
-        cipher == null || this.provider == null ? of(null) : this.provider.subtitle$(cipher),
-      ),
+    combineLatest([toObservable(this.cipher), toObservable(this.userId)]).pipe(
+      switchMap(([cipher, userId]) => {
+        if (cipher == null || this.provider == null) {
+          return of(null);
+        }
+        return userId == null
+          ? this.provider.subtitle$(cipher)
+          : this.provider.subtitle$(cipher, userId);
+      }),
     ),
     { initialValue: null },
   );

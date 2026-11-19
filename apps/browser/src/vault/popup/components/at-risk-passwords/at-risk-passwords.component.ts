@@ -27,7 +27,6 @@ import {
   getOrganizationById,
   OrganizationService,
 } from "@bitwarden/common/admin-console/abstractions/organization/organization.service.abstraction";
-import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { AutofillOverlayVisibility } from "@bitwarden/common/autofill/constants";
 import { AutofillSettingsServiceAbstraction } from "@bitwarden/common/autofill/services/autofill-settings.service";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
@@ -56,10 +55,12 @@ import {
 import { PopOutComponent } from "../../../../platform/popup/components/pop-out.component";
 import { PopupHeaderComponent } from "../../../../platform/popup/layout/popup-header.component";
 import { PopupPageComponent } from "../../../../platform/popup/layout/popup-page.component";
+import { VaultPopupItemAccount } from "../../services/vault-popup-item-account.service";
 import {
   AtRiskCarouselDialogComponent,
   AtRiskCarouselDialogResult,
 } from "../at-risk-carousel-dialog/at-risk-carousel-dialog.component";
+import { ItemAccountHintComponent } from "../item-account-hint/item-account-hint.component";
 
 import { AtRiskPasswordPageService } from "./at-risk-password-page.service";
 
@@ -76,8 +77,9 @@ import { AtRiskPasswordPageService } from "./at-risk-password-page.service";
     ButtonModule,
     DialogModule,
     VaultCarouselModule,
+    ItemAccountHintComponent,
   ],
-  providers: [AtRiskPasswordPageService, AtRiskPasswordCalloutService],
+  providers: [AtRiskPasswordPageService, AtRiskPasswordCalloutService, VaultPopupItemAccount],
   selector: "vault-at-risk-passwords",
   templateUrl: "./at-risk-passwords.component.html",
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -87,7 +89,12 @@ export class AtRiskPasswordsComponent implements OnInit {
   private readonly organizationService = inject(OrganizationService);
   private readonly cipherService = inject(CipherService);
   private readonly i18nService = inject(I18nService);
-  private readonly accountService = inject(AccountService);
+  /**
+   * The account whose at-risk passwords the page shows: the one the route names with `userId`,
+   * else the active account. Tasks, ciphers, the dismissed state and the items it opens are that
+   * account's alone.
+   */
+  protected readonly itemAccount = inject(VaultPopupItemAccount);
   private readonly passwordRepromptService = inject(PasswordRepromptService);
   private readonly router = inject(Router);
   private readonly autofillSettingsService = inject(AutofillSettingsServiceAbstraction);
@@ -106,22 +113,22 @@ export class AtRiskPasswordsComponent implements OnInit {
    */
   protected readonly launchingCipher = signal<CipherView | null>(null);
 
-  private readonly activeUserData$ = this.accountService.activeAccount$.pipe(
-    filterOutNullish(),
-    switchMap((user) =>
+  /** The data of the page's account. Named `activeUserData$` from when that was the active one. */
+  private readonly activeUserData$ = this.itemAccount.userId$.pipe(
+    switchMap((userId) =>
       combineLatest([
-        this.taskService.pendingTasks$(user.id),
-        this.cipherService.cipherViews$(user.id).pipe(
+        this.taskService.pendingTasks$(userId),
+        this.cipherService.cipherViews$(userId).pipe(
           filterOutNullish(),
           map((ciphers) => Object.fromEntries(ciphers.map((c) => [c.id, c]))),
         ),
-        of(user),
+        of(userId),
       ]),
     ),
-    map(([tasks, ciphers, user]) => ({
+    map(([tasks, ciphers, userId]) => ({
       tasks,
       ciphers,
-      userId: user.id,
+      userId,
     })),
     shareReplay({ bufferSize: 1, refCount: true }),
   );
@@ -194,6 +201,11 @@ export class AtRiskPasswordsComponent implements OnInit {
   );
 
   async ngOnInit() {
+    if ((await this.itemAccount.userId()) == null) {
+      // The named account does not serve. The page is being left and shows nothing.
+      return;
+    }
+
     const { userId } = await firstValueFrom(this.activeUserData$);
     const gettingStartedDismissed = await firstValueFrom(
       this.atRiskPasswordPageService.isGettingStartedDismissed(userId),
@@ -242,12 +254,15 @@ export class AtRiskPasswordsComponent implements OnInit {
   }
 
   async viewCipher(cipher: CipherView) {
-    const repromptPassed = await this.passwordRepromptService.passwordRepromptCheck(cipher);
+    const repromptPassed = await this.passwordRepromptService.passwordRepromptCheck(
+      cipher,
+      this.itemAccount.explicitUserId(),
+    );
     if (!repromptPassed) {
       return;
     }
     await this.router.navigate(["/view-cipher"], {
-      queryParams: { cipherId: cipher.id, type: cipher.type },
+      queryParams: { cipherId: cipher.id, type: cipher.type, ...this.itemAccount.queryParams() },
     });
   }
 

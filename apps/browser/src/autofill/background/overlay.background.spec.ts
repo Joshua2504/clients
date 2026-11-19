@@ -4470,6 +4470,7 @@ describe("OverlayBackground", () => {
         expect(openViewVaultItemPopoutSpy).toHaveBeenCalledWith(sender.tab, {
           cipherId: cipher.id,
           action: SHOW_AUTOFILL_BUTTON,
+          userId: mockUserId,
         });
       });
     });
@@ -4958,10 +4959,8 @@ describe("OverlayBackground", () => {
             id: "inline-menu-cipher-1",
             name: "other",
             accountLabel: otherUserEmail,
-            canView: false,
           }),
         ]);
-        expect(postedCiphers()[0]).not.toHaveProperty("canView");
         expect(JSON.stringify(postedCiphers())).not.toContain(otherUserId);
         expect(JSON.stringify(postedCiphers())).not.toContain("id-other");
       });
@@ -5076,19 +5075,54 @@ describe("OverlayBackground", () => {
         expect(autofillOrchestrator.fillCipher).not.toHaveBeenCalled();
       });
 
-      it("does not open the vault item view for a cipher of another account", async () => {
-        const openViewVaultItemPopoutSpy = jest
-          .spyOn(overlayBackground as any, "openViewVaultItemPopout")
-          .mockImplementation();
+      describe("viewing a cipher of an account that is not active", () => {
+        let openViewVaultItemPopoutSpy: jest.SpyInstance;
+        const viewOther = async () => {
+          sendPortMessage(listMessageConnectorSpy, {
+            command: "viewSelectedCipher",
+            inlineMenuCipherId: "inline-menu-cipher-1",
+            portKey,
+          });
+          await flushPromises();
+        };
 
-        sendPortMessage(listMessageConnectorSpy, {
-          command: "viewSelectedCipher",
-          inlineMenuCipherId: "inline-menu-cipher-1",
-          portKey,
+        beforeEach(() => {
+          openViewVaultItemPopoutSpy = jest
+            .spyOn(overlayBackground as any, "openViewVaultItemPopout")
+            .mockImplementation();
         });
-        await flushPromises();
 
-        expect(openViewVaultItemPopoutSpy).not.toHaveBeenCalled();
+        it("opens the vault item view for its account and leaves the active account", async () => {
+          const switchAccount = jest.spyOn(accountService, "switchAccount");
+
+          await viewOther();
+
+          expect(openViewVaultItemPopoutSpy).toHaveBeenCalledTimes(1);
+          expect(openViewVaultItemPopoutSpy).toHaveBeenCalledWith(sender.tab, {
+            cipherId: "id-other",
+            action: SHOW_AUTOFILL_BUTTON,
+            userId: otherUserId,
+          });
+          expect(switchAccount).not.toHaveBeenCalled();
+          expect((await firstValueFrom(accountService.activeAccount$))?.id).toBe(mockUserId);
+        });
+
+        it("offers the view for every listed cipher", () => {
+          for (const cipher of postedCiphers()) {
+            expect(cipher).not.toHaveProperty("canView");
+          }
+        });
+
+        it("opens nothing once its account has locked", async () => {
+          const heldBeforeLock = new Map(overlayBackground["inlineMenuCiphers"]);
+          autofillUserIds$.next([mockUserId]);
+          await rebuildSettled();
+          overlayBackground["inlineMenuCiphers"] = heldBeforeLock;
+
+          await viewOther();
+
+          expect(openViewVaultItemPopoutSpy).not.toHaveBeenCalled();
+        });
       });
 
       it("drops the held ciphers when the last account locks", async () => {
@@ -5229,29 +5263,22 @@ describe("OverlayBackground", () => {
 
     describe("with the active account locked and another account serving", () => {
       const otherLogin = login("id-other", "other");
-      let switchAccount: jest.Mock;
+      let switchAccount: jest.SpyInstance;
 
       beforeEach(async () => {
         activeAccountStatusMock$.next(AuthenticationStatus.Locked);
         autofillUserIds$.next([otherUserId]);
         vaults.set(mockUserId, [login("id-active", "active")]);
         vaults.set(otherUserId, [otherLogin]);
-        switchAccount = jest.fn(async (userId: UserId) => {
-          await accountService.switchAccount(userId);
-        });
-        overlayBackground["switchAccount"] = switchAccount;
+        switchAccount = jest.spyOn(accountService, "switchAccount");
 
         await overlayBackground.updateOverlayCiphers();
         await rebuildSettled();
       });
 
-      afterEach(async () => {
-        await accountService.switchAccount(mockUserId);
-      });
-
       it("lists the serving account's logins, named as that account's", () => {
         expect(postedCiphers()).toEqual([
-          expect.objectContaining({ name: "other", accountLabel: otherUserEmail, canView: false }),
+          expect.objectContaining({ name: "other", accountLabel: otherUserEmail }),
         ]);
       });
 
@@ -5319,7 +5346,7 @@ describe("OverlayBackground", () => {
         );
       });
 
-      it("adds a new item to the serving account, which becomes the active one for the item form", async () => {
+      it("adds a new item to the serving account without making it the active one", async () => {
         const openAddEditVaultItemPopoutSpy = jest
           .spyOn(overlayBackground as any, "openAddEditVaultItemPopout")
           .mockImplementation();
@@ -5335,31 +5362,44 @@ describe("OverlayBackground", () => {
           expect.objectContaining({ cipher: expect.any(Object) }),
           otherUserId,
         );
-        expect(switchAccount).toHaveBeenCalledWith(otherUserId);
-        expect(openAddEditVaultItemPopoutSpy).toHaveBeenCalled();
+        expect(openAddEditVaultItemPopoutSpy).toHaveBeenCalledWith(
+          sender.tab,
+          expect.objectContaining({
+            cipherType: CipherType.Login,
+            fillAfterSave: true,
+            userId: otherUserId,
+          }),
+        );
+        expect(switchAccount).not.toHaveBeenCalled();
+        expect((await firstValueFrom(accountService.activeAccount$))?.id).toBe(mockUserId);
       });
 
-      it("opens no item form when the serving account cannot become the active one", async () => {
-        const openAddEditVaultItemPopoutSpy = jest
-          .spyOn(overlayBackground as any, "openAddEditVaultItemPopout")
+      it("opens the view of a listed login for the serving account", async () => {
+        const openViewVaultItemPopoutSpy = jest
+          .spyOn(overlayBackground as any, "openViewVaultItemPopout")
           .mockImplementation();
-        switchAccount.mockImplementation(async () => undefined);
 
-        overlayBackground["currentAddNewItemData"] = { sender, addNewCipherType: CipherType.Login };
-        await overlayBackground["buildCipherAndOpenAddEditVaultItemPopout"]({
-          addNewCipherType: CipherType.Login,
-          login: { uri: url, hostname: "", username: "username", password: "password" },
-          sender,
+        sendPortMessage(listMessageConnectorSpy, {
+          command: "viewSelectedCipher",
+          inlineMenuCipherId: "inline-menu-cipher-0",
+          portKey,
         });
+        await flushPromises();
 
-        expect(openAddEditVaultItemPopoutSpy).not.toHaveBeenCalled();
+        expect(openViewVaultItemPopoutSpy).toHaveBeenCalledWith(sender.tab, {
+          cipherId: "id-other",
+          action: SHOW_AUTOFILL_BUTTON,
+          userId: otherUserId,
+        });
+        expect(switchAccount).not.toHaveBeenCalled();
       });
     });
 
     it("keeps the generator and a new item with the active account while it serves", async () => {
-      const switchAccount = jest.fn();
-      overlayBackground["switchAccount"] = switchAccount;
-      jest.spyOn(overlayBackground as any, "openAddEditVaultItemPopout").mockImplementation();
+      const switchAccount = jest.spyOn(accountService, "switchAccount");
+      const openAddEditVaultItemPopoutSpy = jest
+        .spyOn(overlayBackground as any, "openAddEditVaultItemPopout")
+        .mockImplementation();
 
       await expect(overlayBackground["syncGeneratorAccount"]()).resolves.toBe(mockUserId);
       overlayBackground["currentAddNewItemData"] = { sender, addNewCipherType: CipherType.Login };
@@ -5372,6 +5412,10 @@ describe("OverlayBackground", () => {
       expect(cipherService.setAddEditCipherInfo).toHaveBeenCalledWith(
         expect.any(Object),
         mockUserId,
+      );
+      expect(openAddEditVaultItemPopoutSpy).toHaveBeenCalledWith(
+        sender.tab,
+        expect.objectContaining({ userId: mockUserId }),
       );
       expect(switchAccount).not.toHaveBeenCalled();
     });

@@ -202,6 +202,17 @@ describe("AutofillVaultListItemsComponent", () => {
       expect(sections()[1].title()).toBe("suggestionsForAccount|itemSuggestions|other@example.com");
     });
 
+    it("renders the other accounts' sections alone for a page without the active account's list", async () => {
+      autoFillCiphers$.next([login]);
+      otherAccountAutoFillCiphers$.next([otherAccount]);
+      fixture.componentRef.setInput("otherAccountsOnly", true);
+      await render();
+
+      expect(sections()).toHaveLength(1);
+      expect(sections()[0].accountUserId()).toBe("OtherUserId");
+      expect(sections()[0].ciphers()).toEqual([shared]);
+    });
+
     describe("empty autofill tip", () => {
       it("shows when no autofill account has a matching login", async () => {
         await render();

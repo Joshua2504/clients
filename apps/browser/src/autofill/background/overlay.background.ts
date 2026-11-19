@@ -307,12 +307,6 @@ export class OverlayBackground implements OverlayBackgroundInterface {
     private multiAccountFillCipherPolicy: MultiAccountFillCipherPolicy,
     private autofillAccountsService: AutofillAccountsService,
     private billingAccountProfileStateService: BillingAccountProfileStateService,
-    /**
-     * Makes an account the active one. The item form shows the active account's vault, so a new
-     * item for another account makes its account the active one first. Without it such an item
-     * is not opened.
-     */
-    private switchAccount?: (userId: UserId) => Promise<void>,
   ) {
     this.initOverlayEventObservables();
   }
@@ -1155,10 +1149,6 @@ export class OverlayBackground implements OverlayBackgroundInterface {
     const accountLabel = accountDisplay.labels.get(userId);
     if (accountLabel) {
       inlineMenuData.accountLabel = accountLabel;
-    }
-    // The vault item view shows the active account's vault.
-    if (userId !== accountDisplay.activeUserId) {
-      inlineMenuData.canView = false;
     }
 
     if (cipher.type === CipherType.Login) {
@@ -2997,20 +2987,14 @@ export class OverlayBackground implements OverlayBackgroundInterface {
       return;
     }
     const { userId, cipher } = accountCipher;
-    // The vault item view shows the active account's vault. A cipher of any other account is
-    // refused instead of opening the active account's item with the same id.
-    const activeUserId = await firstValueFrom(
-      this.accountService.activeAccount$.pipe(getOptionalUserId),
-    );
-    if (userId !== activeUserId) {
-      return;
-    }
 
     this.closeInlineMenu(sender);
 
+    // The item is shown in the vault of the account that owns it, whichever account is active.
     await this.openViewVaultItemPopout(sender.tab, {
       cipherId: cipher.id,
       action: SHOW_AUTOFILL_BUTTON,
+      userId,
     });
   }
 
@@ -3333,35 +3317,6 @@ export class OverlayBackground implements OverlayBackgroundInterface {
   }
 
   /**
-   * Makes `userId` the active account, so the item form shows its vault.
-   *
-   * @returns false when the account is not active and cannot become so; no item form may open.
-   */
-  private async activateAccount(userId: UserId): Promise<boolean> {
-    const activeUserId = await firstValueFrom(
-      this.accountService.activeAccount$.pipe(getOptionalUserId),
-    );
-    if (activeUserId === userId) {
-      return true;
-    }
-    if (
-      this.switchAccount == null ||
-      !(await firstValueFrom(this.autofillAccountsService.isAutofillUser$(userId)))
-    ) {
-      return false;
-    }
-    try {
-      await this.switchAccount(userId);
-    } catch (error) {
-      this.logService.error(error);
-      return false;
-    }
-    return (
-      (await firstValueFrom(this.accountService.activeAccount$.pipe(getOptionalUserId))) === userId
-    );
-  }
-
-  /**
    * Handles building a new cipher and opening the add/edit vault item popout.
    *
    * @param login - The login data captured from the extension message
@@ -3421,17 +3376,13 @@ export class OverlayBackground implements OverlayBackgroundInterface {
         targetUserId,
       );
 
-      // The item form shows and saves to the active account's vault.
-      if (!(await this.activateAccount(targetUserId))) {
-        this.currentAddNewItemData = null;
-        return;
-      }
-
+      // The item form is opened for the target account; the active account stays what it is.
       if (sender.tab) {
         await this.openAddEditVaultItemPopout(sender.tab, {
           cipherId: cipherView.id,
           cipherType: addNewCipherType ?? CipherType.Login,
           fillAfterSave: true,
+          userId: targetUserId,
         });
       }
     } catch (error) {

@@ -454,6 +454,18 @@ export default class RuntimeBackground {
     }
   }
 
+  /** Whether an "unlocked" message names an account that is not the active one. */
+  private async unlockedAnotherAccountThanActive(msg: any): Promise<boolean> {
+    if (msg.command !== "unlocked" || msg.userId == null) {
+      return false;
+    }
+
+    const activeUserId = await firstValueFrom(
+      this.accountService.activeAccount$.pipe(map((a) => a?.id)),
+    );
+    return msg.userId !== activeUserId;
+  }
+
   async processMessage(msg: any) {
     switch (msg.command) {
       case "loggedIn":
@@ -466,7 +478,12 @@ export default class RuntimeBackground {
           await this.autofillService.reloadAutofillScripts();
         }
 
-        if (this.lockedVaultPendingNotifications?.length > 0) {
+        // What waits for an unlock waits for the active account. An unlock that names another
+        // account (the lock screen of an account that is not the active one) leaves it waiting.
+        if (
+          this.lockedVaultPendingNotifications?.length > 0 &&
+          !(await this.unlockedAnotherAccountThanActive(msg))
+        ) {
           item = this.lockedVaultPendingNotifications.pop();
           await closeUnlockPopout();
         }
@@ -547,9 +564,13 @@ export default class RuntimeBackground {
         await this.executeMessageActionOrOpenPopup(msg, this.openPopup.bind(this));
         break;
       case VaultMessages.OpenAtRiskPasswords: {
+        // Only the background names the account whose tasks the page shows (the notification
+        // bar, for the account whose cipher it updated). A web page's request names none.
+        const userId =
+          !isExternalMessage(msg) && typeof msg.userId === "string" ? msg.userId : undefined;
         await this.executeMessageActionOrOpenPopup(
           msg,
-          this.main.openAtRisksPasswordsPage.bind(this),
+          this.main.openAtRisksPasswordsPage.bind(this, userId),
         );
         this.announcePopupOpen();
         break;

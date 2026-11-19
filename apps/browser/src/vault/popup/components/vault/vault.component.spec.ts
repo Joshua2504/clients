@@ -225,6 +225,8 @@ jest.spyOn(BrowserApi, "isPopupOpen").mockResolvedValue(false);
 jest.spyOn(BrowserPopupUtils, "openCurrentPagePopout").mockResolvedValue();
 
 describe("VaultComponent", () => {
+  /** The suggestions of the further autofill accounts. Empty while no account has opted in. */
+  const otherAccountAutoFillCiphers$ = new BehaviorSubject<any[]>([]);
   let component: VaultComponent;
   let defaultFixture: ComponentFixture<VaultComponent>;
 
@@ -245,6 +247,7 @@ describe("VaultComponent", () => {
     filteredCiphers$: new BehaviorSubject<any[]>([]),
     cipherCount$: new BehaviorSubject<number>(0),
     hasSearchText$: new BehaviorSubject<boolean>(false),
+    otherAccountAutoFillCiphers$: otherAccountAutoFillCiphers$.asObservable(),
   } as Partial<VaultPopupItemsService>;
 
   /** Rows as the list table service builds them; the header counts the `allItems` section. */
@@ -1058,6 +1061,46 @@ describe("VaultComponent", () => {
 
     expect(fixture.nativeElement.textContent).toContain("emptyVaultNudgeTitle");
   }));
+
+  describe("an empty vault while another account serves autofill", () => {
+    const suggestions = (fixture: ComponentFixture<VaultComponent>) =>
+      fixture.debugElement.queryAll(By.directive(AutofillVaultListItemsStubComponent));
+
+    beforeEach(() => {
+      configSvc.getFeatureFlag$.mockImplementation((_flag: string) => of(false));
+      itemsSvc.emptyVault$.next(true);
+    });
+
+    afterEach(() => {
+      otherAccountAutoFillCiphers$.next([]);
+      itemsSvc.emptyVault$.next(false);
+    });
+
+    it("renders no suggestions while no account has opted in", fakeAsync(() => {
+      const fixture = TestBed.createComponent(VaultComponent);
+      fixture.detectChanges();
+      tick();
+      fixture.detectChanges();
+
+      expect(suggestions(fixture)).toHaveLength(0);
+    }));
+
+    it("offers the other accounts' suggestions above the empty vault", fakeAsync(() => {
+      otherAccountAutoFillCiphers$.next([
+        { userId: "other-user", email: "other@example.com", ciphers: [{ id: "c" }] },
+      ]);
+
+      const fixture = TestBed.createComponent(VaultComponent);
+      fixture.detectChanges();
+      tick();
+      fixture.detectChanges();
+
+      expect(suggestions(fixture)).toHaveLength(1);
+      // Only the other accounts' sections: the active account has nothing to suggest.
+      expect(suggestions(fixture)[0].nativeElement.hasAttribute("otherAccountsOnly")).toBe(true);
+      expect(fixture.nativeElement.textContent).toContain("yourVaultIsEmpty");
+    }));
+  });
 
   it("renders Has-Items spotlight when vault has items and nudge is on", fakeAsync(() => {
     itemsSvc.emptyVault$.next(false);

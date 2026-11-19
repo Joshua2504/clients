@@ -1170,15 +1170,11 @@ export class AutofillInlineMenuList extends AutofillInlineMenuPageElement {
     this.buildPasskeysHeadingElements(cipher);
 
     const fillCipherElement = this.buildFillCipherElement(cipher);
+    const viewCipherElement = this.buildViewCipherElement(cipher);
 
     const cipherContainerElement = globalThis.document.createElement("div");
     cipherContainerElement.classList.add("cipher-container");
-    cipherContainerElement.append(fillCipherElement);
-    // The vault item view shows the active account only, so a cipher of another account gets no
-    // view button.
-    if (cipher.canView !== false) {
-      cipherContainerElement.append(this.buildViewCipherElement(cipher));
-    }
+    cipherContainerElement.append(fillCipherElement, viewCipherElement);
 
     const inlineMenuListActionsItem = globalThis.document.createElement("li");
     inlineMenuListActionsItem.setAttribute("role", "listitem");
@@ -2079,13 +2075,10 @@ export class AutofillInlineMenuList extends AutofillInlineMenuPageElement {
    */
   private focusViewCipherButton(currentListItem: HTMLElement, currentButtonElement: HTMLElement) {
     const cipherContainer = currentListItem.querySelector(".cipher-container") as HTMLElement;
-    const nextSibling = currentButtonElement.nextElementSibling as HTMLElement;
-    if (!nextSibling) {
-      return;
-    }
-
     cipherContainer.classList.add("remove-outline");
-    nextSibling.focus();
+
+    const nextSibling = currentButtonElement.nextElementSibling as HTMLElement;
+    nextSibling?.focus();
   }
 
   /**

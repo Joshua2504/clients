@@ -24,7 +24,7 @@
     <div class="tw-p-2">
       @if (
         data.message.type === BrowserFido2MessageTypes.ConfirmNewCredentialRequest &&
-        accounts.length > 1
+        accounts.length + lockedAccounts.length > 1
       ) {
         <bit-section>
           <bit-form-field disableMargin>
@@ -36,6 +36,12 @@
             >
               @for (account of accounts; track account.userId) {
                 <bit-option [value]="account.userId" [label]="account.label"></bit-option>
+              }
+              @for (account of lockedAccounts; track account.userId) {
+                <bit-option
+                  [value]="account.userId"
+                  [label]="'passkeyAccountLockedUnlockToSave' | i18n: account.label"
+                ></bit-option>
               }
             </bit-select>
           </bit-form-field>
@@ -122,6 +128,19 @@
                   (onSelected)="handleCipherItemSelect(cipherItem)"
                 ></app-fido2-cipher-row>
               }
+              @for (account of lockedAccounts; track account.userId) {
+                <div class="tw-flex tw-justify-center tw-pt-2">
+                  <button
+                    bitLink
+                    linkType="secondary"
+                    type="button"
+                    data-testid="passkey-unlock-account"
+                    (click)="unlockAccount(account.userId)"
+                  >
+                    {{ "unlockAccountToSeeMorePasskeys" | i18n: account.label }}
+                  </button>
+                </div>
+              }
             } @else {
               <bit-status-lockup>
                 <bit-svg slot="graphic" [content]="noResultsIcon"></bit-svg>
@@ -150,10 +169,24 @@
             <div class="tw-space-y-4">
               <p>{{ "noPasskeysFoundForThisApplication" | i18n }}</p>
             </div>
+            @for (account of lockedAccounts; track account.userId) {
+              <button
+                bitButton
+                block
+                buttonType="primary"
+                type="button"
+                class="tw-mb-2"
+                data-testid="passkey-unlock-account"
+                (click)="unlockAccount(account.userId)"
+                [loading]="loading"
+              >
+                {{ "unlockAccountNamed" | i18n: account.label }}
+              </button>
+            }
             <button
               bitButton
               block
-              buttonType="primary"
+              [buttonType]="lockedAccounts.length > 0 ? 'secondary' : 'primary'"
               type="button"
               (click)="abort(false)"
               [loading]="loading"

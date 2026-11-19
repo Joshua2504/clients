@@ -8,7 +8,7 @@
   >
     <div class="tw-flex tw-items-center tw-gap-2">
       {{ "attachments" | i18n }}
-      <app-premium-badge></app-premium-badge>
+      <app-premium-badge [userId]="userId"></app-premium-badge>
     </div>
     <ng-container slot="end">
       <span class="tw-sr-only">{{ "popOutNewWindow" | i18n }}</span>

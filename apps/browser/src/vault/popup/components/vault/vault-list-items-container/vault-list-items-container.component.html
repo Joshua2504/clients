@@ -107,7 +107,7 @@
             class="{{ itemHeightClass }}"
           >
             <div slot="start" class="tw-justify-start tw-w-7 tw-flex">
-              <app-vault-icon [cipher]="cipher"></app-vault-icon>
+              <app-vault-icon [cipher]="cipher" [userId]="accountUserId()"></app-vault-icon>
             </div>
             <span data-testid="item-name">{{ cipher.name }}</span>
             <div slot="default-trailing" class="tw-flex tw-gap-1.5">
@@ -132,7 +132,7 @@
           </button>
 
           <ng-container slot="end">
-            @if (showFillTextOnHover() && canAutofillCipher(cipher)) {
+            @if (showFillTextOnHover()) {
               <bit-item-action>
                 <button
                   type="button"
@@ -155,30 +155,16 @@
                 ></button>
               </bit-item-action>
             }
-            @if (accountUserId()) {
-              <!-- The copy and item actions act on the active account. For another account, the item opens in its own account. -->
-              <bit-item-action>
-                <button
-                  type="button"
-                  bitIconButton="bwi-ellipsis-v"
-                  size="small"
-                  [label]="'moreOptionsLabelNoPlaceholder' | i18n"
-                  [bitMenuTriggerFor]="accountItemOptions"
-                ></button>
-                <bit-menu #accountItemOptions>
-                  <button type="button" bitMenuItem (click)="onViewCipher(cipher)">
-                    {{ "switchAccountAndViewItem" | i18n }}
-                  </button>
-                </bit-menu>
-              </bit-item-action>
-            } @else {
-              <app-item-copy-actions [cipher]="cipher"></app-item-copy-actions>
-              <app-item-more-options
-                [cipher]="cipher"
-                [showAutofill]="showAutofillInMenu()"
-                [showViewOption]="showViewInMenu()"
-              ></app-item-more-options>
-            }
+            <app-item-copy-actions
+              [cipher]="cipher"
+              [userId]="accountUserId()"
+            ></app-item-copy-actions>
+            <app-item-more-options
+              [cipher]="cipher"
+              [userId]="accountUserId()"
+              [showAutofill]="showAutofillInMenu()"
+              [showViewOption]="showViewInMenu()"
+            ></app-item-more-options>
           </ng-container>
         </bit-item>
       </cdk-virtual-scroll-viewport>

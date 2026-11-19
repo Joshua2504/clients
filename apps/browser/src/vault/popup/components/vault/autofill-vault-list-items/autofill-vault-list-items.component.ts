@@ -1,5 +1,5 @@
 import { CommonModule } from "@angular/common";
-import { Component } from "@angular/core";
+import { booleanAttribute, Component, input } from "@angular/core";
 import { toSignal } from "@angular/core/rxjs-interop";
 import { combineLatest, map, Observable } from "rxjs";
 
@@ -29,6 +29,12 @@ import { VaultListItemsContainerComponent } from "../vault-list-items-container/
   templateUrl: "autofill-vault-list-items.component.html",
 })
 export class AutofillVaultListItemsComponent {
+  /**
+   * Leaves out the active account's section and shows the sections of the further autofill
+   * accounts alone, for a page that has no list of the active account's vault to show.
+   */
+  readonly otherAccountsOnly = input(false, { transform: booleanAttribute });
+
   /**
    * The list of ciphers that can be used to autofill the current page.
    * @protected

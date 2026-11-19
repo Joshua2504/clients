@@ -194,9 +194,30 @@ async function openAddEditVaultItemPopout(
  * Closes the add/edit vault item popout window.
  *
  * @param delayClose - The amount of time to wait before closing the popout. Defaults to 0.
+ * @param userId - The account the popout was opened for, as given to
+ * {@link openAddEditVaultItemPopout}. Only the popouts of that account close: the add/edit popout
+ * of another account stays open. Without it, every add/edit popout closes, as before.
  */
-async function closeAddEditVaultItemPopout(delayClose = 0) {
-  await BrowserPopupUtils.closeSingleActionPopout(VaultPopoutType.addEditVaultItem, delayClose);
+async function closeAddEditVaultItemPopout(delayClose = 0, userId?: UserId) {
+  if (!userId) {
+    await BrowserPopupUtils.closeSingleActionPopout(VaultPopoutType.addEditVaultItem, delayClose);
+    return;
+  }
+
+  const extensionUrl = chrome.runtime.getURL("popup/index.html");
+  const tabs = await BrowserApi.tabsQuery({ url: `${extensionUrl}*` });
+  for (const tab of tabs) {
+    // Popouts are found by the start of their key, which the plain key is for every add/edit
+    // popout, so the account is read from the popout's URL.
+    if (
+      !tab.url?.includes(`singleActionPopout=${VaultPopoutType.addEditVaultItem}`) ||
+      popoutAccount(tab.url) !== userId
+    ) {
+      continue;
+    }
+
+    setTimeout(() => BrowserApi.removeWindow(tab.windowId), delayClose);
+  }
 }
 
 /**

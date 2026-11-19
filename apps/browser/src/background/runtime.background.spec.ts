@@ -974,6 +974,47 @@ describe("RuntimeBackground locked vault pending notifications", () => {
     });
   });
 
+  describe("an unlock that names its account", () => {
+    const activeUserId = "active-user-id";
+
+    beforeEach(() => {
+      const accountService = mock<AccountService>();
+      accountService.activeAccount$ = of({ id: activeUserId } as any);
+      runtimeBackground = createRuntimeBackground({ intraprocessMessageSender, accountService });
+    });
+
+    it("keeps the retry waiting when another account than the active one was unlocked", async () => {
+      const data = retainedRetry();
+      await enqueue({ command: ADD_TO_LOCKED_VAULT_PENDING_NOTIFICATIONS.command, data });
+
+      await enqueue({ command: "unlocked", userId: "other-user-id" });
+
+      expect(intraprocessMessageSender.send).not.toHaveBeenCalledWith(
+        RETRY_WHEN_UNLOCK_COMPLETED,
+        expect.anything(),
+      );
+      expect(BrowserPopupUtils.closeSingleActionPopout).not.toHaveBeenCalled();
+
+      // The unlock of the active account still finds it
+      await enqueue({ command: "unlocked" });
+
+      expect(intraprocessMessageSender.send).toHaveBeenCalledWith(RETRY_WHEN_UNLOCK_COMPLETED, {
+        data,
+      });
+    });
+
+    it("replays the retry when the active account was unlocked", async () => {
+      const data = retainedRetry();
+      await enqueue({ command: ADD_TO_LOCKED_VAULT_PENDING_NOTIFICATIONS.command, data });
+
+      await enqueue({ command: "unlocked", userId: activeUserId });
+
+      expect(intraprocessMessageSender.send).toHaveBeenCalledWith(RETRY_WHEN_UNLOCK_COMPLETED, {
+        data,
+      });
+    });
+  });
+
   it("dispatches no retry when none was queued", async () => {
     await enqueue({ command: "unlocked" });
 

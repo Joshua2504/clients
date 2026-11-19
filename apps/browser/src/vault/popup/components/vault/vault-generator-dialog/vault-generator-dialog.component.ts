@@ -5,6 +5,7 @@ import { CommonModule } from "@angular/common";
 import { Component, Inject } from "@angular/core";
 
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+import { UserId } from "@bitwarden/common/types/guid";
 import { UnionOfValues } from "@bitwarden/common/vault/types/union-of-values";
 import {
   DIALOG_DATA,
@@ -24,6 +25,11 @@ import { PopupPageComponent } from "../../../../../platform/popup/layout/popup-p
 export interface GeneratorDialogParams {
   type: "password" | "username";
   uri?: string;
+  /**
+   * The account the cipher form writes to. The generator uses its options, policies and history.
+   * Defaults to the active account.
+   */
+  userId?: UserId;
 }
 
 export interface GeneratorDialogResult {

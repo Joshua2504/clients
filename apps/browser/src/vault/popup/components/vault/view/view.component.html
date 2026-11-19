@@ -27,9 +27,10 @@
           {{ "autofillVerb" | i18n }}
         </button>
       }
-      @if (allows(RestrictedCipherAction.Share) && !itemAccount.accountHint()) {
+      @if (allows(RestrictedCipherAction.Share)) {
         <app-share-button
           [cipher]="cipher"
+          [userId]="itemAccount.explicitUserId()"
           class="tw-mt-4"
           slot="button"
           [skipPasswordPrompt]="true"

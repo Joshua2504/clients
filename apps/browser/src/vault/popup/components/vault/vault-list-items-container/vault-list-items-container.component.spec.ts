@@ -1,16 +1,28 @@
-import { CUSTOM_ELEMENTS_SCHEMA } from "@angular/core";
+import { CdkVirtualScrollViewport } from "@angular/cdk/scrolling";
+import {
+  ChangeDetectionStrategy,
+  Component,
+  CUSTOM_ELEMENTS_SCHEMA,
+  ElementRef,
+  input,
+} from "@angular/core";
 import { ComponentFixture, fakeAsync, TestBed, tick } from "@angular/core/testing";
+import { By } from "@angular/platform-browser";
 import { NoopAnimationsModule } from "@angular/platform-browser/animations";
 import { Router } from "@angular/router";
 import { mock } from "jest-mock-extended";
 import { BehaviorSubject, of } from "rxjs";
 
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
+import { DomainSettingsService } from "@bitwarden/common/autofill/services/domain-settings.service";
+import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
+import { EnvironmentService } from "@bitwarden/common/platform/abstractions/environment.service";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+import { LogService } from "@bitwarden/common/platform/abstractions/log.service";
 import { UserId } from "@bitwarden/common/types/guid";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
 import { CipherRepromptType, CipherType } from "@bitwarden/common/vault/enums";
-import { CompactModeService, DialogService } from "@bitwarden/components";
+import { CompactModeService, DialogService, ScrollLayoutService } from "@bitwarden/components";
 import { PasswordRepromptService } from "@bitwarden/vault";
 
 import { BrowserApi } from "../../../../../platform/browser/browser-api";
@@ -18,6 +30,8 @@ import BrowserPopupUtils from "../../../../../platform/browser/browser-popup-uti
 import { VaultPopupAutofillService } from "../../../services/vault-popup-autofill.service";
 import { VaultPopupSectionService } from "../../../services/vault-popup-section.service";
 import { PopupCipherViewLike } from "../../../views/popup-cipher.view";
+import { ItemCopyActionsComponent } from "../item-copy-action/item-copy-actions.component";
+import { ItemMoreOptionsComponent } from "../item-more-options/item-more-options.component";
 
 import { VaultListItemsContainerComponent } from "./vault-list-items-container.component";
 
@@ -47,7 +61,6 @@ describe("VaultListItemsContainerComponent", () => {
     currentTabIsOnBlocklist$: currentTabIsOnBlocklist$.asObservable(),
     doAutofill: jest.fn(),
     doAutofillForAccount: jest.fn(),
-    viewAccountCipher: jest.fn(),
   };
 
   const cipherService = mock<CipherService>();
@@ -214,32 +227,42 @@ describe("VaultListItemsContainerComponent", () => {
       expect(vaultPopupAutofillService.doAutofill).toHaveBeenCalledWith(mockCipher);
     });
 
-    it("opens the item in its own account instead of viewing it in the active account", fakeAsync(() => {
+    it("re-prompts for the cipher's account and opens the view page of that account", fakeAsync(() => {
+      passwordRepromptService.passwordRepromptCheck.mockResolvedValue(true);
+
       void component.onViewCipher(mockCipher);
       tick(200);
 
-      expect(vaultPopupAutofillService.viewAccountCipher).toHaveBeenCalledWith({
-        userId: otherUserId,
-        cipher: mockCipher,
+      expect(passwordRepromptService.passwordRepromptCheck).toHaveBeenCalledWith(
+        mockCipher,
+        otherUserId,
+      );
+      expect(router.navigate).toHaveBeenCalledWith(["/view-cipher"], {
+        queryParams: { cipherId: "cipher-1", type: CipherType.Login, userId: otherUserId },
       });
-      // The reprompt and the view page act on the active account: they wait for the switch.
-      expect(passwordRepromptService.passwordRepromptCheck).not.toHaveBeenCalled();
+    }));
+
+    it("does not open the view page when that account's reprompt is declined", fakeAsync(() => {
+      passwordRepromptService.passwordRepromptCheck.mockResolvedValue(false);
+
+      void component.onViewCipher(mockCipher);
+      tick(200);
+
       expect(router.navigate).not.toHaveBeenCalled();
     }));
 
-    it("opens an item that requires a master password reprompt instead of filling it", fakeAsync(() => {
-      void component.onCipherSelect(repromptCipher);
-      tick(200);
+    it("fills an item that requires a master password reprompt, for its account", async () => {
+      await component.onCipherSelect(repromptCipher);
 
-      expect(vaultPopupAutofillService.doAutofillForAccount).not.toHaveBeenCalled();
-      expect(vaultPopupAutofillService.doAutofill).not.toHaveBeenCalled();
-      expect(vaultPopupAutofillService.viewAccountCipher).toHaveBeenCalledWith({
+      // The service asks for the master password of the cipher's account before it fills.
+      expect(vaultPopupAutofillService.doAutofillForAccount).toHaveBeenCalledWith({
         userId: otherUserId,
         cipher: repromptCipher,
       });
-      expect(component.cipherItemTitleKey()(repromptCipher)).toBe("viewItemTitleWithField");
-      expect(component.cipherItemTitleKey()(mockCipher)).toBe("autofillTitleWithField");
-    }));
+      expect(vaultPopupAutofillService.doAutofill).not.toHaveBeenCalled();
+      expect(router.navigate).not.toHaveBeenCalled();
+      expect(component.cipherItemTitleKey()(repromptCipher)).toBe("autofillTitleWithField");
+    });
 
     it("records a launch for the account that owns the cipher", async () => {
       jest.spyOn(BrowserApi, "createNewTab").mockResolvedValue(undefined as any);
@@ -264,8 +287,19 @@ describe("VaultListItemsContainerComponent", () => {
 
       expect(vaultPopupAutofillService.doAutofill).toHaveBeenCalledWith(repromptCipher);
       expect(vaultPopupAutofillService.doAutofillForAccount).not.toHaveBeenCalled();
-      expect(vaultPopupAutofillService.viewAccountCipher).not.toHaveBeenCalled();
     });
+
+    it("views a cipher in the active account without naming an account", fakeAsync(() => {
+      passwordRepromptService.passwordRepromptCheck.mockResolvedValue(true);
+
+      void component.onViewCipher(mockCipher);
+      tick(200);
+
+      expect(passwordRepromptService.passwordRepromptCheck).toHaveBeenCalledWith(mockCipher);
+      expect(router.navigate).toHaveBeenCalledWith(["/view-cipher"], {
+        queryParams: { cipherId: "cipher-1", type: CipherType.Login },
+      });
+    }));
 
     it("records a launch for the active account", async () => {
       jest.spyOn(BrowserApi, "createNewTab").mockResolvedValue(undefined as any);
@@ -312,5 +346,138 @@ describe("VaultListItemsContainerComponent", () => {
 
       expect(result).toBe("viewItemTitle");
     });
+  });
+});
+
+/** Stands in for the copy actions of a row and records what the row gives it. */
+@Component({
+  selector: "app-item-copy-actions",
+  template: "",
+  changeDetection: ChangeDetectionStrategy.OnPush,
+})
+class ItemCopyActionsStubComponent {
+  readonly cipher = input<unknown>();
+  readonly userId = input<UserId | undefined>(undefined);
+}
+
+/** Stands in for the more-options menu of a row and records what the row gives it. */
+@Component({
+  selector: "app-item-more-options",
+  template: "",
+  changeDetection: ChangeDetectionStrategy.OnPush,
+})
+class ItemMoreOptionsStubComponent {
+  readonly cipher = input<unknown>();
+  readonly userId = input<UserId | undefined>(undefined);
+  readonly showAutofill = input<boolean>();
+  readonly showViewOption = input<boolean>();
+}
+
+describe("VaultListItemsContainerComponent rows", () => {
+  const otherUserId = "OtherUserId" as UserId;
+  const cipher = {
+    id: "cipher-1",
+    name: "Test Login",
+    type: CipherType.Login,
+    login: { username: "user@example.com", uris: [] },
+    reprompt: 0,
+    collectionIds: [],
+  } as any;
+
+  const getEnvironment$ = jest.fn();
+
+  beforeEach(() => getEnvironment$.mockClear());
+
+  async function render(accountUserId: UserId | undefined) {
+    await TestBed.configureTestingModule({
+      imports: [VaultListItemsContainerComponent, NoopAnimationsModule],
+      providers: [
+        {
+          provide: VaultPopupAutofillService,
+          useValue: { currentTabIsOnBlocklist$: of(false) },
+        },
+        { provide: CompactModeService, useValue: { enabled$: of(false) } },
+        {
+          provide: VaultPopupSectionService,
+          useValue: { getOpenDisplayStateForSection: () => () => true },
+        },
+        { provide: I18nService, useValue: { t: (k: string) => k } },
+        { provide: AccountService, useValue: { activeAccount$: of({ id: "UserId" }) } },
+        { provide: CipherService, useValue: mock<CipherService>() },
+        { provide: Router, useValue: { navigate: jest.fn() } },
+        { provide: PasswordRepromptService, useValue: mock<PasswordRepromptService>() },
+        // The row's icon is fetched from the icons server of the account that owns the cipher.
+        {
+          provide: EnvironmentService,
+          useValue: {
+            environment$: of({ getIconsUrl: () => "https://icons.active.example" }),
+            getEnvironment$: getEnvironment$.mockReturnValue(
+              of({ getIconsUrl: () => "https://icons.other.example" }),
+            ),
+          },
+        },
+        { provide: DomainSettingsService, useValue: { showFavicons$: of(true) } },
+        { provide: ConfigService, useValue: { getFeatureFlag$: () => of(false) } },
+        { provide: LogService, useValue: mock<LogService>() },
+      ],
+      schemas: [CUSTOM_ELEMENTS_SCHEMA],
+    })
+      .overrideComponent(VaultListItemsContainerComponent, {
+        remove: { imports: [ItemCopyActionsComponent, ItemMoreOptionsComponent] },
+        add: { imports: [ItemCopyActionsStubComponent, ItemMoreOptionsStubComponent] },
+      })
+      .overrideProvider(DialogService, { useValue: mock<DialogService>() })
+      .compileComponents();
+
+    // The page that hosts the list is what scrolls it.
+    TestBed.inject(ScrollLayoutService).scrollableRef.set(new ElementRef(document.body));
+    const fixture = TestBed.createComponent(VaultListItemsContainerComponent);
+    fixture.componentRef.setInput("ciphers", [cipher]);
+    fixture.componentRef.setInput("isAutofillList", true);
+    fixture.componentRef.setInput("accountUserId", accountUserId);
+    // The rows are virtualized into a viewport, which needs a height to draw any.
+    const viewportSize = jest
+      .spyOn(CdkVirtualScrollViewport.prototype, "getViewportSize")
+      .mockReturnValue(600);
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.componentInstance.viewPort.checkViewportSize();
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    viewportSize.mockRestore();
+    return fixture;
+  }
+
+  const copyActions = (fixture: ComponentFixture<VaultListItemsContainerComponent>) =>
+    fixture.debugElement
+      .queryAll(By.directive(ItemCopyActionsStubComponent))
+      .map((el) => el.componentInstance as ItemCopyActionsStubComponent);
+  const menus = (fixture: ComponentFixture<VaultListItemsContainerComponent>) =>
+    fixture.debugElement
+      .queryAll(By.directive(ItemMoreOptionsStubComponent))
+      .map((el) => el.componentInstance as ItemMoreOptionsStubComponent);
+
+  it("offers the copy actions and the full menu on a row of another account, for that account", async () => {
+    const fixture = await render(otherUserId);
+
+    expect(copyActions(fixture).map((copy) => [copy.cipher(), copy.userId()])).toEqual([
+      [cipher, otherUserId],
+    ]);
+    expect(menus(fixture).map((menu) => [menu.cipher(), menu.userId()])).toEqual([
+      [cipher, otherUserId],
+    ]);
+    // Selecting the row fills, so the menu offers View.
+    expect(menus(fixture)[0].showViewOption()).toBe(true);
+    expect(fixture.nativeElement.textContent).not.toContain("switchAccountAndViewItem");
+    expect(getEnvironment$).toHaveBeenCalledWith(otherUserId);
+  });
+
+  it("names no account on a row of the active account", async () => {
+    const fixture = await render(undefined);
+
+    expect(copyActions(fixture).map((copy) => copy.userId())).toEqual([undefined]);
+    expect(menus(fixture).map((menu) => menu.userId())).toEqual([undefined]);
+    expect(getEnvironment$).not.toHaveBeenCalled();
   });
 });

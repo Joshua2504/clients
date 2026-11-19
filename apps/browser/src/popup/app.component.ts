@@ -39,6 +39,7 @@ import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authenticatio
 import { LogoutReason } from "@bitwarden/common/auth/logout";
 import { getOptionalUserId } from "@bitwarden/common/auth/services/account.service";
 import { PendingAuthRequestsStateService } from "@bitwarden/common/auth/services/auth-request-answering/pending-auth-requests.state";
+import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { PremiumCheckoutPendingService } from "@bitwarden/common/billing/abstractions/account/premium-checkout-pending.service";
 import { AnimationControlService } from "@bitwarden/common/platform/abstractions/animation-control.service";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
@@ -61,6 +62,7 @@ import BrowserPopupUtils from "../platform/browser/browser-popup-utils";
 import { PopupCompactModeService } from "../platform/popup/layout/popup-compact-mode.service";
 import { PopupSizeService } from "../platform/popup/layout/popup-size.service";
 import { initPopupClosedListener } from "../platform/services/popup-view-cache-background.service";
+import { itemAccountFromParams } from "../vault/popup/services/vault-popup-item-account.service";
 
 import { routerTransition } from "./app-routing.animations";
 
@@ -82,6 +84,7 @@ const ACTIVE_USER_SYNC_TIMEOUT_MS = 1_000;
 export class AppComponent implements OnInit, OnDestroy {
   private compactModeService = inject(PopupCompactModeService);
   private sdkService = inject(SdkService);
+  private autofillAccountsService = inject(AutofillAccountsService);
 
   private lastActivity: Date;
   private activeUserId: UserId;
@@ -196,6 +199,12 @@ export class AppComponent implements OnInit, OnDestroy {
               return;
             }
 
+            if (await this.showsAnotherServingAccount(msg.userId)) {
+              // The page in view reads and writes another account, which still serves: the lock
+              // of the active account does not take it away. Leaving the page meets the lock.
+              return;
+            }
+
             await this.biometricsService.setShouldAutopromptNow(false);
 
             // When user is locked, normally we can just send them the lock screen.
@@ -306,6 +315,20 @@ export class AppComponent implements OnInit, OnDestroy {
    * locked account sends "locked" right after the switch, which can reach the popup before
    * its active account updates. Messages for other users, e.g. from lock all, resolve false.
    */
+  /**
+   * True while the page in view was opened for an account other than `lockedUserId` with the
+   * `userId` query param (see `VaultPopupItemAccount`) and that account is an unlocked autofill
+   * account. Such a page operates on that account alone.
+   */
+  private async showsAnotherServingAccount(lockedUserId: UserId): Promise<boolean> {
+    const pageUserId = itemAccountFromParams(this.router.parseUrl(this.router.url).queryParams);
+    if (pageUserId == null || pageUserId === lockedUserId) {
+      return false;
+    }
+
+    return await firstValueFrom(this.autofillAccountsService.isAutofillUser$(pageUserId));
+  }
+
   private async becomesActiveUser(userId: UserId): Promise<boolean> {
     return await firstValueFrom(
       this.accountService.activeAccount$.pipe(

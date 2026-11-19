@@ -138,8 +138,6 @@ export class ContextMenuClickedHandler {
     private webmapperDrafts: WebmapperDraftService,
     private intraprocessMessageSender: IntraprocessMessageSender,
     private fillCipherPolicy: MultiAccountFillCipherPolicy,
-    /** Makes an account the active one, so the reprompt popout shows and verifies its vault. */
-    private switchAccount: (userId: UserId) => Promise<void>,
   ) {}
 
   async run(info: chrome.contextMenus.OnClickData, tab: chrome.tabs.Tab) {
@@ -210,7 +208,7 @@ export class ContextMenuClickedHandler {
     if (isCreateCipherAction) {
       // A new item is created in the account a new login is saved to: the active account while
       // it serves autofill and may save, otherwise the first account serving autofill that may.
-      // The item form shows the active account's vault, so another account becomes active first.
+      // The item form is opened for that account; the active account stays what it is.
       createTargetUserId =
         (await defaultSaveAccount(
           { uri: tab.url ?? "" },
@@ -218,10 +216,7 @@ export class ContextMenuClickedHandler {
           activeUserId ?? null,
           this.fillCipherPolicy,
         )) ?? autofillUserIds[0];
-      if (
-        createTargetUserId == null ||
-        !(await this.activateAccount(createTargetUserId, activeUserId))
-      ) {
+      if (createTargetUserId == null) {
         return;
       }
     } else if (menuItemId === NOOP_COMMAND_SUFFIX) {
@@ -272,7 +267,7 @@ export class ContextMenuClickedHandler {
         const cipherType = this.getCipherCreationType(menuItemId);
 
         if (cipherType) {
-          await openAddEditVaultItemPopout(tab, { cipherType });
+          await openAddEditVaultItemPopout(tab, { cipherType, userId: createTargetUserId });
           break;
         }
 
@@ -282,7 +277,7 @@ export class ContextMenuClickedHandler {
 
         if (await this.isPasswordRepromptRequired(cipher, userId)) {
           // The action here is passed on to the single-use reprompt window and doesn't change based on cipher type
-          await this.openPasswordReprompt(tab, cipher, userId, activeUserId, AUTOFILL_ID);
+          await this.openPasswordReprompt(tab, cipher, userId, AUTOFILL_ID);
         } else {
           await this.autofillAction(tab, cipher, userId);
         }
@@ -291,7 +286,10 @@ export class ContextMenuClickedHandler {
       }
       case COPY_USERNAME_ID:
         if (menuItemId === CREATE_LOGIN_ID) {
-          await openAddEditVaultItemPopout(tab, { cipherType: CipherType.Login });
+          await openAddEditVaultItemPopout(tab, {
+            cipherType: CipherType.Login,
+            userId: createTargetUserId,
+          });
           break;
         }
 
@@ -303,7 +301,10 @@ export class ContextMenuClickedHandler {
         break;
       case COPY_PASSWORD_ID:
         if (menuItemId === CREATE_LOGIN_ID) {
-          await openAddEditVaultItemPopout(tab, { cipherType: CipherType.Login });
+          await openAddEditVaultItemPopout(tab, {
+            cipherType: CipherType.Login,
+            userId: createTargetUserId,
+          });
           break;
         }
 
@@ -312,7 +313,7 @@ export class ContextMenuClickedHandler {
         }
 
         if (await this.isPasswordRepromptRequired(cipher, userId)) {
-          await this.openPasswordReprompt(tab, cipher, userId, activeUserId, COPY_PASSWORD_ID);
+          await this.openPasswordReprompt(tab, cipher, userId, COPY_PASSWORD_ID);
         } else {
           this.copyToClipboard({ text: cipher.login.password, tab: tab });
 
@@ -328,7 +329,10 @@ export class ContextMenuClickedHandler {
         break;
       case COPY_VERIFICATION_CODE_ID:
         if (menuItemId === CREATE_LOGIN_ID) {
-          await openAddEditVaultItemPopout(tab, { cipherType: CipherType.Login });
+          await openAddEditVaultItemPopout(tab, {
+            cipherType: CipherType.Login,
+            userId: createTargetUserId,
+          });
           break;
         }
 
@@ -337,13 +341,7 @@ export class ContextMenuClickedHandler {
         }
 
         if (await this.isPasswordRepromptRequired(cipher, userId)) {
-          await this.openPasswordReprompt(
-            tab,
-            cipher,
-            userId,
-            activeUserId,
-            COPY_VERIFICATION_CODE_ID,
-          );
+          await this.openPasswordReprompt(tab, cipher, userId, COPY_VERIFICATION_CODE_ID);
         } else {
           const totpResponse = await firstValueFrom(this.totpService.getCode$(cipher.login.totp));
           this.copyToClipboard({
@@ -620,46 +618,17 @@ export class ContextMenuClickedHandler {
   }
 
   /**
-   * Opens the reprompt popout for a cipher. The popout shows and verifies the vault of the active
-   * account, so a cipher of another account makes its account the active one first; the popout
-   * then verifies that account's master password and acts on its vault. When the account cannot
-   * become active the cipher is refused: verifying the active account's master password must not
-   * release it.
+   * Opens the reprompt popout for a cipher, for the account that owns it: the popout asks for
+   * that account's master password and performs the action (fill or copy) for that account. The
+   * active account stays what it is.
    */
   private async openPasswordReprompt(
     tab: chrome.tabs.Tab,
     cipher: CipherView,
     userId: UserId,
-    activeUserId: UserId | null,
     action: string,
   ) {
-    if (!(await this.activateAccount(userId, activeUserId))) {
-      return;
-    }
-    await openVaultItemPasswordRepromptPopout(tab, { cipherId: cipher.id, action });
-  }
-
-  /**
-   * Makes `userId` the active account, so a popout shows its vault.
-   *
-   * @returns false when the account is not active and cannot become so; no popout may open.
-   */
-  private async activateAccount(
-    userId: UserId,
-    activeUserId: UserId | null | undefined,
-  ): Promise<boolean> {
-    if (userId === activeUserId) {
-      return true;
-    }
-    const autofillUserIds = await firstValueFrom(this.autofillAccountsService.autofillUserIds$);
-    if (!autofillUserIds.includes(userId)) {
-      return false;
-    }
-    await this.switchAccount(userId);
-    const switchedUserId = await firstValueFrom(
-      this.accountService.activeAccount$.pipe(getOptionalUserId),
-    );
-    return switchedUserId === userId;
+    await openVaultItemPasswordRepromptPopout(tab, { cipherId: cipher.id, action, userId });
   }
 
   /**

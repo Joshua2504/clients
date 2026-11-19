@@ -1,10 +1,10 @@
 import { TestBed, fakeAsync, tick } from "@angular/core/testing";
 import { Router } from "@angular/router";
 import { mock, MockProxy } from "jest-mock-extended";
-import { BehaviorSubject, firstValueFrom, map, of, Subject } from "rxjs";
+import { BehaviorSubject, firstValueFrom, map, Observable, of, Subject } from "rxjs";
 
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
-import { OrganizationId } from "@bitwarden/common/types/guid";
+import { OrganizationId, UserId } from "@bitwarden/common/types/guid";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
 import { CipherType } from "@bitwarden/common/vault/enums";
 import { SearchTextDebounceInterval } from "@bitwarden/common/vault/services/search.service";
@@ -21,7 +21,7 @@ import BrowserPopupUtils from "../../../platform/browser/browser-popup-utils";
 import { PopupCipherViewLike } from "../views/popup-cipher.view";
 
 import { VaultPopupAutofillService } from "./vault-popup-autofill.service";
-import { VaultPopupItemsService } from "./vault-popup-items.service";
+import { AccountAutofillCiphers, VaultPopupItemsService } from "./vault-popup-items.service";
 import { VaultPopupListTableFiltersService } from "./vault-popup-list-table-filters.service";
 import { VaultPopupListTableService } from "./vault-popup-list-table.service";
 import { VaultPopupLoadingService } from "./vault-popup-loading.service";
@@ -43,6 +43,9 @@ describe("VaultPopupListTableService", () => {
   const hasFilterApplied$ = new BehaviorSubject<boolean>(false);
   const autofillAllowed$ = new BehaviorSubject<boolean>(true);
   const applyScopedFilter = jest.fn();
+  /** The suggestions of the further autofill accounts. Empty while no account has opted in. */
+  const otherAccountAutoFillCiphers$ = new BehaviorSubject<AccountAutofillCiphers[]>([]);
+  const otherUserId = "other-user" as UserId;
 
   const currentTabIsOnBlocklist$ = new BehaviorSubject<boolean>(false);
   /** The chip selection, as the table's `filterValues` reports it. */
@@ -69,6 +72,7 @@ describe("VaultPopupListTableService", () => {
     loading$.next(false);
     hasFilterApplied$.next(false);
     autofillAllowed$.next(true);
+    otherAccountAutoFillCiphers$.next([]);
     currentTabIsOnBlocklist$.next(false);
     selectedFilters$.next({ cipherType: null, organization: [], collection: [], folder: [] });
     memberOrganizations$.next([]);
@@ -96,6 +100,7 @@ describe("VaultPopupListTableService", () => {
             searchText$: searchText$.asObservable(),
             emptyVault$: emptyVault$.asObservable(),
             hasFilterApplied$: hasFilterApplied$.asObservable(),
+            otherAccountAutoFillCiphers$: otherAccountAutoFillCiphers$.asObservable(),
             applyScopedFilter,
           },
         },
@@ -690,6 +695,197 @@ describe("VaultPopupListTableService", () => {
         queryParams: { cipherId: "first", type: CipherType.Login },
       });
     }));
+  });
+
+  describe("a further autofill account", () => {
+    const otherCipher = makeCipher({ id: "other-1", name: "Other" });
+
+    /**
+     * The value a stream holds once every source has spoken. The list is seeded without the
+     * further accounts, so that it never waits for another account's vault.
+     */
+    const latest = <T>(source: Observable<T>): T => {
+      const values: T[] = [];
+      source.subscribe((value) => values.push(value)).unsubscribe();
+      return values[values.length - 1];
+    };
+    const otherAccount = (overrides: Partial<AccountAutofillCiphers> = {}) => ({
+      userId: otherUserId,
+      email: "other@example.com",
+      ciphers: [otherCipher],
+      ...overrides,
+    });
+
+    it("adds no rows and no sections while no account has opted in", async () => {
+      autoFillCiphers$.next([makeCipher({ id: "a" })]);
+      filteredCiphers$.next([makeCipher({ id: "a" })]);
+
+      const rows = latest(service.rows$);
+
+      expect(rows.map((row) => row._section)).toEqual(["autofill", "allItems"]);
+      expect(rows.every((row) => row.userId === undefined)).toBe(true);
+      expect(latest(service.accountSections$)).toEqual([]);
+    });
+
+    it("places the account's suggestions after the active account's, tagged with the account", async () => {
+      autoFillCiphers$.next([makeCipher({ id: "a" })]);
+      favoriteCiphers$.next([makeCipher({ id: "f" })]);
+      filteredCiphers$.next([makeCipher({ id: "a" })]);
+      otherAccountAutoFillCiphers$.next([otherAccount()]);
+
+      const rows = latest(service.rows$);
+
+      expect(rows.map((row) => [row._section, row.cipher.id, row.userId])).toEqual([
+        ["autofill", "a", undefined],
+        ["accountAutofill", "other-1", otherUserId],
+        ["favorites", "f", undefined],
+        ["allItems", "a", undefined],
+      ]);
+      expect(latest(service.accountSections$)).toEqual([
+        { userId: otherUserId, email: "other@example.com" },
+      ]);
+    });
+
+    it("gives the account's rows the actions of a suggestion", async () => {
+      otherAccountAutoFillCiphers$.next([otherAccount()]);
+
+      const [row] = latest(service.rows$);
+
+      expect(row.actions).toMatchObject({
+        primaryAutofill: true,
+        showFillOnHover: true,
+        showCopyActions: true,
+        showViewInMenu: true,
+        showAutofillInMenu: false,
+        showLaunch: false,
+      });
+    });
+
+    it("keeps one shared item of both vaults as two rows", async () => {
+      autoFillCiphers$.next([makeCipher({ id: "shared" })]);
+      otherAccountAutoFillCiphers$.next([
+        otherAccount({ ciphers: [makeCipher({ id: "shared" })] }),
+      ]);
+
+      const rows = latest(service.rows$);
+
+      expect(rows.map((row) => [row.cipher.id, row.userId])).toEqual([
+        ["shared", undefined],
+        ["shared", otherUserId],
+      ]);
+    });
+
+    it("does not narrow the account's suggestions by the vault scope", async () => {
+      autoFillCiphers$.next([makeCipher({ id: "a" })]);
+      otherAccountAutoFillCiphers$.next([otherAccount()]);
+      service.setScope({
+        type: VaultScopeType.Organization,
+        organizationId: "org-1" as OrganizationId,
+      });
+
+      const rows = latest(service.rows$);
+
+      expect(rows.map((row) => row.cipher.id)).toEqual(["other-1"]);
+    });
+
+    it("leaves the account's suggestions out of a search, which covers the active vault", async () => {
+      filteredCiphers$.next([makeCipher({ id: "match" })]);
+      otherAccountAutoFillCiphers$.next([otherAccount()]);
+      hasSearchText$.next(true);
+
+      const rows = latest(service.rows$);
+
+      expect(rows.map((row) => row.cipher.id)).toEqual(["match"]);
+      expect(latest(service.accountSections$)).toEqual([]);
+    });
+
+    it("drops the rows when the account stops serving", async () => {
+      otherAccountAutoFillCiphers$.next([otherAccount()]);
+      expect(latest(service.rows$)).toHaveLength(1);
+
+      otherAccountAutoFillCiphers$.next([]);
+
+      expect(latest(service.rows$)).toEqual([]);
+      expect(latest(service.accountSections$)).toEqual([]);
+    });
+
+    it("does not count the account's rows as items of the active vault", async () => {
+      filteredCiphers$.next([makeCipher({ id: "a" })]);
+      otherAccountAutoFillCiphers$.next([otherAccount()]);
+
+      expect(latest(service.itemCount$)).toBe(1);
+    });
+
+    it("hides the empty autofill tip when only the other account suggests a login", async () => {
+      otherAccountAutoFillCiphers$.next([otherAccount()]);
+
+      expect(latest(service.showEmptyAutofillTip$)).toBe(false);
+    });
+
+    it("fills the cipher for its account, reprompt included, without the active account", async () => {
+      jest.spyOn(CipherViewLikeUtils, "isCipherListView").mockReturnValue(false);
+
+      await service.doAutofill(otherCipher, otherUserId);
+
+      expect(vaultPopupAutofillService.doAutofillForAccount).toHaveBeenCalledWith({
+        userId: otherUserId,
+        cipher: otherCipher,
+      });
+      expect(vaultPopupAutofillService.doAutofill).not.toHaveBeenCalled();
+    });
+
+    it("reads the full view from the account's vault before filling a list view", async () => {
+      jest.spyOn(CipherViewLikeUtils, "isCipherListView").mockReturnValue(true);
+      const fullView = makeCipher({ id: "full" });
+      cipherService.cipherView$.mockReturnValue(of(fullView as any));
+
+      await service.doAutofill(otherCipher, otherUserId);
+
+      expect(cipherService.cipherView$).toHaveBeenCalledWith(otherUserId, "other-1");
+      expect(vaultPopupAutofillService.doAutofillForAccount).toHaveBeenCalledWith({
+        userId: otherUserId,
+        cipher: fullView,
+      });
+    });
+
+    it("re-prompts for the account and opens its view page", fakeAsync(() => {
+      jest.spyOn(CipherViewLikeUtils, "canLaunch").mockReturnValue(false);
+      jest.spyOn(CipherViewLikeUtils, "decryptionFailure").mockReturnValue(false);
+      passwordRepromptService.passwordRepromptCheck.mockResolvedValue(true);
+
+      void service.viewCipher(otherCipher, otherUserId);
+      tick();
+
+      expect(passwordRepromptService.passwordRepromptCheck).toHaveBeenCalledWith(
+        otherCipher,
+        otherUserId,
+      );
+      expect(router.navigate).toHaveBeenCalledWith(["/view-cipher"], {
+        queryParams: { cipherId: "other-1", type: CipherType.Login, userId: otherUserId },
+      });
+    }));
+
+    it("does not open the view page when the account's reprompt is declined", fakeAsync(() => {
+      jest.spyOn(CipherViewLikeUtils, "canLaunch").mockReturnValue(false);
+      jest.spyOn(CipherViewLikeUtils, "decryptionFailure").mockReturnValue(false);
+      passwordRepromptService.passwordRepromptCheck.mockResolvedValue(false);
+
+      void service.viewCipher(otherCipher, otherUserId);
+      tick();
+
+      expect(router.navigate).not.toHaveBeenCalled();
+    }));
+
+    it("records the launch for the account", async () => {
+      jest.spyOn(CipherViewLikeUtils, "canLaunch").mockReturnValue(true);
+      jest.spyOn(CipherViewLikeUtils, "getLaunchUri").mockReturnValue("https://example.com");
+      jest.spyOn(BrowserApi, "createNewTab").mockResolvedValue({} as any);
+      jest.spyOn(BrowserPopupUtils, "inPopup").mockReturnValue(false);
+
+      await service.launchCipher(otherCipher, otherUserId);
+
+      expect(cipherService.updateLastLaunchedDate).toHaveBeenCalledWith("other-1", otherUserId);
+    });
   });
 
   describe("launchCipher", () => {

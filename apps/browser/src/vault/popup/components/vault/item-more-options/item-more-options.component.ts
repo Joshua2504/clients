@@ -141,21 +141,6 @@ export class ItemMoreOptionsComponent {
   );
 
   /**
-   * True while {@link userId} names an account other than the active one. Actions that can only
-   * act on the active account are not offered then.
-   */
-  protected readonly otherAccount = toSignal(
-    this._userId$.pipe(
-      switchMap((userId) =>
-        userId == null
-          ? of(false)
-          : this.accountService.activeAccount$.pipe(map((account) => account?.id !== userId)),
-      ),
-    ),
-    { initialValue: false },
-  );
-
-  /**
    * Flag to show the autofill menu option.
    * When true, the "Autofill" option appears in the menu.
    */
@@ -319,33 +304,33 @@ export class ItemMoreOptionsComponent {
   async doAutofillAndSave() {
     const cipher = await this.cipherService.getFullCipherView(this.cipher, this.userId);
     if (this.userId != null) {
-      // Saving the URL writes to the active account's vault, so another account's cipher is
-      // filled without it.
-      await this.fill(cipher);
+      // The fill, the re-prompt and the saved URL are those of the cipher's account.
+      await this.vaultPopupAutofillService.doAutofillAndSave(cipher, true, false, this.userId);
       return;
     }
     await this.vaultPopupAutofillService.doAutofillAndSave(cipher);
   }
 
   /**
-   * Fills the cipher from the vault of {@link userId}. Without one it fills from the active
-   * account as it always has, the re-prompt having been answered by the caller.
+   * Fills the cipher from the vault of {@link userId}, else from the active account. The
+   * re-prompt has been answered by the caller, for that account.
    */
   private fill(cipher: CipherView): Promise<boolean> {
     const userId = this.userId;
     return userId == null
       ? this.vaultPopupAutofillService.doAutofill(cipher, true, true)
-      : this.vaultPopupAutofillService.doAutofillForAccount({ userId, cipher }, true);
+      : this.vaultPopupAutofillService.doAutofillForAccount({ userId, cipher }, true, true);
   }
 
   async doAutofill() {
     const cipher = await this.cipherService.getFullCipherView(this.cipher, this.userId);
 
-    // `doAutofillForAccount` asks for the re-prompt of another account itself.
-    if (
-      this.userId == null &&
-      !(await this.passwordRepromptService.passwordRepromptCheck(this.cipher))
-    ) {
+    // Asks for the master password of the cipher's account.
+    const repromptPassed =
+      this.userId == null
+        ? await this.passwordRepromptService.passwordRepromptCheck(this.cipher)
+        : await this.passwordRepromptService.passwordRepromptCheck(this.cipher, this.userId);
+    if (!repromptPassed) {
       return;
     }
 
@@ -381,9 +366,7 @@ export class ItemMoreOptionsComponent {
         viewOnly:
           !this.cipher.edit ||
           RestrictedCipherPolicy.isRestricted(this.cipher) ||
-          this.revealedView() != null ||
-          // Adding the URL saves to the active account's vault.
-          this.userId != null,
+          this.revealedView() != null,
       },
     });
 
@@ -396,7 +379,12 @@ export class ItemMoreOptionsComponent {
         await this.fill(cipher);
         return;
       case AutofillConfirmationDialogResult.AutofillAndUrlAdded:
-        await this.vaultPopupAutofillService.doAutofillAndSave(cipher, false, true);
+        // The URL is added to the cipher in the vault it came from.
+        if (this.userId == null) {
+          await this.vaultPopupAutofillService.doAutofillAndSave(cipher, false, true);
+        } else {
+          await this.vaultPopupAutofillService.doAutofillAndSave(cipher, false, true, this.userId);
+        }
         return;
     }
   }

@@ -8,7 +8,6 @@ import {
   concatMap,
   filter,
   firstValueFrom,
-  lastValueFrom,
   map,
   Observable,
   Subject,
@@ -16,10 +15,12 @@ import {
   takeUntil,
 } from "rxjs";
 
+import { LOCK_USER_ID_QUERY_PARAM } from "@bitwarden/angular/auth/guards";
 import { JslibModule } from "@bitwarden/angular/jslib.module";
 import { NoResults } from "@bitwarden/assets/svg";
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
-import { UserVerificationService } from "@bitwarden/common/auth/abstractions/user-verification/user-verification.service.abstraction";
+import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
+import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
 import { getOptionalUserId } from "@bitwarden/common/auth/services/account.service";
 import { AutofillAccountsService } from "@bitwarden/common/autofill/services/autofill-accounts.service";
 import { DomainSettingsService } from "@bitwarden/common/autofill/services/domain-settings.service";
@@ -48,6 +49,7 @@ import {
   DialogService,
   FormFieldModule,
   ItemModule,
+  LinkModule,
   StatusLockupComponent,
   SearchModule,
   SectionComponent,
@@ -60,16 +62,18 @@ import { PasswordRepromptService } from "@bitwarden/vault";
 import { ZonedMessageListenerService } from "../../../platform/browser/zoned-message-listener.service";
 import { PopupHeaderComponent } from "../../../platform/popup/layout/popup-header.component";
 import { PopupPageComponent } from "../../../platform/popup/layout/popup-page.component";
+import { BrowserRouterService } from "../../../platform/popup/services/browser-router.service";
+import { itemAccountQueryParams } from "../../../vault/popup/services/vault-popup-item-account.service";
 import { VaultPopoutType } from "../../../vault/popup/utils/vault-popout-window";
 import {
   BrowserFido2Message,
   BrowserFido2UserInterfaceSession,
   BrowserFido2MessageTypes,
+  FIDO2_UNLOCKED_ACCOUNT_QUERY_PARAM,
 } from "../../fido2/services/browser-fido2-user-interface.service";
 import { CipherUse } from "../../services/abstractions/fill-cipher-policy";
 import { MultiAccountFillCipherPolicy } from "../../services/abstractions/multi-account-fill-cipher-policy";
 
-import { Fido2AccountPasswordRepromptComponent } from "./fido2-account-password-reprompt.component";
 import { Fido2CipherRowComponent } from "./fido2-cipher-row.component";
 import { Fido2UseBrowserLinkComponent } from "./fido2-use-browser-link.component";
 
@@ -85,7 +89,7 @@ interface ViewData {
   fallbackSupported: boolean;
 }
 
-/** An account a new passkey can be saved to. */
+/** An account as the user chooses it: to save a new passkey to, or to unlock. */
 interface AccountOption {
   userId: UserId;
   label: string;
@@ -105,6 +109,7 @@ interface AccountOption {
     FormsModule,
     ItemModule,
     JslibModule,
+    LinkModule,
     StatusLockupComponent,
     PopupHeaderComponent,
     PopupPageComponent,
@@ -135,6 +140,11 @@ export class Fido2Component implements OnInit, OnDestroy {
   protected noResultsIcon = NoResults;
   protected passkeyAction: PasskeyActionValue = PasskeyActions.Register;
   protected PasskeyActions = PasskeyActions;
+  /**
+   * The locked accounts that could serve the request, each offered to the user to unlock. Once
+   * one is unlocked the request runs again with it.
+   */
+  protected lockedAccounts: AccountOption[] = [];
   protected hasSearched = false;
   protected searchText: string | null = null;
   protected searchTypeSearch = false;
@@ -147,6 +157,8 @@ export class Fido2Component implements OnInit, OnDestroy {
   protected targetUserId: UserId | null = null;
   protected url: string | undefined = undefined;
   private accountLabels = new Map<UserId, string>();
+  /** The account the user unlocked on the lock screen before the popout came back here. */
+  private unlockedUserId: UserId | undefined = undefined;
 
   constructor(
     private router: Router,
@@ -162,7 +174,8 @@ export class Fido2Component implements OnInit, OnDestroy {
     private accountService: AccountService,
     private multiAccountFillCipherPolicy: MultiAccountFillCipherPolicy,
     private autofillAccountsService: AutofillAccountsService,
-    private userVerificationService: UserVerificationService,
+    private authService: AuthService,
+    private routerService: BrowserRouterService,
   ) {}
 
   ngOnInit() {
@@ -174,6 +187,8 @@ export class Fido2Component implements OnInit, OnDestroy {
         sessionId: queryParamMap.get("sessionId") ?? undefined,
         senderTabId: queryParamMap.get("senderTabId") ?? undefined,
         senderUrl: queryParamMap.get("senderUrl") ?? undefined,
+        unlockedUserId: (queryParamMap.get(FIDO2_UNLOCKED_ACCOUNT_QUERY_PARAM) ?? undefined) as
+          UserId | undefined,
       })),
     );
 
@@ -235,7 +250,12 @@ export class Fido2Component implements OnInit, OnDestroy {
               userId,
               label: this.accountLabel(userId),
             }));
-            this.targetUserId = userIds[0] ?? null;
+            // An account the user just unlocked to save the passkey there is the one chosen
+            this.targetUserId =
+              this.unlockedUserId != null && userIds.includes(this.unlockedUserId)
+                ? this.unlockedUserId
+                : (userIds[0] ?? null);
+            this.lockedAccounts = this.unlockableAccounts(message.lockedUserIds);
             await this.loadLoginsOfTargetAccount(message.userHandle);
 
             this.passkeyAction = PasskeyActions.Register;
@@ -248,6 +268,7 @@ export class Fido2Component implements OnInit, OnDestroy {
 
           case BrowserFido2MessageTypes.PickCredentialRequest: {
             await this.loadCiphersOfAccounts(message.cipherRefs);
+            this.lockedAccounts = this.unlockableAccounts(message.lockedUserIds);
 
             this.displayedCiphers = [...this.ciphers];
 
@@ -267,11 +288,16 @@ export class Fido2Component implements OnInit, OnDestroy {
           }
 
           case BrowserFido2MessageTypes.InformCredentialNotFoundRequest: {
+            await this.loadAccounts();
+            this.lockedAccounts = this.unlockableAccounts(message.lockedUserIds);
             this.passkeyAction = PasskeyActions.Authenticate;
 
             break;
           }
         }
+
+        // A request shown anew replaces what the user was doing with the one before
+        this.loading = false;
 
         return {
           message,
@@ -283,11 +309,21 @@ export class Fido2Component implements OnInit, OnDestroy {
     );
 
     queryParams$.pipe(takeUntil(this.destroy$)).subscribe((queryParams) => {
+      this.unlockedUserId = queryParams.unlockedUserId;
       if (queryParams.sessionId != null) {
         this.send({
           sessionId: queryParams.sessionId,
           type: BrowserFido2MessageTypes.ConnectResponse,
         });
+        // Back from the lock screen: the request that offered the unlock is still waiting for
+        // its answer, and runs again with the unlocked account.
+        if (queryParams.unlockedUserId != null) {
+          this.send({
+            sessionId: queryParams.sessionId,
+            type: BrowserFido2MessageTypes.AccountUnlockedResponse,
+            userId: queryParams.unlockedUserId,
+          });
+        }
       }
     });
   }
@@ -392,13 +428,20 @@ export class Fido2Component implements OnInit, OnDestroy {
     await this.submit();
   }
 
-  /** Saves the new passkey to `userId` instead, and lists that account's logins. */
+  /**
+   * Saves the new passkey to `userId` instead, and lists that account's logins. A locked account
+   * is unlocked first; the request then comes back with it among the accounts.
+   */
   protected async selectTargetAccount(userId: UserId) {
     const data = this.message$.value;
-    if (
-      data?.type !== BrowserFido2MessageTypes.ConfirmNewCredentialRequest ||
-      !this.accounts.some((account) => account.userId === userId)
-    ) {
+    if (data?.type !== BrowserFido2MessageTypes.ConfirmNewCredentialRequest) {
+      return;
+    }
+    if (this.lockedAccounts.some((account) => account.userId === userId)) {
+      await this.unlockAccount(userId);
+      return;
+    }
+    if (!this.accounts.some((account) => account.userId === userId)) {
       return;
     }
 
@@ -410,11 +453,60 @@ export class Fido2Component implements OnInit, OnDestroy {
   }
 
   /**
-   * Whether a login can be created in the item form. The form saves to the active account, so
-   * it is offered only while the passkey is saved there.
+   * Whether a login can be created in the item form. The form is opened for the account the
+   * passkey is saved to, whichever that is.
    */
   protected get canAddCipher(): boolean {
-    return this.showNewPasskeyButton && this.targetUserId === this.activeUserId;
+    return this.showNewPasskeyButton && this.targetUserId != null;
+  }
+
+  /**
+   * Lets the user unlock `userId`, one of the locked accounts the request offered, without
+   * ending the request. The lock screen is shown in this popout and returns here once the
+   * account is unlocked; the request then runs again with that account's vault.
+   */
+  protected async unlockAccount(userId: UserId) {
+    if (
+      this.sessionId == null ||
+      !this.lockedAccounts.some((account) => account.userId === userId)
+    ) {
+      return;
+    }
+
+    const status = await firstValueFrom(this.authService.authStatusFor$(userId));
+    if (status === AuthenticationStatus.Unlocked) {
+      // Unlocked elsewhere meanwhile, for example in the extension's popup
+      this.loading = true;
+      this.send({
+        sessionId: this.sessionId,
+        type: BrowserFido2MessageTypes.AccountUnlockedResponse,
+        userId,
+      });
+      return;
+    }
+
+    const activeUserId = await firstValueFrom(
+      this.accountService.activeAccount$.pipe(getOptionalUserId),
+    );
+    if (status !== AuthenticationStatus.Locked) {
+      return;
+    }
+
+    const queryParams = this.activatedRoute.snapshot.queryParams;
+    // The lock screen returns to the URL kept here, which it does not overwrite itself
+    this.routerService.setPreviousUrl(
+      this.router.serializeUrl(
+        this.router.createUrlTree(["/fido2"], {
+          queryParams: { ...queryParams, [FIDO2_UNLOCKED_ACCOUNT_QUERY_PARAM]: userId },
+        }),
+      ),
+    );
+    await this.router.navigate(["/lock"], {
+      queryParams:
+        userId === activeUserId
+          ? queryParams
+          : { ...queryParams, [LOCK_USER_ID_QUERY_PARAM]: userId },
+    });
   }
 
   protected cipherKey(item: AccountCipher): string {
@@ -432,8 +524,17 @@ export class Fido2Component implements OnInit, OnDestroy {
       data?.type === BrowserFido2MessageTypes.ConfirmNewCredentialRequest &&
       this.sessionId != null &&
       this.url != null &&
-      this.canAddCipher
+      this.canAddCipher &&
+      this.targetUserId != null
     ) {
+      // The login is created in the account the passkey is saved to, and the form answers the
+      // request with that account.
+      const userId = this.targetUserId;
+      if (!(await this.isServed(userId))) {
+        this.abort(false);
+        return;
+      }
+
       await this.router.navigate(["/add-cipher"], {
         queryParams: {
           type: CipherType.Login.toString(),
@@ -445,6 +546,7 @@ export class Fido2Component implements OnInit, OnDestroy {
           sessionId: this.sessionId,
           userVerification: data.userVerification,
           singleActionPopout: `${VaultPopoutType.fido2Popout}_${this.sessionId}`,
+          ...itemAccountQueryParams(userId),
         },
       });
     }
@@ -559,13 +661,26 @@ export class Fido2Component implements OnInit, OnDestroy {
   /**
    * Lists the ciphers named by `refs`, each as its own account holds it. A cipher of an account
    * that does not serve passkeys is left out.
+   *
+   * @returns The active account, null when there is none.
    */
-  private async loadCiphersOfAccounts(refs: AccountCipherRef[]) {
+  private async loadCiphersOfAccounts(refs: AccountCipherRef[]): Promise<UserId | null> {
     const activeUserId = await this.loadAccounts();
 
     this.ciphers = await this.multiAccountFillCipherPolicy.ciphersForRefs(refs, CipherUse.Passkey);
     // A cipher of another account than the one the popup shows is always named as such
     this.showAccountLabels ||= this.ciphers.some((item) => item.userId !== activeUserId);
+
+    return activeUserId;
+  }
+
+  /**
+   * The locked accounts of a request, as offered to the user. The lock screen of this popout
+   * unlocks the active account, or the account named by {@link LOCK_USER_ID_QUERY_PARAM} without
+   * making it the active one, so every one of them can be unlocked here.
+   */
+  private unlockableAccounts(lockedUserIds: UserId[] | undefined): AccountOption[] {
+    return (lockedUserIds ?? []).map((userId) => ({ userId, label: this.accountLabel(userId) }));
   }
 
   /** Lists the logins of the account the passkey is saved to that match the requesting site. */
@@ -641,35 +756,12 @@ export class Fido2Component implements OnInit, OnDestroy {
     const masterPasswordRepromptRequired = cipher && cipher.reprompt !== 0;
 
     if (masterPasswordRepromptRequired) {
-      // The reprompt is answered with the master password of the account that owns the cipher
-      const activeUserId = await firstValueFrom(
-        this.accountService.activeAccount$.pipe(getOptionalUserId),
-      );
-      if (userId === activeUserId) {
-        return await this.passwordRepromptService.showPasswordPrompt();
-      }
-
-      return await this.showPasswordPromptForAccount(userId);
+      // The reprompt asks for and verifies the master password of the account that owns the
+      // cipher, and names that account when it is not the one the popup shows.
+      return await this.passwordRepromptService.showPasswordPrompt(userId);
     }
 
     return userVerificationRequested;
-  }
-
-  /**
-   * Asks for the master password of an account that is not the active one. As with the active
-   * account, an account without a master password has no reprompt.
-   */
-  private async showPasswordPromptForAccount(userId: UserId): Promise<boolean> {
-    if (!(await this.userVerificationService.hasMasterPassword(userId))) {
-      return true;
-    }
-
-    const dialog = Fido2AccountPasswordRepromptComponent.open(this.dialogService, {
-      userId,
-      accountLabel: this.accountLabel(userId),
-    });
-
-    return (await lastValueFrom(dialog.closed)) === true;
   }
 
   private send(msg: BrowserFido2Message) {

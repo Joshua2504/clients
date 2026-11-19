@@ -148,8 +148,6 @@ export default class NotificationBackground {
    * and "open tasks" actions name no account, and a cipher id alone does not identify one.
    */
   private savedCiphers = new Map<number, AccountCipherRef>();
-  /** The account whose cipher awaits a master password reprompt before an update, per tab. */
-  private pendingRepromptAccounts = new Map<number, UserId>();
   private readonly extensionMessageHandlers: NotificationBackgroundExtensionMessageHandlers = {
     bgAdjustNotificationBar: ({ message, sender }) =>
       this.handleAdjustNotificationBarMessage(message, sender),
@@ -212,8 +210,6 @@ export default class NotificationBackground {
     private messageListener: MessageListener,
     private multiAccountFillCipherPolicy: MultiAccountFillCipherPolicy,
     private autofillAccountsService: AutofillAccountsService,
-    /** Makes an account the active one. A popout shows the active account's vault. */
-    private switchAccount: (userId: UserId) => Promise<void>,
   ) {}
 
   init() {
@@ -486,22 +482,6 @@ export default class NotificationBackground {
     return owners.length > 0 ? [...new Set(owners)] : [queueMessage.userId];
   }
 
-  /**
-   * Makes `userId` the active account, so a popout shows its vault.
-   *
-   * @returns false when the account no longer serves autofill; the popout must not open.
-   */
-  private async activateAccount(userId: UserId): Promise<boolean> {
-    if (userId === (await this.getActiveUserId())) {
-      return true;
-    }
-    if (!(await this.isAutofillUser(userId))) {
-      return false;
-    }
-    await this.switchAccount(userId);
-    return true;
-  }
-
   /** Removes a queued notification that can no longer act for its account and closes its bar. */
   private async dropNotification(queueMessage: NotificationQueueMessageItem, tab: chrome.tabs.Tab) {
     const index = this.notificationQueue.indexOf(queueMessage);
@@ -623,7 +603,6 @@ export default class NotificationBackground {
     }
     if (tab.id != null) {
       this.savedCiphers.delete(tab.id);
-      this.pendingRepromptAccounts.delete(tab.id);
     }
   }
 
@@ -1546,19 +1525,16 @@ export default class NotificationBackground {
       return;
     }
     const tab = message.tab;
-    // The reprompt answers for the account whose cipher asked for it.
-    const repromptUserId = tab.id != null ? this.pendingRepromptAccounts.get(tab.id) : undefined;
-    if (tab.id != null) {
-      this.pendingRepromptAccounts.delete(tab.id);
-    }
     if (message.success) {
+      // The popout names the account whose master password answered. The update is saved to
+      // that account alone, and only while it still serves autofill.
       await this.saveOrUpdateCredentials(
         tab,
         message.cipherId,
         false,
         undefined,
         true,
-        repromptUserId,
+        message.userId,
       );
     } else {
       await BrowserApi.tabSendMessageData(tab, "saveCipherAttemptCompleted", {
@@ -1742,14 +1718,8 @@ export default class NotificationBackground {
         : undefined;
 
       if (cipherView.reprompt && !skipReprompt) {
-        // The reprompt popout shows the cipher in the active account's vault and verifies that
-        // account's master password, so the cipher's account becomes the active one first.
-        if (!(await this.activateAccount(userId))) {
-          return;
-        }
-        if (tab.id != null) {
-          this.pendingRepromptAccounts.set(tab.id, userId);
-        }
+        // The reprompt popout is opened for the cipher's account: it asks for that account's
+        // master password and answers with `bgHandleReprompt`, naming the account.
         await this.autofillService.isPasswordRepromptRequired(
           cipherView,
           tab,
@@ -1792,15 +1762,11 @@ export default class NotificationBackground {
    * and opens the add/edit vault item popout.
    *
    * @param cipherView - The cipher to edit
-   * @param userId - The account the cipher belongs or is saved to. It becomes the active account,
-   * since the popout edits the active account's vault.
+   * @param userId - The account the cipher belongs or is saved to. The popout edits that
+   * account's vault; the active account stays what it is.
    * @param senderTab - The tab that the message was sent from
    */
   private async editItem(cipherView: CipherView, userId: UserId, senderTab: chrome.tabs.Tab) {
-    if (!(await this.activateAccount(userId))) {
-      return;
-    }
-
     await this.cipherService.setAddEditCipherInfo(
       {
         cipher: cipherView,
@@ -1809,7 +1775,7 @@ export default class NotificationBackground {
       userId,
     );
 
-    await this.openAddEditVaultItemPopout(senderTab, { cipherId: cipherView?.id });
+    await this.openAddEditVaultItemPopout(senderTab, { cipherId: cipherView?.id, userId });
   }
 
   private async openAddEditVaultItem(
@@ -1818,17 +1784,25 @@ export default class NotificationBackground {
   ) {
     const { cipherId, organizationId, folder } = message;
     if (cipherId) {
-      await this.openAddEditVaultItemPopout(senderTab, { cipherId });
+      // A cipher this tab's notification saved is edited in the account it was saved to.
+      const userId = this.savedCipherAccount(senderTab, cipherId);
+      if (userId != null && !(await this.canActFor(userId))) {
+        return;
+      }
+      await this.openAddEditVaultItemPopout(senderTab, {
+        cipherId,
+        ...(userId != null ? { userId } : {}),
+      });
       return;
     }
 
     const queueItem = this.notificationQueue.find((item) => item.tab.id === senderTab.id);
 
     if (queueItem?.type === NotificationType.AddLogin) {
-      // The draft is for the notification's account. The popout edits the active account's
-      // vault, so that account becomes the active one first.
+      // The draft is for the notification's account, and the popout is opened for that account.
+      // The active account stays what it is.
       const userId = queueItem.userId;
-      if (!(await this.activateAccount(userId))) {
+      if (!(await this.canActFor(userId))) {
         await this.dropNotification(queueItem, senderTab);
         return;
       }
@@ -1842,7 +1816,7 @@ export default class NotificationBackground {
 
       await this.cipherService.setAddEditCipherInfo({ cipher: cipherView }, userId);
 
-      await this.openAddEditVaultItemPopout(senderTab);
+      await this.openAddEditVaultItemPopout(senderTab, { userId });
       this.removeTabFromNotificationQueue(senderTab);
       return;
     }
@@ -1854,7 +1828,10 @@ export default class NotificationBackground {
     message: NotificationBackgroundExtensionMessage,
     senderTab: chrome.tabs.Tab,
   ) {
-    if (!(await this.activateSavedCipherAccount(senderTab, message?.cipherId))) {
+    // The cipher is shown in the vault of the account it was saved to, whichever account is
+    // active. An account that has locked, logged out or opted out since shows nothing.
+    const userId = this.savedCipherAccount(senderTab, message?.cipherId);
+    if (userId != null && !(await this.canActFor(userId))) {
       await BrowserApi.tabSendMessageData(senderTab, "closeNotificationBar", {
         fadeOutNotification: !!message.fadeOutNotification,
       });
@@ -1865,6 +1842,7 @@ export default class NotificationBackground {
       this.openViewVaultItemPopout(senderTab, {
         cipherId: message?.cipherId || "",
         action: "",
+        ...(userId != null ? { userId } : {}),
       }),
       BrowserApi.tabSendMessageData(senderTab, "closeNotificationBar", {
         fadeOutNotification: !!message.fadeOutNotification,
@@ -1881,21 +1859,18 @@ export default class NotificationBackground {
   }
 
   /**
-   * Makes the account of the cipher a notification last saved on `tab` the active one, so the
-   * popup shows that cipher or its tasks.
+   * The account of the cipher a notification last saved on `tab`.
    *
    * @param cipherId - When given, only if this is the cipher that was saved.
-   * @returns false when that account no longer serves autofill; nothing of it must be shown.
+   * @returns undefined when the tab's notification saved no cipher, or another one: the message
+   * then names a cipher without an account, as it did before accounts were told apart.
    */
-  private async activateSavedCipherAccount(
-    tab: chrome.tabs.Tab,
-    cipherId?: string,
-  ): Promise<boolean> {
+  private savedCipherAccount(tab: chrome.tabs.Tab, cipherId?: string): UserId | undefined {
     const saved = tab.id != null ? this.savedCiphers.get(tab.id) : undefined;
     if (saved == null || (cipherId != null && saved.cipherId !== cipherId)) {
-      return true;
+      return undefined;
     }
-    return await this.activateAccount(saved.userId);
+    return saved.userId;
   }
 
   /**
@@ -2144,8 +2119,11 @@ export default class NotificationBackground {
     sender: chrome.runtime.MessageSender,
   ) {
     await this.withSenderTab(sender, async (tab) => {
-      // The tasks are those of the account whose cipher was just updated.
-      if (!(await this.activateSavedCipherAccount(tab))) {
+      // The tasks are those of the account whose cipher was just updated, so the at-risk
+      // passwords page is opened for that account, whichever account is active. An account that
+      // has locked, logged out or opted out since shows nothing.
+      const userId = this.savedCipherAccount(tab);
+      if (userId != null && !(await this.canActFor(userId))) {
         await BrowserApi.tabSendMessageData(tab, "closeNotificationBar", {
           fadeOutNotification: !!message.fadeOutNotification,
         });
@@ -2157,10 +2135,17 @@ export default class NotificationBackground {
         // Set route of the popup before attempting to open it.
         // If the vault is locked, this won't have an effect as the auth guards will
         // redirect the user to the login page.
-        await browserAction.setPopup({ popup: "popup/index.html#/at-risk-passwords" });
+        await browserAction.setPopup({
+          popup:
+            userId != null
+              ? `popup/index.html#/at-risk-passwords?userId=${userId}`
+              : "popup/index.html#/at-risk-passwords",
+        });
 
         await Promise.all([
-          this.messagingService.send(VaultMessages.OpenAtRiskPasswords),
+          userId != null
+            ? this.messagingService.send(VaultMessages.OpenAtRiskPasswords, { userId })
+            : this.messagingService.send(VaultMessages.OpenAtRiskPasswords),
           BrowserApi.tabSendMessageData(tab, "closeNotificationBar", {
             fadeOutNotification: !!message.fadeOutNotification,
           }),

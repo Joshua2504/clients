@@ -105,7 +105,6 @@ describe("ContextMenuClickedHandler", () => {
   let copyToClipboard: CopyToClipboardAction;
   let generatePasswordToClipboard: GeneratePasswordToClipboardAction;
   let autofill: AutofillAction;
-  let switchAccount: jest.Mock<Promise<void>, [UserId]>;
   let collectAutofillTriage: jest.Mock<ReturnType<CollectAutofillTriageAction>, [number, number?]>;
   // The accounts autofill serves: the unlocked active account, nobody opted in.
   let autofillUserIds$: BehaviorSubject<UserId[]>;
@@ -125,7 +124,6 @@ describe("ContextMenuClickedHandler", () => {
     generatePasswordToClipboard = jest.fn<Promise<void>, [tab: chrome.tabs.Tab]>();
     autofill = jest.fn<Promise<void>, [tab: chrome.tabs.Tab, cipher: CipherView, userId: UserId]>();
     collectAutofillTriage = jest.fn<ReturnType<CollectAutofillTriageAction>, [number, number?]>();
-    switchAccount = jest.fn<Promise<void>, [UserId]>();
     autofillUserIds$ = new BehaviorSubject<UserId[]>([mockUserId]);
     fillCipherPolicy = mock();
     accountService = mockAccountServiceWith(mockUserId as UserId);
@@ -150,7 +148,6 @@ describe("ContextMenuClickedHandler", () => {
       webmapperDrafts,
       intraprocessMessageSender,
       fillCipherPolicy,
-      switchAccount,
     );
   });
 
@@ -480,45 +477,83 @@ describe("ContextMenuClickedHandler", () => {
           await accountService.switchAccount(mockUserId as UserId);
         });
 
-        it("makes its account the active one before the reprompt popout opens", async () => {
-          const activeAtPopout: (UserId | undefined)[] = [];
-          switchAccount.mockImplementation((userId) => accountService.switchAccount(userId));
-          jest.spyOn(BrowserPopupUtils, "openPopout").mockImplementation(async () => {
-            activeAtPopout.push((await firstValueFrom(accountService.activeAccount$))?.id);
-            return undefined as unknown as chrome.windows.Window;
-          });
+        const activeUserId = async () => (await firstValueFrom(accountService.activeAccount$))?.id;
+        const openedPopouts = () =>
+          (BrowserPopupUtils.openPopout as jest.Mock).mock.calls.map(([path]) => path as string);
 
+        it("opens the reprompt popout for the cipher's account and leaves the active account", async () => {
           await sut.run(createData(cipherItem(AUTOFILL_ID, "1", otherUserId), AUTOFILL_ID), tab);
 
           expect(userVerificationService.hasMasterPassword).toHaveBeenCalledWith(otherUserId);
-          expect(switchAccount).toHaveBeenCalledWith(otherUserId);
-          expect(activeAtPopout).toEqual([otherUserId]);
+          expect(openedPopouts()).toEqual([
+            `popup/index.html#/view-cipher?cipherId=1&senderTabId=5&action=${AUTOFILL_ID}&userId=${otherUserId}`,
+          ]);
+          expect(BrowserPopupUtils.openPopout).toHaveBeenCalledWith(
+            expect.any(String),
+            expect.objectContaining({ singleActionKey: `vault_viewVaultItem_${otherUserId}_1` }),
+          );
+          expect(await activeUserId()).toBe(mockUserId);
           // The fill follows the reprompt, from the popout.
           expect(autofill).not.toHaveBeenCalled();
         });
 
-        it("refuses without a popout when the switch does not take effect", async () => {
-          switchAccount.mockResolvedValue(undefined);
+        it.each([COPY_PASSWORD_ID, COPY_VERIFICATION_CODE_ID])(
+          "leaves %s to the reprompt popout of the cipher's account",
+          async (action) => {
+            await sut.run(createData(cipherItem(action, "1", otherUserId), action), tab);
 
-          await sut.run(createData(cipherItem(AUTOFILL_ID, "1", otherUserId), AUTOFILL_ID), tab);
+            expect(openedPopouts()).toEqual([
+              `popup/index.html#/view-cipher?cipherId=1&senderTabId=5&action=${action}&userId=${otherUserId}`,
+            ]);
+            expect(await activeUserId()).toBe(mockUserId);
+            expect(copyToClipboard).not.toHaveBeenCalled();
+            expect(totpService.getCode$).not.toHaveBeenCalled();
+            expect(eventCollectionService.collect).not.toHaveBeenCalled();
+          },
+        );
 
-          expect(switchAccount).toHaveBeenCalledWith(otherUserId);
-          expect(autofill).not.toHaveBeenCalled();
+        it("copies the username without a reprompt, as for the active account", async () => {
+          await sut.run(
+            createData(cipherItem(COPY_USERNAME_ID, "1", otherUserId), COPY_USERNAME_ID),
+            tab,
+          );
+
+          expect(copyToClipboard).toHaveBeenCalledWith({ text: "USERNAME", tab });
           expect(BrowserPopupUtils.openPopout).not.toHaveBeenCalled();
+          expect(await activeUserId()).toBe(mockUserId);
         });
 
-        it("refuses without switching when its account no longer serves autofill", async () => {
+        it("opens no popout once its account has locked", async () => {
+          // `ciphersForRefs` leaves out a cipher whose account no longer serves autofill.
           autofillUserIds$.next([mockUserId as UserId]);
+          fillCipherPolicy.ciphersForRefs.mockResolvedValue([]);
 
           await sut.run(
             createData(cipherItem(COPY_PASSWORD_ID, "1", otherUserId), COPY_PASSWORD_ID),
             tab,
           );
 
-          expect(switchAccount).not.toHaveBeenCalled();
           expect(copyToClipboard).not.toHaveBeenCalled();
           expect(BrowserPopupUtils.openPopout).not.toHaveBeenCalled();
+          expect(await activeUserId()).toBe(mockUserId);
         });
+      });
+
+      it("copies the code of a cipher of an account that is not active without switching", async () => {
+        serveCiphers(fillCipherPolicy, [createCipher({ totp: "SEED" })], otherUserId);
+        totpService.getCode$.mockReturnValue(of({ code: "123456", period: 30 }));
+
+        await sut.run(
+          createData(
+            cipherItem(COPY_VERIFICATION_CODE_ID, "1", otherUserId),
+            COPY_VERIFICATION_CODE_ID,
+          ),
+          tab,
+        );
+
+        expect(userVerificationService.hasMasterPassword).not.toHaveBeenCalledWith(mockUserId);
+        expect(copyToClipboard).toHaveBeenCalledWith({ text: "123456", tab });
+        expect((await firstValueFrom(accountService.activeAccount$))?.id).toBe(mockUserId);
       });
 
       describe("creating a new item", () => {
@@ -531,42 +566,57 @@ describe("ContextMenuClickedHandler", () => {
             name: "Other",
           } as any);
           await accountService.switchAccount(mockUserId as UserId);
-          switchAccount.mockImplementation((userId) => accountService.switchAccount(userId));
           fillCipherPolicy.canOfferSave.mockResolvedValue(true);
           jest.spyOn(BrowserApi, "tabsQuery").mockResolvedValue([]);
         });
 
+        const activeUserId = async () => (await firstValueFrom(accountService.activeAccount$))?.id;
+
         it("opens the item form for the active account while it serves autofill", async () => {
           await sut.run(createLogin(), tab);
 
-          expect(switchAccount).not.toHaveBeenCalled();
           expect(BrowserPopupUtils.openPopout).toHaveBeenCalledTimes(1);
+          expect(BrowserPopupUtils.openPopout).toHaveBeenCalledWith(
+            expect.stringContaining(`userId=${mockUserId}`),
+            expect.objectContaining({
+              singleActionKey: `vault_AddEditVaultItem_${mockUserId}_${CipherType.Login}`,
+            }),
+          );
+          expect(await activeUserId()).toBe(mockUserId);
         });
 
-        it("makes the serving account the active one first while the active account is locked", async () => {
-          const activeAtPopout: (UserId | undefined)[] = [];
+        it("opens the item form for the serving account while the active account is locked", async () => {
           autofillUserIds$.next([otherUserId]);
-          jest.spyOn(BrowserPopupUtils, "openPopout").mockImplementation(async () => {
-            activeAtPopout.push((await firstValueFrom(accountService.activeAccount$))?.id);
-            return undefined as unknown as chrome.windows.Window;
-          });
           const setAccountActivity = jest.spyOn(accountService, "setAccountActivity");
 
           await sut.run(createLogin(), tab);
 
-          expect(switchAccount).toHaveBeenCalledWith(otherUserId);
-          expect(activeAtPopout).toEqual([otherUserId]);
+          expect(BrowserPopupUtils.openPopout).toHaveBeenCalledTimes(1);
+          expect(BrowserPopupUtils.openPopout).toHaveBeenCalledWith(
+            expect.stringContaining(`userId=${otherUserId}`),
+            expect.objectContaining({
+              singleActionKey: `vault_AddEditVaultItem_${otherUserId}_${CipherType.Login}`,
+            }),
+          );
+          // The active account is not switched for it.
+          expect(await activeUserId()).toBe(mockUserId);
           expect(setAccountActivity).toHaveBeenCalledWith(otherUserId, expect.any(Date));
         });
 
-        it("opens no item form when the serving account cannot become the active one", async () => {
-          autofillUserIds$.next([otherUserId]);
-          switchAccount.mockResolvedValue(undefined);
+        it.each([COPY_USERNAME_ID, COPY_PASSWORD_ID, COPY_VERIFICATION_CODE_ID])(
+          "opens the item form for the save target from the %s menu",
+          async (parentId) => {
+            autofillUserIds$.next([otherUserId]);
 
-          await sut.run(createLogin(), tab);
+            await sut.run(createData(`${parentId}_${CREATE_LOGIN_ID}`, parentId), tab);
 
-          expect(BrowserPopupUtils.openPopout).not.toHaveBeenCalled();
-        });
+            expect(BrowserPopupUtils.openPopout).toHaveBeenCalledWith(
+              expect.stringContaining(`userId=${otherUserId}`),
+              expect.anything(),
+            );
+            expect(await activeUserId()).toBe(mockUserId);
+          },
+        );
       });
 
       it("opens the reprompt popout for a protected cipher of the active account", async () => {

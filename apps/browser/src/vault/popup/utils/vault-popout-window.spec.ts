@@ -308,6 +308,31 @@ describe("VaultPopoutWindow", () => {
 
       expect(closeSingleActionPopoutSpy).toHaveBeenCalledWith(VaultPopoutType.addEditVaultItem, 0);
     });
+
+    it("closes only the add/edit popouts of the given account", async () => {
+      jest.useFakeTimers();
+      const popout = (windowId: number, query: string) =>
+        ({ windowId, url: `chrome-extension://id/popup/index.html#/edit-cipher?${query}` }) as any;
+      jest
+        .spyOn(chrome.runtime, "getURL")
+        .mockReturnValue("chrome-extension://id/popup/index.html");
+      jest
+        .spyOn(BrowserApi, "tabsQuery")
+        .mockResolvedValue([
+          popout(1, "type=1&userId=user-a&singleActionPopout=vault_AddEditVaultItem_user-a_1"),
+          popout(2, "type=1&userId=user-b&singleActionPopout=vault_AddEditVaultItem_user-b_1"),
+          popout(3, "type=1&singleActionPopout=vault_AddEditVaultItem_1"),
+          popout(4, "cipherId=c&userId=user-a&singleActionPopout=vault_viewVaultItem_user-a_c"),
+        ]);
+      const removeWindow = jest.spyOn(BrowserApi, "removeWindow").mockResolvedValue(undefined);
+
+      await closeAddEditVaultItemPopout(0, "user-a" as UserId);
+      jest.runAllTimers();
+
+      expect(removeWindow.mock.calls).toEqual([[1]]);
+      expect(closeSingleActionPopoutSpy).not.toHaveBeenCalled();
+      jest.useRealTimers();
+    });
   });
 
   describe("openFido2Popout", () => {

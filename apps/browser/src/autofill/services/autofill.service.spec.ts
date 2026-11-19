@@ -1561,7 +1561,11 @@ describe("AutofillService", () => {
       expect(await autofillService.isPasswordRepromptRequired(cipher, tab, mockUserId)).toBe(true);
 
       expect(userVerificationService.hasMasterPassword).toHaveBeenCalledWith(mockUserId);
-      expect(openPopout).toHaveBeenCalledWith(tab, { cipherId: "cipherId", action: "autofill" });
+      expect(openPopout).toHaveBeenCalledWith(tab, {
+        cipherId: "cipherId",
+        action: "autofill",
+        userId: mockUserId,
+      });
     });
 
     it("judges the reprompt by the master password of the account that owns the cipher", async () => {
@@ -1576,83 +1580,47 @@ describe("AutofillService", () => {
       expect(openPopout).not.toHaveBeenCalled();
     });
 
-    it("refuses a protected cipher of another account without a way to switch to it", async () => {
-      // The popout verifies the active account, which holds the same shared item under this id.
-      expect(await autofillService.isPasswordRepromptRequired(cipher, tab, otherUserId)).toBe(true);
-
-      expect(openPopout).not.toHaveBeenCalled();
-    });
-
-    describe("with a way to switch accounts", () => {
-      let switchAccount: jest.Mock;
-      let activeAtPopout: (UserId | undefined)[];
+    describe("a protected cipher of an account that is not active", () => {
+      const activeUserId = async () => (await firstValueFrom(accountService.activeAccount$))?.id;
 
       beforeEach(async () => {
-        switchAccount = jest.fn((userId: UserId) => accountService.switchAccount(userId));
-        autofillService["switchAccount"] = switchAccount;
-        autofillAccountsService.isAutofillUser$.mockReturnValue(of(true));
         await accountService.addAccount(otherUserId, {
           email: "other@example.com",
           emailVerified: true,
           name: "Other",
         } as any);
         await accountService.switchAccount(mockUserId);
-        activeAtPopout = [];
-        openPopout.mockImplementation(async () => {
-          activeAtPopout.push((await firstValueFrom(accountService.activeAccount$))?.id);
-        });
       });
 
-      afterEach(async () => {
-        await accountService.switchAccount(mockUserId);
-      });
+      it("opens the popout for the cipher's account and leaves the active account", async () => {
+        const switchAccount = jest.spyOn(accountService, "switchAccount");
 
-      it("makes the cipher's account the active one before the popout opens", async () => {
         expect(
           await autofillService.isPasswordRepromptRequired(cipher, tab, otherUserId, "action"),
         ).toBe(true);
 
-        expect(switchAccount).toHaveBeenCalledWith(otherUserId);
-        expect(openPopout).toHaveBeenCalledWith(tab, { cipherId: "cipherId", action: "action" });
-        expect(activeAtPopout).toEqual([otherUserId]);
+        expect(userVerificationService.hasMasterPassword).toHaveBeenCalledWith(otherUserId);
+        expect(openPopout).toHaveBeenCalledTimes(1);
+        expect(openPopout).toHaveBeenCalledWith(tab, {
+          cipherId: "cipherId",
+          action: "action",
+          userId: otherUserId,
+        });
+        expect(switchAccount).not.toHaveBeenCalled();
+        expect(await activeUserId()).toBe(mockUserId);
       });
 
-      it("does not switch for a cipher of the active account", async () => {
+      it("opens one popout per account for the same shared item", async () => {
+        // The item has one id in both vaults; each popout names the account it verifies.
+        await autofillService.isPasswordRepromptRequired(cipher, tab, otherUserId);
+        autofillService["openPasswordRepromptPopoutDebounce"] = undefined;
+        autofillService["currentlyOpeningPasswordRepromptPopout"] = false;
         await autofillService.isPasswordRepromptRequired(cipher, tab, mockUserId);
 
-        expect(switchAccount).not.toHaveBeenCalled();
-        expect(activeAtPopout).toEqual([mockUserId]);
-      });
-
-      it("refuses without switching when the account no longer serves autofill", async () => {
-        autofillAccountsService.isAutofillUser$.mockReturnValue(of(false));
-
-        expect(await autofillService.isPasswordRepromptRequired(cipher, tab, otherUserId)).toBe(
-          true,
-        );
-
-        expect(switchAccount).not.toHaveBeenCalled();
-        expect(openPopout).not.toHaveBeenCalled();
-      });
-
-      it("refuses without a popout when the switch fails", async () => {
-        switchAccount.mockRejectedValue(new Error("no switch"));
-
-        expect(await autofillService.isPasswordRepromptRequired(cipher, tab, otherUserId)).toBe(
-          true,
-        );
-
-        expect(openPopout).not.toHaveBeenCalled();
-      });
-
-      it("refuses without a popout when the switch does not take effect", async () => {
-        switchAccount.mockResolvedValue(undefined);
-
-        expect(await autofillService.isPasswordRepromptRequired(cipher, tab, otherUserId)).toBe(
-          true,
-        );
-
-        expect(openPopout).not.toHaveBeenCalled();
+        expect(openPopout.mock.calls.map(([, options]) => options.userId)).toEqual([
+          otherUserId,
+          mockUserId,
+        ]);
       });
     });
 

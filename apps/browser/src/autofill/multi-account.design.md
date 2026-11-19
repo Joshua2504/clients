@@ -290,7 +290,17 @@ router.navigate(["/clone-cipher"], { queryParams: { clone: "true", cipherId, typ
 router.navigate(["/attachments"], { queryParams: { cipherId, userId } });
 router.navigate(["/cipher-password-history"], { queryParams: { cipherId, userId } });
 router.navigate(["/assign-collections"], { queryParams: { cipherId, userId } });
+// Share by link
+router.navigate(["/share-item"], { queryParams: { cipherId, userId } });
+// At-risk passwords of `userId`
+router.navigate(["/at-risk-passwords"], { queryParams: { userId } });
 ```
+
+Every one of these routes is guarded by `itemAccountAuthGuard`
+(`vault/popup/guards/item-account-auth.guard.ts`): a route that names an unlocked autofill account
+is reachable whatever the state of the active account, so the background can open a popout for an
+item of another account while the active account is locked. A route that names no account, or one
+that does not serve autofill, is left to `authGuard` and so to the active account.
 
 Each page carries `userId` to the pages it opens: view to edit, add to the view of the saved item,
 edit to attachments, the item history to the password history, and `restrictedCipherGuard` to the
@@ -321,13 +331,15 @@ openVaultItemPasswordRepromptPopout(senderTab, { cipherId, action, userId? });
 openAddEditVaultItemPopout(senderTab, { cipherId?, cipherType?, fillAfterSave?, userId? });
 viewVaultItemPopoutKey(cipherId: string, userId?: UserId): string;
 closeViewVaultItemPopout(viewVaultItemPopoutKey(cipherId, userId));
+closeAddEditVaultItemPopout(delayClose?, userId?); // with `userId`, only that account's popouts
 ```
 
 - **View:** `openViewVaultItemPopout(tab, { cipherId, action: SHOW_AUTOFILL_BUTTON, userId })`.
 - **Re-prompt, then fill:**
   `openVaultItemPasswordRepromptPopout(tab, { cipherId, action: AUTOFILL_ID, userId })`. It tells
-  the tab `bgVaultItemRepromptPopoutOpened`, as before. The popout fills with
-  `VaultPopupAutofillService.doAutofillForAccount({ userId, cipher }, false)`, which sends `fillCipherForPopup` with `{ tabId, tabUrl, cipherId, userId }` and closes with
+  the tab `bgVaultItemRepromptPopoutOpened`, as before. The popout asks for the master password
+  of `userId`, fills with `VaultPopupAutofillService.doAutofillForAccount({ userId, cipher }, false)`,
+  which sends `fillCipherForPopup` with `{ tabId, tabUrl, cipherId, userId }`, and closes with
   `closeViewVaultItemPopout(viewVaultItemPopoutKey(cipherId, userId))`. The copy actions
   (`COPY_USERNAME_ID`, `COPY_PASSWORD_ID`, `COPY_VERIFICATION_CODE_ID`) re-prompt and copy for
   `userId` the same way.
@@ -340,6 +352,9 @@ closeViewVaultItemPopout(viewVaultItemPopoutKey(cipherId, userId));
   that is already open is `reloadAddEditCipherData` with `data: { cipherId, cipherType, userId }`;
   a popout reloads only when `data.userId` is its own account. After "Save and fill" the popout
   sends `showLoginSavedNotification` with the `userId` it saved to.
+- **At-risk passwords:** the popup is opened at `popup/index.html#/at-risk-passwords?userId=<id>`
+  (`MainBackground.openAtRisksPasswordsPage(userId)`, reached with the `openAtRiskPasswords`
+  message; the account is taken only from a message the background sent itself).
 - **Popout keys name the account.** `viewVaultItemPopoutKey(cipherId, userId)` is
   `vault_viewVaultItem_<userId>_<cipherId>`, and the add/edit key is
   `vault_AddEditVaultItem_<userId>[_<cipherId>|_<cipherType>]`. Without `userId` the keys are the
@@ -367,6 +382,23 @@ ArchiveCipherUtilitiesService.unarchiveCipher(cipher: CipherView, skipReprompt?:
 CipherFormConfigService.buildConfig(mode: CipherFormMode, cipherId?: CipherId, cipherType?: CipherType, userId?: UserId): Promise<CipherFormConfig>;
 CipherFormService.decryptCipher(cipher: Cipher, userId?: UserId): Promise<CipherView>;
 CipherFormService.saveCipher(cipher: CipherView, config: CipherFormConfig): Promise<CipherView>; // saves to config.userId
+
+// Contributed row actions (`VAULT_ROW_ACTIONS`) are given the account of the row.
+type VaultItemsTableRowAction<C> = {
+  run: (item: C, userId?: UserId) => void | Promise<void>;
+  show?: (item: C, userId?: UserId) => boolean;
+  disabled?: (item: C, userId?: UserId) => boolean;
+  // …
+};
+```
+
+Popup (`VaultPopupAutofillService`):
+
+```ts
+// Fill: the re-prompt asks for the master password of `accountCipher.userId`.
+doAutofillForAccount(accountCipher: AccountCipher, closePopup?: boolean, skipPasswordReprompt?: boolean): Promise<boolean>;
+// Fill and add the page's URL to the item, saved to the vault of `userId`.
+doAutofillAndSave(cipher: CipherView, closePopup?: boolean, skipPasswordReprompt?: boolean, userId?: UserId): Promise<boolean>;
 ```
 
 ```html
@@ -379,6 +411,12 @@ CipherFormService.saveCipher(cipher: CipherView, config: CipherFormConfig): Prom
 <app-cipher-attachments [cipherId]="cipherId" [userId]="userId" />
 <app-download-attachment [cipher]="cipher" [attachment]="attachment" [userId]="userId" />
 <assign-collections [params]="{ ciphers, organizationId, availableCollections, userId }" />
+<!-- Share by link: the Send is created in the account of `userId`. -->
+<app-share-button [cipher]="cipher" [userId]="userId" />
+<!-- Shown while `userId` has no Premium; a click names that account. -->
+<app-premium-badge [userId]="userId" />
+<!-- The icon comes from the server of `userId`. -->
+<app-vault-icon [cipher]="cipher" [userId]="userId" />
 ```
 
 `@bitwarden/common`:
@@ -391,6 +429,7 @@ CipherAuthorizationService.canCloneCipher$(cipher: CipherLike, isAdminConsoleAct
 CipherService.getFullCipherView(c: CipherViewLike, userId?: UserId): Promise<CipherView>;
 ViewPasswordHistoryService.viewPasswordHistory(cipher: CipherView, userId?: UserId): Promise<void>;
 VaultSettingsService.showAtRiskPasswordNotificationsFor$(userId: UserId): Observable<boolean>;
+PremiumUpgradePromptService.promptForPremium(organizationId?: string, userId?: UserId): Promise<void>;
 ```
 
 Popup rows (`vault/popup/components/vault/`):
@@ -420,27 +459,21 @@ it is given the account in its dialog data, as `PasswordRepromptComponent` is.
 
 ### What an account-scoped page does not do
 
-- **Fill a re-prompt-protected item of another account.** The pages fill through
-  `VaultPopupAutofillService.doAutofillForAccount`, which still declines such an item instead of
-  asking for that account's master password with
-  `PasswordRepromptService.showPasswordPrompt(userId)`.
-- **Add the page's URL to the item while filling ("Autofill and save").**
-  `VaultPopupAutofillService.doAutofillAndSave` saves to the active account's vault, so a page or
-  menu of another account fills without offering it.
-- **Share an item by link.** `@bitwarden/tools-share` creates the Send in the active account, so
-  the share actions are not offered for an item of another account.
-- **Offer contributed row actions (`VAULT_ROW_ACTIONS`).** An action receives the cipher without
-  its account.
-- **Offer the item's account an upgrade to premium.** `PremiumUpgradePromptService` and the
-  premium badge open the upgrade of the active account. Premium itself is checked for the item's
-  account. The more-options menu leaves the archive upgrade out for another account; the TOTP
-  badge of the view and the attachments entry of the form still open the active account's
-  upgrade when the item's account has no premium.
-- **Use the item account's password generator.** The generator in the form uses the active
-  account's options, policies and history.
-- **Follow the item account's display settings.** Quick copy buttons
-  (`VaultCopyButtonsService.showQuickCopyActions$`) and favicons are the popup's own, read from
-  the active account.
+- **Start the item account's upgrade to Premium.** Premium is checked for the item's account, and
+  the premium badge and `PremiumUpgradePromptService.promptForPremium(organizationId, userId)`
+  name the account that needs Premium. The upgrade itself can only be started for the active
+  account, so for another account the user is told which account needs it and nothing is started.
+
+### The lock screen
+
+The lock route is account-scoped in the same way. With `userId` (`LOCK_USER_ID_QUERY_PARAM`,
+`/lock?userId=<id>`), `lockGuard` and the lock screen act on that account alone: its unlock
+options, device trust, migrations, master password policy, the sync after unlock, and the logout
+after too many failed attempts. The account switcher is hidden, and the active account stays what
+it is. The screen returns to the URL it was opened from after the unlock, and also when the
+account is logged out or unlocked elsewhere. The `unlocked` message names the account, so what
+waits for the active account's unlock keeps waiting. Without `userId` the lock screen is the
+active account's, as before.
 
 ## Conversion checklist
 
@@ -459,16 +492,14 @@ Prerequisites in shared code, each needed before the first surface that depends 
       `getAllDecryptedForUrl(url, userId)` matches with `userId`'s settings.
 - [x] `EventCollectionService.collect` records for the active account. Give it the account.
 - [x] `UserVerificationService.hasMasterPassword()` in `AutofillService.isPasswordRepromptRequired`
-      reads the active account. Pass the cipher's account, and verify the reprompt popout against
-      that account. The popout shows and verifies the active account's vault
-      (`vault/popup/utils/vault-popout-window.ts`, `ViewComponent`), so a protected cipher of
-      another autofill account makes its account the active one first ("switch, then reprompt"):
-      `AutofillService.isPasswordRepromptRequired` and the context menu take a `switchAccount`
-      callback, as the notification bar does. The popout then verifies that account's master
-      password and fills from its vault. The cipher is refused without a popout when its account
-      no longer serves autofill or the switch does not take effect. The switch is visible: the
-      popup shows the cipher's account afterwards, and the account left behind keeps serving
-      autofill only if it has opted in.
+      reads the active account. Pass the cipher's account, and open the reprompt popout for that
+      account: `AutofillService.isPasswordRepromptRequired` and the context menu call
+      `openVaultItemPasswordRepromptPopout(tab, { cipherId, action, userId })` (see
+      [Popouts from the background](#popouts-from-the-background)). The popout asks for that
+      account's master password and fills, copies or answers for it. The active account is never
+      switched for a reprompt. A cipher whose account stopped serving autofill no longer resolves
+      (`ciphersForRefs`), so no popout opens for it, and whatever the popout answers is resolved
+      again within the autofill accounts before anything is filled or saved.
 - [x] Sync: `MainBackground.fullSync` syncs the active account and then every other unlocked
       account; an account unlocked while not active syncs then
       (`syncAccountsUnlockedWhileNotActive`). With `processForNonActiveAccounts`, which only the
@@ -498,9 +529,11 @@ Surfaces:
       passkey messages name the cipher by `AccountCipherRef`. Cards, identities and the
       show-cards/identities settings apply per account. Add-login data goes through
       `canOfferSave` for the target account. A lock of any autofill account rebuilds the list.
-      "View item" is offered only for the active account's ciphers, because the vault item view
-      shows the active account's vault. The password generator and "new item" follow the save
-      target; a new item for an account that is not active makes it the active one first. A
+      "View item" is offered for every cipher and opens the vault item view for the cipher's
+      account (`openViewVaultItemPopout(tab, { cipherId, action, userId })`). The password
+      generator and "new item" follow the save target; the draft is stored for that account
+      (`setAddEditCipherInfo(info, userId)`) and the item form is opened for it
+      (`openAddEditVaultItemPopout(tab, { …, userId })`). Neither changes the active account. A
       cipher's icon comes from its own account's server.
 - [x] **`services/autofill-badge-updater.service.ts`** — count `ciphersForUrl(url, Badge)` across
       accounts; recompute on `MultiAccountFillCipherPolicy.changed$` instead of the active
@@ -510,8 +543,12 @@ Surfaces:
 - [x] **`browser/cipher-context-menu-handler.ts`, `browser/context-menu-clicked-handler.ts`,
       `browser/main-context-menu-handler.ts`** — menu item ids encode `accountCipherKey`; titles
       show the account when more than one serves or the one that serves is not active; a click
-      resolves through `ciphersForRefs`; "new item" follows the save target. The
-      "unlock" and "no match" entries depend on the autofill accounts, not the active account.
+      resolves through `ciphersForRefs`; "new item" follows the save target and opens the item
+      form for that account. Fill and the copy entries act for the cipher's account without
+      changing the active account: a protected cipher opens the reprompt popout for its account
+      with the action to perform, the copied-password event is recorded for it, and the copy
+      code entry exists only for a cipher whose account may use TOTP. The "unlock" and "no
+      match" entries depend on the autofill accounts, not the active account.
 - [x] **`background/web-request.background.ts`** (HTTP basic auth) — an automatic fill: candidates
       from all accounts, each under its own `enableBasicAuthResponse` setting and feature
       availability; with candidates from more than one account, do not answer.
@@ -532,28 +569,37 @@ Surfaces:
       with a choice among autofill accounts; "update" targets the account that owns the matched
       cipher; a match in more than one account asks. `canOfferSave`, folders, collections,
       organizations and policies are read for the target account. At-risk password tasks
-      (`SecurityTask`) are per account. "View", "edit" and a reprompt make the cipher's account
-      the active one first, and are dropped when that account no longer serves autofill. The
-      "login saved" confirmation of the inline menu's "Save and fill" carries the account the
-      popout saved to, so its "View" follows the same rule. A bar is raised whenever an autofill
-      account can take it, whatever the active account's state; the unlock prompt is left for when
-      none can. The at-risk bar names the account the task belongs to.
+      (`SecurityTask`) are per account. "View", "edit", choosing an organization for a new
+      login and the reprompt before an update open their popout for the target account, with
+      the draft stored for it; none of them changes the active account. They are dropped when
+      that account no longer serves autofill. The reprompt popout answers `bgHandleReprompt`
+      with the account whose master password was verified, and the update is saved to that
+      account alone, if it still serves autofill and holds the cipher. The "login saved"
+      confirmation of the inline menu's "Save and fill" carries the account the popout saved
+      to, so its "View" opens the item in that account. A bar is raised whenever an autofill
+      account can take it, whatever the active account's state; the unlock prompt is left for
+      when none can. The at-risk bar names the account the task belongs to. After an update
+      that leaves further tasks, "open tasks" opens the at-risk passwords page for the account
+      whose cipher was updated (`/at-risk-passwords?userId=<id>`).
 - [x] **Passkeys: `fido2/background/fido2.background.ts`,
       `fido2/services/browser-fido2-user-interface.service.ts`, `popup/fido2/fido2.component.ts`,
       `libs/common/src/platform/services/fido2/fido2-authenticator.service.ts`** — assertion
       searches all autofill accounts and the picker returns an `AccountCipherRef`; registration
       chooses a target account, default active; excluded-credential checks cover all autofill
       accounts; user verification runs against the cipher's account. The passkey scripts are
-      injected, and a request is answered without an unlock prompt (`ensureUnlockedVault`,
-      `fido2AuthGuard`), while any autofill account serves. Remaining: creating a new login to
-      hold a passkey is offered only while the target is the active account.
+      injected, and a request is answered without an up-front unlock prompt (`ensureUnlockedVault`,
+      `fido2AuthGuard`), while any autofill account serves. The request names the locked accounts
+      that would serve (`lockedPasskeyUserIds$`: the active account and the locked accounts that
+      have opted in). The popout offers to unlock each of them on its account-scoped lock screen,
+      and the request then runs again from discovery in the same session (`Fido2RetryAnswer`). A
+      new login to hold the passkey is created in the target account (`/add-cipher` with
+      `userId`). An account that has not opted in and is not the active account is never offered.
 - [x] **Popup suggestions tab: `vault/popup/services/vault-popup-items.service.ts`,
       `vault/popup/services/vault-popup-autofill.service.ts`** — a section per further autofill
-      account; filling uses the cipher's account; opening an item of another account switches the
-      active account first. Remaining: a cipher of another account offers "fill" and "switch
-      account and view item" only (no copy, edit or fill-and-save actions); a reprompt-protected
-      one is opened in its account instead of filled; the list table behind the
-      `VFO1Foundation` flag is not converted.
+      account; filling uses the cipher's account. Every row action (view, edit, clone, copy,
+      fill, fill and save, share, favourite, archive, delete, assign collections, contributed
+      actions) runs for the cipher's account without changing the active account. The list
+      table behind the `VFO1Foundation` flag shows the same sections.
 - [x] **Opt-in control: `auth/popup/account-switching/`** — a per-account toggle bound to
       `enabled$` / `setEnabled`, offered for unlocked accounts, with the risk explained where the
       choice is made.
@@ -562,12 +608,17 @@ Surfaces:
 
 What still follows the active account, or is otherwise short of the rules above.
 
-- **View, edit and copy act on the active account's vault.** For a cipher of another autofill
-  account they either make its account the active one first (popup suggestions "switch account and
-  view item", the notification bar's "view" and "edit", every master password reprompt) or are not
-  offered (inline menu "view item", the popup's copy and more-options actions).
-- **The popup's list table (`VFO1Foundation` flag) is not converted.** It shows the active
-  account's suggestions only.
+- **The popup's search, filter chips and vault scope cover the active account's vault.** The
+  suggestions of other accounts are not narrowed by them, and are hidden while a search is
+  active.
+- **A Premium upgrade for another account is named, not started.** The popup tells the user which
+  account needs Premium; the upgrade can only be started for the active account.
+- **The share feature flag is read for the active account's server.** Sharing an item by link is
+  offered for an item of another account when the active account's server has the feature on.
+- **An account unlocked by the background while its lock screen is shown skips the unlock tail.**
+  When the background unlocks an account on its own (shared unlock) while that account's
+  account-scoped lock screen is open, the screen leaves without the steps that follow an unlock
+  performed there (device trust, migrations, password policy, sync).
 - **A locked non-active account gets sync notifications only with its sync on unlock.** Sync
   notifications (vault, send, policy, organization status, collection settings, a key rotation
   logout) are processed for a non-active account while it is unlocked. Logout and premium status
@@ -586,13 +637,6 @@ What still follows the active account, or is otherwise short of the rules above.
   locks it; the unlock prompt is for it; the clipboard-setting notice on the badge is its own;
   with no autofill account, the page is set up from its card and identity settings, its premium
   decides whether the inline menu opens on TOTP fields, and fill assist follows its policy.
-- **A locked active account's passkeys are not found while another account serves.** A passkey
-  request is answered from the autofill accounts without asking to unlock, so a passkey held
-  only by the locked active account is reported as not found until that account is unlocked from
-  the popup. The passkey popout offers no unlock for it.
-- **A new item for an account that is not active switches to it.** The item form shows the active
-  account's vault, so the inline menu's and the context menu's "new item" make the save target
-  the active account first (as "view", "edit" and the reprompt do) when it is not.
 - **TOTP after a passkey login is copied without the premium and auto-copy checks.** The inline
   menu copies the code of a login whose passkey was just used, as upstream does for a single
   account; a regular fill copies it only for an account with premium (or an organization grant)
@@ -602,3 +646,23 @@ What still follows the active account, or is otherwise short of the rules above.
 - **A logout of a non-active account is told only to an open popup.** The popup shows a toast
   that names the account, with the reason where there is a text for it. With the popup closed, the
   account just leaves the account switcher and stops serving autofill.
+
+## Scope outside the browser extension
+
+Only the browser extension serves several accounts. The shared libraries changed as follows.
+
+- **Behaviour-neutral for web, desktop and the CLI.** The calls, inputs and routes under
+  [Account-scoped item pages](#account-scoped-item-pages), the per-account readers
+  (`autofillOnPageLoadDefaultFor$`, `enableBadgeCounterFor$`,
+  `resolvedDefaultUriMatchStrategyFor$`, `showAtRiskPasswordNotificationsFor$`), event collection,
+  sync (`fullSync(forceSync, { userId })`), the Send, folder and device API calls and the passkey
+  abstractions take the account as an optional `userId`. Without it they mean the active account,
+  exactly as before, and no other client passes one. The lock screen and `lockGuard` are
+  account-scoped only with the `userId` query param, which only the browser extension sets.
+- **Not strictly neutral, identical for the active account.** `DeviceTrustService.trustDevice`
+  sends its request as the account that is trusted instead of the active account. The encrypted
+  migrator and its migrations sync the account that was migrated instead of the active account.
+  Both are the same request whenever that account is the active one, which it always is on the
+  other clients' lock screens.
+- **Browser only.** `processForNonActiveAccounts` of the server notifications service is set by
+  the browser extension alone, see [Known limits](#known-limits).

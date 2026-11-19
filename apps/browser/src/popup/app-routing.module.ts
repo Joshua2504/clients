@@ -8,6 +8,7 @@ import {
   activeAuthGuard,
   authGuard,
   hasPasswordGuard,
+  LOCK_USER_ID_QUERY_PARAM,
   lockGuard,
   redirectGuard,
   redirectToVaultIfUnlockedGuard,
@@ -117,6 +118,7 @@ import {
 } from "../vault/popup/guards/at-risk-passwords.guard";
 import { clearVaultStateGuard } from "../vault/popup/guards/clear-vault-state.guard";
 import { IntroCarouselGuard } from "../vault/popup/guards/intro-carousel.guard";
+import { itemAccountAuthGuard } from "../vault/popup/guards/item-account-auth.guard";
 import { restoreVaultScopeGuard } from "../vault/popup/guards/restore-vault-scope.guard";
 import { restrictedCipherGuard } from "../vault/popup/guards/restricted-cipher.guard";
 import { AdminSettingsComponent } from "../vault/popup/settings/admin-settings.component";
@@ -245,7 +247,7 @@ const routes: Routes = [
   {
     path: "view-cipher",
     component: ViewComponent,
-    canActivate: [authGuard],
+    canActivate: [itemAccountAuthGuard],
     data: {
       // Above "trash"
       elevation: 3,
@@ -254,7 +256,7 @@ const routes: Routes = [
   {
     path: "cipher-password-history",
     component: PasswordHistoryComponent,
-    canActivate: [authGuard],
+    canActivate: [itemAccountAuthGuard],
     data: { elevation: 4 } satisfies RouteDataProperties,
   },
   {
@@ -269,7 +271,7 @@ const routes: Routes = [
   {
     path: "add-cipher",
     component: AddEditComponent,
-    canActivate: [authGuard, debounceNavigationGuard()],
+    canActivate: [itemAccountAuthGuard, debounceNavigationGuard()],
     data: { elevation: 1, resetRouterCacheOnTabChange: true } satisfies RouteDataProperties,
     runGuardsAndResolvers: "always",
   },
@@ -277,7 +279,7 @@ const routes: Routes = [
     path: "edit-cipher",
     component: AddEditComponent,
     canActivate: [
-      authGuard,
+      itemAccountAuthGuard,
       debounceNavigationGuard(),
       restrictedCipherGuard(RestrictedCipherAction.Edit),
     ],
@@ -291,7 +293,7 @@ const routes: Routes = [
   {
     path: "attachments",
     component: AttachmentsComponent,
-    canActivate: [authGuard, filePickerPopoutGuard()],
+    canActivate: [itemAccountAuthGuard, filePickerPopoutGuard()],
     data: { elevation: 4 } satisfies RouteDataProperties,
   },
   {
@@ -443,7 +445,7 @@ const routes: Routes = [
   {
     path: "clone-cipher",
     component: AddEditComponent,
-    canActivate: [authGuard, restrictedCipherGuard(RestrictedCipherAction.Clone)],
+    canActivate: [itemAccountAuthGuard, restrictedCipherGuard(RestrictedCipherAction.Clone)],
     data: { elevation: 1 } satisfies RouteDataProperties,
   },
   {
@@ -467,7 +469,7 @@ const routes: Routes = [
   {
     path: "share-item",
     component: ShareItemComponent,
-    canActivate: [authGuard, canAccessFeature(FeatureFlag.PM34203TemporaryItemSharing)],
+    canActivate: [itemAccountAuthGuard, canAccessFeature(FeatureFlag.PM34203TemporaryItemSharing)],
     // Above "view-cipher"
     data: { elevation: 4 } satisfies RouteDataProperties,
   },
@@ -686,6 +688,12 @@ const routes: Routes = [
       {
         path: "lock",
         canActivate: [lockGuard()],
+        resolve: {
+          // The lock screen of an account named by the route unlocks that account alone: no
+          // switching to another account from there.
+          showAcctSwitcher: (route: ActivatedRouteSnapshot) =>
+            route.queryParamMap.get(LOCK_USER_ID_QUERY_PARAM) == null,
+        },
         data: {
           pageIcon: LockIcon,
           pageTitle: {
@@ -753,7 +761,10 @@ const routes: Routes = [
   {
     path: "assign-collections",
     component: AssignCollections,
-    canActivate: [authGuard, restrictedCipherGuard(RestrictedCipherAction.AssignCollections)],
+    canActivate: [
+      itemAccountAuthGuard,
+      restrictedCipherGuard(RestrictedCipherAction.AssignCollections),
+    ],
     data: { elevation: 1 } satisfies RouteDataProperties,
   },
   {

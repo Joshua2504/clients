@@ -19,7 +19,7 @@ import {
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { getUserId } from "@bitwarden/common/auth/services/account.service";
 import { uuidAsString } from "@bitwarden/common/platform/abstractions/sdk/sdk.service";
-import { CipherId } from "@bitwarden/common/types/guid";
+import { CipherId, UserId } from "@bitwarden/common/types/guid";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
 import { CipherType } from "@bitwarden/common/vault/enums";
 import { SearchTextDebounceInterval } from "@bitwarden/common/vault/services/search.service";
@@ -47,12 +47,19 @@ import BrowserPopupUtils from "../../../platform/browser/browser-popup-utils";
 import { PopupCipherViewLike } from "../views/popup-cipher.view";
 
 import { VaultPopupAutofillService } from "./vault-popup-autofill.service";
-import { VaultPopupItemsService } from "./vault-popup-items.service";
+import { itemAccountQueryParams } from "./vault-popup-item-account.service";
+import { AccountAutofillCiphers, VaultPopupItemsService } from "./vault-popup-items.service";
 import { VaultPopupListTableFiltersService } from "./vault-popup-list-table-filters.service";
 import { VaultPopupLoadingService } from "./vault-popup-loading.service";
 
-/** The section a row belongs to within the vault list table. */
-export type VaultSection = "autofill" | "favorites" | "allItems";
+/**
+ * The section a row belongs to within the vault list table. `accountAutofill` is the suggestions
+ * section of a further autofill account, one per account, see {@link VaultTableRow.userId}.
+ */
+export type VaultSection = "autofill" | "accountAutofill" | "favorites" | "allItems";
+
+/** A further autofill account that has suggestions for the current tab. */
+export type VaultAccountSection = { userId: UserId; email: string };
 
 /**
  * The resolved action affordances for a single row — which click action it takes and which
@@ -81,6 +88,11 @@ export type VaultTableRow = {
   cipher: PopupCipherViewLike;
   _section: VaultSection;
   actions: VaultRowActions;
+  /**
+   * The account whose vault holds the cipher when it is not the active account: set on the rows
+   * of an `accountAutofill` section and nowhere else. Every action on the row runs for it.
+   */
+  userId?: UserId;
 };
 
 /** Inputs that decide a row's action affordances. */
@@ -145,6 +157,18 @@ export class VaultPopupListTableService {
   );
 
   /**
+   * The suggestions of the further autofill accounts, one entry per account. Empty while no
+   * account has opted in, and seeded empty so the list never waits for another account's vault.
+   */
+  private readonly otherAccountCiphers$: Observable<AccountAutofillCiphers[]> =
+    this.vaultPopupItemsService.otherAccountAutoFillCiphers$.pipe(
+      startWith([] as AccountAutofillCiphers[]),
+      // The seed and the answer of a popup where no account has opted in are both empty.
+      distinctUntilChanged((a, b) => a.length === 0 && b.length === 0),
+      shareReplay({ bufferSize: 1, refCount: true }),
+    );
+
+  /**
    * Whether to show the tip that prompts the user to save a login for the current site. The tip
    * stands in for the autofill section's rows, so it only applies when nothing narrows the list,
    * the current context allows autofill (e.g. not a popout), and no login is suggested. A non-login
@@ -155,12 +179,16 @@ export class VaultPopupListTableService {
     this.vaultPopupItemsService.hasFilterApplied$,
     this.vaultPopupItemsService.autoFillCiphers$,
     this.vaultPopupAutofillService.autofillAllowed$,
+    this.otherAccountCiphers$,
   ]).pipe(
     map(
-      ([hasFilter, ciphers, autofillAllowed]) =>
+      ([hasFilter, ciphers, autofillAllowed, otherAccounts]) =>
         !hasFilter &&
         autofillAllowed &&
-        !ciphers.some((cipher) => CipherViewLikeUtils.getType(cipher) === CipherType.Login),
+        // A login suggested from another autofill account's vault is a login for this site too.
+        ![...ciphers, ...otherAccounts.flatMap((account) => account.ciphers)].some(
+          (cipher) => CipherViewLikeUtils.getType(cipher) === CipherType.Login,
+        ),
     ),
   );
 
@@ -187,26 +215,66 @@ export class VaultPopupListTableService {
     this.vaultPopupItemsService.hasSearchText$,
     this.rowActionContext$,
     this.scope$,
+    this.otherAccountCiphers$,
   ]).pipe(
-    map(([autoFillCiphers, favoriteCiphers, filteredCiphers, hasSearchText, context, scope]) => {
-      /** One section's rows: the ciphers the scope admits, in display order. */
-      const section = (ciphers: PopupCipherViewLike[], name: VaultSection) =>
-        ciphers
-          .filter((cipher) => cipherInScope(cipher, scope))
-          .map((cipher) => this.toRow(cipher, name, context));
+    map(
+      ([
+        autoFillCiphers,
+        favoriteCiphers,
+        filteredCiphers,
+        hasSearchText,
+        context,
+        scope,
+        otherAccounts,
+      ]) => {
+        /** One section's rows: the ciphers the scope admits, in display order. */
+        const section = (ciphers: PopupCipherViewLike[], name: VaultSection) =>
+          ciphers
+            .filter((cipher) => cipherInScope(cipher, scope))
+            .map((cipher) => this.toRow(cipher, name, context));
 
-      if (hasSearchText) {
-        return section(filteredCiphers, "allItems");
-      }
+        // The search covers the active account's vault alone.
+        if (hasSearchText) {
+          return section(filteredCiphers, "allItems");
+        }
 
-      return [
-        ...section(autoFillCiphers, "autofill"),
-        ...section(favoriteCiphers, "favorites"),
-        ...section(filteredCiphers, "allItems"),
-      ];
-    }),
+        return [
+          ...section(autoFillCiphers, "autofill"),
+          // The vault scope and the chips describe the active account's vault, so the
+          // suggestions of another account are not narrowed by them.
+          ...otherAccounts.flatMap((account) =>
+            account.ciphers.map((cipher) => ({
+              ...this.toRow(cipher, "accountAutofill", context),
+              userId: account.userId,
+            })),
+          ),
+          ...section(favoriteCiphers, "favorites"),
+          ...section(filteredCiphers, "allItems"),
+        ];
+      },
+    ),
     // The table renders these and the header counts them, so build the list once per emission.
     shareReplay({ bufferSize: 1, refCount: true }),
+  );
+
+  /**
+   * The further autofill accounts that have suggestions in {@link rows$}, in display order. The
+   * table renders one section per entry. Empty while no account has opted in.
+   */
+  readonly accountSections$: Observable<VaultAccountSection[]> = combineLatest([
+    this.rows$,
+    this.otherAccountCiphers$,
+  ]).pipe(
+    map(([rows, otherAccounts]) =>
+      otherAccounts
+        .filter((account) => rows.some((row) => row.userId === account.userId))
+        .map(({ userId, email }) => ({ userId, email })),
+    ),
+    distinctUntilChanged(
+      (a, b) =>
+        a.length === b.length &&
+        a.every((account, i) => account.userId === b[i].userId && account.email === b[i].email),
+    ),
   );
 
   /**
@@ -292,7 +360,7 @@ export class VaultPopupListTableService {
     section: VaultSection,
     { currentUriIsBlocked }: RowActionContext,
   ): VaultRowActions {
-    const isAutofill = section === "autofill";
+    const isAutofill = section === "autofill" || section === "accountAutofill";
     // The list swaps a revealed view in for its restricted row, so a restricted row has nothing
     // revealed: the server withholds its credentials.
     const gated = RestrictedCipherPolicy.isRestricted(cipher as CipherViewLike);
@@ -347,8 +415,9 @@ export class VaultPopupListTableService {
 
   /**
    * Launches the login cipher in a new browser tab.
+   * @param userId The account whose vault holds the cipher. Defaults to the active account.
    */
-  async launchCipher(cipher: CipherViewLike) {
+  async launchCipher(cipher: CipherViewLike, userId?: UserId) {
     const launchURI = CipherViewLikeUtils.getLaunchUri(cipher);
     if (
       !CipherViewLikeUtils.canLaunch(cipher) ||
@@ -364,8 +433,9 @@ export class VaultPopupListTableService {
       this.viewCipherTimeout = undefined;
     }
 
-    const activeUserId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
-    await this.cipherService.updateLastLaunchedDate(uuidAsString(cipher.id!), activeUserId);
+    const cipherUserId =
+      userId ?? (await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId)));
+    await this.cipherService.updateLastLaunchedDate(uuidAsString(cipher.id!), cipherUserId);
 
     await BrowserApi.createNewTab(launchURI);
 
@@ -374,7 +444,27 @@ export class VaultPopupListTableService {
     }
   }
 
-  async doAutofill(cipher: PopupCipherViewLike) {
+  /**
+   * @param userId The account whose vault holds the cipher. The fill then runs for that account,
+   * its master password reprompt included, and leaves the active account as it is. Defaults to
+   * the active account.
+   */
+  async doAutofill(cipher: PopupCipherViewLike, userId?: UserId) {
+    if (userId != null) {
+      const cipherView = CipherViewLikeUtils.isCipherListView(cipher)
+        ? await firstValueFrom(
+            this.cipherService.cipherView$(userId, uuidAsString(cipher.id!) as CipherId),
+          )
+        : cipher;
+
+      if (!cipherView) {
+        return;
+      }
+
+      await this.vaultPopupAutofillService.doAutofillForAccount({ userId, cipher: cipherView });
+      return;
+    }
+
     if (!CipherViewLikeUtils.isCipherListView(cipher)) {
       await this.vaultPopupAutofillService.doAutofill(cipher);
       return;
@@ -393,7 +483,11 @@ export class VaultPopupListTableService {
     await this.vaultPopupAutofillService.doAutofill(cipherView);
   }
 
-  async viewCipher(cipher: PopupCipherViewLike) {
+  /**
+   * @param userId The account whose vault holds the cipher. The reprompt and the view page are
+   * then that account's. Defaults to the active account.
+   */
+  async viewCipher(cipher: PopupCipherViewLike, userId?: UserId) {
     // We already have a view action in progress, don't start another
     if (this.viewCipherTimeout != null) {
       return;
@@ -410,12 +504,19 @@ export class VaultPopupListTableService {
             return;
           }
 
-          const repromptPassed = await this.passwordRepromptService.passwordRepromptCheck(cipher);
+          const repromptPassed =
+            userId == null
+              ? await this.passwordRepromptService.passwordRepromptCheck(cipher)
+              : await this.passwordRepromptService.passwordRepromptCheck(cipher, userId);
           if (!repromptPassed) {
             return;
           }
           await this.router.navigate(["/view-cipher"], {
-            queryParams: { cipherId: cipher.id, type: cipher.type },
+            queryParams: {
+              cipherId: cipher.id,
+              type: cipher.type,
+              ...itemAccountQueryParams(userId),
+            },
           });
         } finally {
           // Ensure the timeout is always cleared

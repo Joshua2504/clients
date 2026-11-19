@@ -451,12 +451,9 @@ export class ViewComponent {
         currentUrl: currentTab?.url || "",
         savedUris: this.cipher.login?.uris?.filter((u) => u.uri) ?? [],
         // Adding the URL saves the cipher outside the edit form, which a restricted cipher refuses.
-        // `doAutofillAndSave` saves the URL to the active account's vault, so the page of another
-        // account fills without offering to add it.
         viewOnly:
           !this.cipher.edit ||
-          RestrictedCipherPolicy.isRestricted(this.storedCipher ?? this.cipher) ||
-          this.itemAccount.explicitUserId() != null,
+          RestrictedCipherPolicy.isRestricted(this.storedCipher ?? this.cipher),
       },
     });
 
@@ -468,15 +465,23 @@ export class ViewComponent {
       case AutofillConfirmationDialogResult.AutofilledOnly:
         await this.fill(this.cipher, true, true);
         return;
-      case AutofillConfirmationDialogResult.AutofillAndUrlAdded:
-        await this.vaultPopupAutofillService.doAutofillAndSave(this.cipher, true, true);
+      case AutofillConfirmationDialogResult.AutofillAndUrlAdded: {
+        // The URL is added to the cipher in the vault of the page's account.
+        const userId = this.itemAccount.explicitUserId();
+        if (userId == null) {
+          await this.vaultPopupAutofillService.doAutofillAndSave(this.cipher, true, true);
+        } else {
+          await this.vaultPopupAutofillService.doAutofillAndSave(this.cipher, true, true, userId);
+        }
         return;
+      }
     }
   }
 
   /**
    * Fills the cipher from the vault of the page's account. A page that follows the active account
-   * fills as it always has.
+   * fills as it always has. A cipher that requires a master password reprompt asks for the master
+   * password of the page's account unless `skipPasswordReprompt` is set.
    */
   private fill(
     cipher: CipherView,
@@ -487,7 +492,11 @@ export class ViewComponent {
     if (userId == null) {
       return this.vaultPopupAutofillService.doAutofill(cipher, closePopup, skipPasswordReprompt);
     }
-    return this.vaultPopupAutofillService.doAutofillForAccount({ userId, cipher }, closePopup);
+    return this.vaultPopupAutofillService.doAutofillForAccount(
+      { userId, cipher },
+      closePopup,
+      skipPasswordReprompt,
+    );
   }
 
   private async _domainMatched(currentTab: chrome.tabs.Tab): Promise<boolean> {

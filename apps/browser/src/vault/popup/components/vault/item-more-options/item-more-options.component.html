@@ -19,13 +19,13 @@
         </button>
       }
       @for (action of contributedActions; track action.id) {
-        @if (!otherAccount() && (action.show?.(cipher) ?? true)) {
+        @if (action.show?.(cipher, userId) ?? true) {
           <button
             type="button"
             bitMenuItem
             [variant]="action.variant ?? 'primary'"
-            [disabled]="action.disabled?.(cipher) ?? false"
-            (click)="action.run(cipher)"
+            [disabled]="action.disabled?.(cipher, userId) ?? false"
+            (click)="action.run(cipher, userId)"
           >
             {{ action.label }}
           </button>
@@ -51,8 +51,12 @@
           </a>
         }
       }
-      @if (!isLocked && !otherAccount() && allows(RestrictedCipherAction.Share)) {
-        <a bitMenuItem *appShareLinkMenuItem="cipher; let share = share" (click)="share()">
+      @if (!isLocked && allows(RestrictedCipherAction.Share)) {
+        <a
+          bitMenuItem
+          *appShareLinkMenuItem="cipher; userId: userId; let share = share"
+          (click)="share()"
+        >
           {{ "shareViaLink" | i18n }}
         </a>
       }
@@ -60,7 +64,7 @@
         <button type="button" bitMenuItem (click)="archive()">
           {{ "archiveVerb" | i18n }}
         </button>
-      } @else if (!otherAccount()) {
+      } @else {
         <button
           type="button"
           bitMenuItem
@@ -70,7 +74,7 @@
           <div class="tw-flex tw-flex-nowrap tw-items-center tw-gap-2">
             {{ "archiveVerb" | i18n }}
             <div aria-hidden>
-              <app-premium-badge #badge></app-premium-badge>
+              <app-premium-badge #badge [userId]="userId"></app-premium-badge>
             </div>
           </div>
         </button>

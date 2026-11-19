@@ -1,5 +1,5 @@
 import { mock } from "jest-mock-extended";
-import { of, Subject } from "rxjs";
+import { BehaviorSubject, of, Subject } from "rxjs";
 
 import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
 import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
@@ -190,6 +190,170 @@ describe("BrowserFido2UserInterfaceSession", () => {
       const result = await session.confirmNewCredential({ ...params, userIds: [activeUserId] });
 
       expect(result).toEqual({ userId: undefined, cipherId: "cipher-a", userVerified: true });
+    });
+  });
+
+  describe("a request that names locked accounts", () => {
+    const cipherRefs = [{ userId: otherUserId, cipherId: "cipher-b" }];
+    const unlocked = (userId: UserId) =>
+      answer({ type: BrowserFido2MessageTypes.AccountUnlockedResponse, userId });
+
+    it("sends them with the credentials and answers retry when the user unlocked one", async () => {
+      unlocked(activeUserId);
+
+      const result = await session.pickCredential({
+        cipherIds: ["cipher-b"],
+        cipherRefs,
+        userVerification: false,
+        lockedUserIds: [activeUserId],
+      });
+
+      expect(sent()).toEqual([
+        {
+          type: BrowserFido2MessageTypes.PickCredentialRequest,
+          sessionId: session.sessionId,
+          cipherRefs,
+          userVerification: false,
+          fallbackSupported: false,
+          lockedUserIds: [activeUserId],
+        },
+      ]);
+      expect(result).toEqual({ cipherId: undefined, userVerified: false, retry: true });
+      expect(closeFido2Popout).not.toHaveBeenCalled();
+    });
+
+    it("still returns the credential the user picked instead", async () => {
+      answer({
+        type: BrowserFido2MessageTypes.PickCredentialResponse,
+        userId: otherUserId,
+        cipherId: "cipher-b",
+        userVerified: false,
+      });
+
+      const result = await session.pickCredential({
+        cipherIds: ["cipher-b"],
+        cipherRefs,
+        userVerification: false,
+        lockedUserIds: [activeUserId],
+      });
+
+      expect(result).toEqual({ userId: otherUserId, cipherId: "cipher-b", userVerified: false });
+    });
+
+    it("ignores an unlock of an account the request did not name", async () => {
+      unlocked(activeUserId);
+      setTimeout(() =>
+        messages$.next({
+          sessionId: session.sessionId,
+          type: BrowserFido2MessageTypes.PickCredentialResponse,
+          userId: otherUserId,
+          cipherId: "cipher-b",
+          userVerified: false,
+        }),
+      );
+
+      const result = await session.pickCredential({
+        cipherIds: ["cipher-b"],
+        cipherRefs,
+        userVerification: false,
+      });
+
+      expect(sent()[0]).not.toHaveProperty("lockedUserIds");
+      expect(result).toEqual({ userId: otherUserId, cipherId: "cipher-b", userVerified: false });
+    });
+
+    it("answers retry instead of concluding that no credential was found", async () => {
+      unlocked(activeUserId);
+
+      const result = await session.informCredentialNotFound(undefined, {
+        lockedUserIds: [activeUserId],
+      });
+
+      expect(sent()).toEqual([
+        {
+          type: BrowserFido2MessageTypes.InformCredentialNotFoundRequest,
+          sessionId: session.sessionId,
+          fallbackSupported: false,
+          lockedUserIds: [activeUserId],
+        },
+      ]);
+      expect(result).toEqual({ retry: true });
+      expect(closeFido2Popout).not.toHaveBeenCalled();
+    });
+
+    it("answers retry to a new credential when the user unlocked an account to save to", async () => {
+      unlocked(activeUserId);
+
+      const result = await session.confirmNewCredential({
+        credentialName: "Example",
+        userName: "jane",
+        userHandle: "handle",
+        userVerification: false,
+        rpId: "example.com",
+        userIds: [otherUserId],
+        lockedUserIds: [activeUserId],
+      });
+
+      expect(sent()[0]).toEqual(
+        expect.objectContaining({ userIds: [otherUserId], lockedUserIds: [activeUserId] }),
+      );
+      expect(result).toEqual({ userVerified: false, retry: true });
+    });
+
+    it("sends the next request to the same popout without opening another", async () => {
+      unlocked(activeUserId);
+      await session.informCredentialNotFound(undefined, { lockedUserIds: [activeUserId] });
+      answer({
+        type: BrowserFido2MessageTypes.PickCredentialResponse,
+        userId: activeUserId,
+        cipherId: "cipher-a",
+        userVerified: false,
+      });
+
+      const result = await session.pickCredential({
+        cipherIds: ["cipher-a"],
+        cipherRefs: [{ userId: activeUserId, cipherId: "cipher-a" }],
+        userVerification: false,
+      });
+
+      expect(result).toEqual({ userId: activeUserId, cipherId: "cipher-a", userVerified: false });
+      expect(openFido2Popout).not.toHaveBeenCalled();
+    });
+
+    it("waits until the unlocked account serves passkeys before it answers retry", async () => {
+      await session.close();
+      const servedUserIds$ = new BehaviorSubject<UserId[]>([otherUserId]);
+      session = await BrowserFido2UserInterfaceSession.create(
+        authService,
+        false,
+        tab,
+        undefined,
+        servedUserIds$,
+      );
+      messages$.next({
+        sessionId: session.sessionId,
+        type: BrowserFido2MessageTypes.ConnectResponse,
+      });
+      let answered = false;
+
+      const result = session
+        .informCredentialNotFound(undefined, { lockedUserIds: [activeUserId] })
+        .then((value) => {
+          answered = true;
+          return value;
+        });
+      await new Promise((resolve) => setTimeout(resolve));
+      messages$.next({
+        sessionId: session.sessionId,
+        type: BrowserFido2MessageTypes.AccountUnlockedResponse,
+        userId: activeUserId,
+      });
+      await new Promise((resolve) => setTimeout(resolve));
+      expect(answered).toBe(false);
+
+      servedUserIds$.next([activeUserId, otherUserId]);
+
+      expect(await result).toEqual({ retry: true });
     });
   });
 

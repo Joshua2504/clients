@@ -4,6 +4,7 @@ import { Overlay } from "@angular/cdk/overlay";
 import { inject, Injectable } from "@angular/core";
 import { firstValueFrom } from "rxjs";
 
+import { UserId } from "@bitwarden/common/types/guid";
 import { DialogService } from "@bitwarden/components";
 import { CipherFormGenerationService } from "@bitwarden/vault";
 
@@ -14,9 +15,13 @@ export class BrowserCipherFormGenerationService implements CipherFormGenerationS
   private dialogService = inject(DialogService);
   private overlay = inject(Overlay);
 
-  async generatePassword(): Promise<string> {
+  /**
+   * @param userId The account the cipher form writes to. The generator dialog then uses that
+   * account's options, policies and history. Defaults to the active account.
+   */
+  async generatePassword(userId?: UserId): Promise<string> {
     const dialogRef = VaultGeneratorDialogComponent.open(this.dialogService, this.overlay, {
-      data: { type: "password" },
+      data: { type: "password", ...(userId == null ? {} : { userId }) },
     });
 
     const result = await firstValueFrom(dialogRef.closed);
@@ -28,9 +33,10 @@ export class BrowserCipherFormGenerationService implements CipherFormGenerationS
     return result.generatedValue;
   }
 
-  async generateUsername(uri: string): Promise<string> {
+  /** @param userId See {@link generatePassword}. */
+  async generateUsername(uri: string, userId?: UserId): Promise<string> {
     const dialogRef = VaultGeneratorDialogComponent.open(this.dialogService, this.overlay, {
-      data: { type: "username", uri: uri },
+      data: { type: "username", uri: uri, ...(userId == null ? {} : { userId }) },
     });
 
     const result = await firstValueFrom(dialogRef.closed);

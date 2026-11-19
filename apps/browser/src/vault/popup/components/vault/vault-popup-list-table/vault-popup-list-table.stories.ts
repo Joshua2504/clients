@@ -477,6 +477,8 @@ const buildProviders = (args: StoryArgs) => {
       provide: VaultPopupItemsService,
       useValue: {
         autoFillCiphers$: autoFillCiphers$.asObservable(),
+        // No account has opted in to serve autofill while another one is active.
+        otherAccountAutoFillCiphers$: of([]),
         favoriteCiphers$: favoriteCiphers$.asObservable(),
         filteredCiphers$: filteredCiphers$.asObservable(),
         // The folder chip's options come from the unsearched list, not the rendered rows.

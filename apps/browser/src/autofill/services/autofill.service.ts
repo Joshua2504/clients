@@ -121,11 +121,6 @@ export default class AutofillService implements AutofillServiceInterface {
     private messageListener: MessageListener,
     private animationControlService: AnimationControlService,
     private autofillLifecycleService: AutofillLifecycleService,
-    /**
-     * Makes an account the active one. Given in the background only; without it a reprompt for
-     * a cipher of an account that is not active is refused.
-     */
-    private switchAccount?: (userId: UserId) => Promise<void>,
   ) {
     this.enableInlineMenuAnimation$ = this.animationControlService.enableInlineMenuAnimation$;
     this.enableNotificationAnimation$ = this.animationControlService.enableNotificationAnimation$;
@@ -670,12 +665,9 @@ export default class AutofillService implements AutofillServiceInterface {
   /**
    * Checks if the cipher requires password reprompt and opens the password reprompt popout if necessary.
    *
-   * The requirement is judged for the account that owns the cipher. The popout shows and verifies
-   * the vault of the active account, so a cipher of another account makes its account the active
-   * one first: the popout then verifies that account's master password and fills from its vault.
-   * When the account cannot become active (it stopped serving autofill, or the switch failed), the
-   * cipher is refused without a popout: verifying the active account's master password must not
-   * release another account's cipher.
+   * The requirement is judged for the account that owns the cipher, and the popout is opened for
+   * that account: it asks for that account's master password and performs the action from its
+   * vault. The active account stays what it is.
    *
    * @param cipher - The cipher to autofill
    * @param tab - The tab to autofill
@@ -690,10 +682,11 @@ export default class AutofillService implements AutofillServiceInterface {
   ): Promise<boolean> {
     const userHasMasterPassword = await this.userVerificationService.hasMasterPassword(userId);
     if (cipher.reprompt === CipherRepromptType.Password && userHasMasterPassword) {
-      if (!this.isDebouncingPasswordRepromptPopout() && (await this.activateAccount(userId))) {
+      if (!this.isDebouncingPasswordRepromptPopout()) {
         await this.openVaultItemPasswordRepromptPopout(tab, {
           cipherId: cipher.id,
           action: action ?? "autofill",
+          userId,
         });
       }
 
@@ -701,32 +694,6 @@ export default class AutofillService implements AutofillServiceInterface {
     }
 
     return false;
-  }
-
-  /**
-   * Makes `userId` the active account, so the reprompt popout shows and verifies its vault.
-   *
-   * @returns false when the account is not active and cannot become so; no popout may open.
-   */
-  private async activateAccount(userId: UserId): Promise<boolean> {
-    const activeAccount = await firstValueFrom(this.accountService.activeAccount$);
-    if (activeAccount?.id === userId) {
-      return true;
-    }
-    if (
-      this.switchAccount == null ||
-      !(await firstValueFrom(this.autofillAccountsService.isAutofillUser$(userId)))
-    ) {
-      return false;
-    }
-    try {
-      await this.switchAccount(userId);
-    } catch (error) {
-      this.logService.error(error);
-      return false;
-    }
-    const switchedAccount = await firstValueFrom(this.accountService.activeAccount$);
-    return switchedAccount?.id === userId;
   }
 
   /**

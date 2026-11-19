@@ -22,7 +22,7 @@ import { ConfigService } from "@bitwarden/common/platform/abstractions/config/co
 import { EnvironmentService } from "@bitwarden/common/platform/abstractions/environment.service";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
 import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
-import { CipherId, OrganizationId } from "@bitwarden/common/types/guid";
+import { CipherId, OrganizationId, UserId } from "@bitwarden/common/types/guid";
 import { CipherArchiveService } from "@bitwarden/common/vault/abstractions/cipher-archive.service";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
 import { RevealedCipherService } from "@bitwarden/common/vault/abstractions/revealed-cipher.service";
@@ -35,6 +35,7 @@ import { RestrictedItemTypesService } from "@bitwarden/common/vault/services/res
 import { SearchTextDebounceInterval } from "@bitwarden/common/vault/services/search.service";
 import { CipherViewLike } from "@bitwarden/common/vault/utils/cipher-view-like-utils";
 import {
+  BitTableV2Component,
   ChipFilterOption,
   CompactModeService,
   DialogService,
@@ -61,13 +62,18 @@ import {
 
 import { ImportUpgradeNavigationService } from "../../../../../tools/popup/settings/import/import-upgrade-navigation.service";
 import { VaultPopupAutofillService } from "../../../services/vault-popup-autofill.service";
-import { VaultPopupItemsService } from "../../../services/vault-popup-items.service";
+import {
+  AccountAutofillCiphers,
+  VaultPopupItemsService,
+} from "../../../services/vault-popup-items.service";
 import { VaultPopupListTableFiltersService } from "../../../services/vault-popup-list-table-filters.service";
 import { VaultPopupListTableService } from "../../../services/vault-popup-list-table.service";
 import { VaultPopupLoadingService } from "../../../services/vault-popup-loading.service";
 import { VaultPopupSectionService } from "../../../services/vault-popup-section.service";
 import { VaultPopupTourService } from "../../../services/vault-popup-tour.service";
 import { PopupCipherViewLike } from "../../../views/popup-cipher.view";
+import { ItemCopyActionsComponent } from "../item-copy-action/item-copy-actions.component";
+import { ItemMoreOptionsComponent } from "../item-more-options/item-more-options.component";
 import { VAULT_ROW_ICON, VaultRowIcon } from "../vault-row-slots/vault-row-icon.token";
 
 import { VaultPopupListTableComponent } from "./vault-popup-list-table.component";
@@ -107,6 +113,17 @@ class TestRowIconComponent {
   readonly cipher = input<CipherViewLike | null>(null);
 }
 
+/** A row icon that takes the account of the row, so it also renders for another account's rows. */
+@Component({
+  selector: "test-account-row-icon",
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `<span data-testid="row-icon">{{ cipher()?.id }}|{{ userId() ?? "active" }}</span>`,
+})
+class TestAccountRowIconComponent {
+  readonly cipher = input<CipherViewLike | null>(null);
+  readonly userId = input<UserId | undefined>(undefined);
+}
+
 describe("VaultPopupListTableComponent", () => {
   let fixture: ComponentFixture<VaultPopupListTableComponent>;
   let component: VaultPopupListTableComponent;
@@ -123,6 +140,8 @@ describe("VaultPopupListTableComponent", () => {
   const emptyVault$ = new BehaviorSubject<boolean>(false);
   const hasFilterApplied$ = new BehaviorSubject<boolean>(false);
   const autofillAllowed$ = new BehaviorSubject<boolean>(true);
+  /** The suggestions of the further autofill accounts. Empty while no account has opted in. */
+  const otherAccountAutoFillCiphers$ = new BehaviorSubject<AccountAutofillCiphers[]>([]);
   const liveAnnouncer = mock<LiveAnnouncer>();
 
   const configService = {
@@ -152,6 +171,7 @@ describe("VaultPopupListTableComponent", () => {
     showDeactivatedOrg$: showDeactivatedOrg$.asObservable(),
     emptyVault$: emptyVault$.asObservable(),
     hasFilterApplied$: hasFilterApplied$.asObservable(),
+    otherAccountAutoFillCiphers$: otherAccountAutoFillCiphers$.asObservable(),
     applyScopedFilter: jest.fn(),
   };
 
@@ -262,6 +282,7 @@ describe("VaultPopupListTableComponent", () => {
     showDeactivatedOrg$.next(false);
     hasFilterApplied$.next(false);
     autofillAllowed$.next(true);
+    otherAccountAutoFillCiphers$.next([]);
     compactModeEnabled$.next(false);
     cipherTypes$.next([]);
     organizations$.next([]);
@@ -326,7 +347,10 @@ describe("VaultPopupListTableComponent", () => {
         // more-options menu), mirroring the Storybook setup.
         {
           provide: EnvironmentService,
-          useValue: { environment$: of({ getIconsUrl: () => "https://icons.bitwarden.net" }) },
+          useValue: {
+            environment$: of({ getIconsUrl: () => "https://icons.bitwarden.net" }),
+            getEnvironment$: () => of({ getIconsUrl: () => "https://icons.bitwarden.net" }),
+          },
         },
         { provide: DomainSettingsService, useValue: { showFavicons$: of(true) } },
         { provide: VaultCopyButtonsService, useValue: { showQuickCopyActions$: of(false) } },
@@ -337,7 +361,10 @@ describe("VaultPopupListTableComponent", () => {
             getUser: () => ({ update: async () => {} }),
           },
         },
-        { provide: RestrictedItemTypesService, useValue: { restricted$: of([]) } },
+        {
+          provide: RestrictedItemTypesService,
+          useValue: { restricted$: of([]), restrictedFor$: () => of([]) },
+        },
         { provide: PlatformUtilsService, useValue: mock<PlatformUtilsService>() },
         { provide: ToastService, useValue: {} },
         { provide: OrganizationService, useValue: { hasOrganizations: () => of(false) } },
@@ -640,6 +667,244 @@ describe("VaultPopupListTableComponent", () => {
       await render();
 
       expect(icons().map((icon) => icon.textContent)).toEqual(["all-1"]);
+    });
+  });
+
+  describe("sections of the further autofill accounts", () => {
+    const otherUserId = "other-user-id" as UserId;
+    const thirdUserId = "third-user-id" as UserId;
+    const otherAccount = (overrides: Partial<AccountAutofillCiphers> = {}) => ({
+      userId: otherUserId,
+      email: "other@example.com",
+      ciphers: [makeCipher({ id: "other-1", name: "Other Login" })],
+      ...overrides,
+    });
+
+    const render = async () => {
+      fixture.nativeElement.style.height = "2000px";
+      fixture.detectChanges();
+      await fixture.whenStable();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      fixture.detectChanges();
+    };
+
+    const sectionHeaders = (): string[] =>
+      Array.from(fixture.nativeElement.querySelectorAll("[role=row] [role=columnheader]")).map(
+        (header) => ((header as HTMLElement).textContent ?? "").trim(),
+      );
+    /**
+     * What the table renders, in order: "#" for a section header, else the row's name. Read off
+     * the table's render list, since the virtualized viewport draws only its first rows in JSDOM.
+     */
+    const rendered = (): string[] =>
+      (
+        fixture.debugElement
+          .query(By.directive(BitTableV2Component))
+          .componentInstance["renderItems"]() as {
+          kind: string;
+          row?: { cipher: { name: string } };
+        }[]
+      ).map((item) => (item.kind === "row" ? item.row!.cipher.name : "#"));
+    const moreOptions = (): ItemMoreOptionsComponent[] =>
+      fixture.debugElement
+        .queryAll(By.directive(ItemMoreOptionsComponent))
+        .map((el) => el.componentInstance);
+    const copyActions = (): ItemCopyActionsComponent[] =>
+      fixture.debugElement
+        .queryAll(By.directive(ItemCopyActionsComponent))
+        .map((el) => el.componentInstance);
+
+    beforeEach(() => {
+      autoFillCiphers$.next([makeCipher({ id: "autofill-1", name: "Own Login" })]);
+      favoriteCiphers$.next([makeCipher({ id: "fav-1", name: "Favorite", favorite: true })]);
+      filteredCiphers$.next([makeCipher({ id: "all-1", name: "All" })]);
+    });
+
+    it("renders no account section while no account has opted in", async () => {
+      await render();
+
+      expect(component["accountSections"]()).toEqual([]);
+      expect(sectionHeaders().some((text) => text.includes("suggestionsForAccount"))).toBe(false);
+      expect(moreOptions().every((menu) => menu.userId === undefined)).toBe(true);
+      expect(copyActions().every((copy) => copy.userId() === undefined)).toBe(true);
+    });
+
+    it("renders a section per account between the suggestions and the favorites", async () => {
+      otherAccountAutoFillCiphers$.next([otherAccount()]);
+      await render();
+
+      expect(rendered()).toEqual([
+        "#",
+        "Own Login",
+        "#",
+        "Other Login",
+        "#",
+        "Favorite",
+        "#",
+        "All",
+      ]);
+      expect(sectionHeaders().some((text) => text.includes("suggestionsForAccount"))).toBe(true);
+      expect(component["accountSlots"].map((slot) => slot.email())).toEqual([
+        "other@example.com",
+        "",
+        "",
+        "",
+      ]);
+    });
+
+    it("keeps the account sections above the favorites when an account is added later", async () => {
+      await render();
+
+      otherAccountAutoFillCiphers$.next([otherAccount()]);
+      await render();
+      otherAccountAutoFillCiphers$.next([
+        otherAccount(),
+        otherAccount({
+          userId: thirdUserId,
+          email: "third@example.com",
+          ciphers: [makeCipher({ id: "third-1", name: "Third Login" })],
+        }),
+      ]);
+      await render();
+
+      expect(rendered()).toEqual([
+        "#",
+        "Own Login",
+        "#",
+        "Other Login",
+        "#",
+        "Third Login",
+        "#",
+        "Favorite",
+        "#",
+        "All",
+      ]);
+    });
+
+    it("removes the section when the account stops serving", async () => {
+      otherAccountAutoFillCiphers$.next([otherAccount()]);
+      await render();
+
+      otherAccountAutoFillCiphers$.next([]);
+      await render();
+
+      expect(sectionHeaders().some((text) => text.includes("suggestionsForAccount"))).toBe(false);
+      expect(rendered()).toEqual(["#", "Own Login", "#", "Favorite", "#", "All"]);
+    });
+
+    it("gives the row's account to the copy actions and the more-options menu", async () => {
+      otherAccountAutoFillCiphers$.next([otherAccount()]);
+      await render();
+
+      const menu = moreOptions().find((m) => m.cipher.id === "other-1");
+      const copy = copyActions().find((c) => c.cipher().id === "other-1");
+
+      expect(menu?.userId).toBe(otherUserId);
+      expect(copy?.userId()).toBe(otherUserId);
+      // The active account's rows keep following the active account.
+      expect(moreOptions().find((m) => m.cipher.id === "autofill-1")?.userId).toBeUndefined();
+      expect(
+        copyActions()
+          .find((c) => c.cipher().id === "autofill-1")
+          ?.userId(),
+      ).toBeUndefined();
+    });
+
+    it("shows one shared item suggested from two vaults as two rows", async () => {
+      otherAccountAutoFillCiphers$.next([
+        otherAccount({ ciphers: [makeCipher({ id: "autofill-1", name: "Own Login" })] }),
+      ]);
+      await render();
+
+      const rows = component["rows"]().filter((row) => row.cipher.id === "autofill-1");
+      expect(rows.map((row) => row.userId)).toEqual([undefined, otherUserId]);
+      expect(new Set(rows.map((row) => component["trackRow"](0, row))).size).toBe(2);
+    });
+
+    it("fills, views and launches a row for its account", () => {
+      const doAutofill = jest.spyOn(listTableSvc, "doAutofill").mockResolvedValue();
+      const viewCipher = jest.spyOn(listTableSvc, "viewCipher").mockResolvedValue();
+      const launchCipher = jest.spyOn(listTableSvc, "launchCipher").mockResolvedValue();
+      const cipher = makeCipher({ id: "other-1" });
+
+      void component.onCipherSelect({
+        cipher,
+        userId: otherUserId,
+        _section: "accountAutofill",
+        actions: { primaryAutofill: true },
+      } as any);
+      void component.onCipherSelect({
+        cipher,
+        userId: otherUserId,
+        _section: "accountAutofill",
+        actions: { primaryAutofill: false },
+      } as any);
+      void component.doAutofill(cipher, otherUserId);
+      void component.launchCipher(cipher as CipherViewLike, otherUserId);
+
+      expect(doAutofill).toHaveBeenNthCalledWith(1, cipher, otherUserId);
+      expect(viewCipher).toHaveBeenCalledWith(cipher, otherUserId);
+      expect(doAutofill).toHaveBeenNthCalledWith(2, cipher, otherUserId);
+      expect(launchCipher).toHaveBeenCalledWith(cipher, otherUserId);
+    });
+
+    it("does not narrow another account's suggestions by the chips", () => {
+      const row = {
+        cipher: makeCipher({ id: "other-1", type: CipherType.Card }),
+        userId: otherUserId,
+        _section: "accountAutofill",
+        actions: {},
+      } as any;
+
+      expect(
+        component["filterPredicate"](row, {
+          cipherType: CipherType.Login,
+          organization: ["org-1"],
+          folder: ["folder-1"],
+        }),
+      ).toBe(true);
+    });
+
+    it("drops the empty autofill tip when only another account suggests a login", async () => {
+      autoFillCiphers$.next([]);
+      await render();
+      expect(component["showEmptyAutofillTip"]()).toBe(true);
+
+      otherAccountAutoFillCiphers$.next([otherAccount()]);
+      await render();
+
+      expect(component["showEmptyAutofillTip"]()).toBe(false);
+    });
+
+    it("leaves a row icon that takes no account off another account's rows", async () => {
+      rowIcon = TestRowIconComponent;
+      TestBed.resetTestingModule();
+      await createFixture();
+      otherAccountAutoFillCiphers$.next([otherAccount()]);
+      await render();
+
+      const icons = Array.from(
+        fixture.nativeElement.querySelectorAll("[data-testid='row-icon']"),
+      ).map((icon) => (icon as HTMLElement).textContent);
+      // Of the rows drawn, the icon is on the active account's alone.
+      expect(icons).toEqual(["autofill-1"]);
+      expect(component["showRowIcon"]({ cipher: makeCipher(), userId: otherUserId } as any)).toBe(
+        false,
+      );
+    });
+
+    it("renders a row icon that takes the account with the row's account", async () => {
+      rowIcon = TestAccountRowIconComponent;
+      TestBed.resetTestingModule();
+      await createFixture();
+      otherAccountAutoFillCiphers$.next([otherAccount()]);
+      await render();
+
+      const icons = Array.from(
+        fixture.nativeElement.querySelectorAll("[data-testid='row-icon']"),
+      ).map((icon) => (icon as HTMLElement).textContent);
+      expect(icons.slice(0, 2)).toEqual(["autofill-1|active", `other-1|${otherUserId}`]);
     });
   });
 

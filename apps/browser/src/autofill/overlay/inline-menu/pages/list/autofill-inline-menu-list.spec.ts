@@ -869,7 +869,7 @@ describe("AutofillInlineMenuList", () => {
             createInitAutofillInlineMenuListMessageMock({
               ciphers: [
                 createAutofillOverlayCipherDataMock(1, { accountLabel }),
-                createAutofillOverlayCipherDataMock(2, { accountLabel, canView: false }),
+                createAutofillOverlayCipherDataMock(2, { accountLabel }),
               ],
             }),
           );
@@ -883,12 +883,14 @@ describe("AutofillInlineMenuList", () => {
           expect(fillCipherButton.getAttribute("aria-label")).toContain(accountLabel);
         });
 
-        it("offers no view button for a cipher of an account other than the active one", () => {
+        it("offers the view button for the ciphers of every account", () => {
           const cipherContainers =
             autofillInlineMenuList["inlineMenuListContainer"].querySelectorAll(".cipher-container");
 
-          expect(cipherContainers[0].querySelector(".view-cipher-button")).not.toBeNull();
-          expect(cipherContainers[1].querySelector(".view-cipher-button")).toBeNull();
+          expect(cipherContainers).toHaveLength(2);
+          cipherContainers.forEach((cipherContainer) =>
+            expect(cipherContainer.querySelector(".view-cipher-button")).not.toBeNull(),
+          );
         });
       });
 

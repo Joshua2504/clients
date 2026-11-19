@@ -45,6 +45,7 @@ import { PopupRouterCacheService } from "../../../../../platform/popup/view-cach
 import { PopupCloseWarningService } from "../../../../../popup/services/popup-close-warning.service";
 import { VaultPopupAfterDeletionNavigationService } from "../../../services/vault-popup-after-deletion-navigation.service";
 import { VaultPopupAutofillService } from "../../../services/vault-popup-autofill.service";
+import { closeAddEditVaultItemPopout } from "../../../utils/vault-popout-window";
 
 import { AddEditComponent } from "./add-edit.component";
 
@@ -52,6 +53,10 @@ import { AddEditComponent } from "./add-edit.component";
 // Mock the entire module here to prevent jest from throwing an error. I wasn't able to find a way to mock the
 // `BrowserTotpCaptureService` where jest would not load the file in the first place.
 jest.mock("qrcode-parser", () => {});
+jest.mock("../../../utils/vault-popout-window", () => ({
+  ...jest.requireActual("../../../utils/vault-popout-window"),
+  closeAddEditVaultItemPopout: jest.fn().mockResolvedValue(undefined),
+}));
 
 describe("AddEditComponent", () => {
   let component: AddEditComponent;
@@ -801,7 +806,8 @@ describe("AddEditComponent", () => {
 
     it("fills the saved item from that account's vault", fakeAsync(() => {
       jest.spyOn(BrowserPopupUtils, "inSingleActionPopout").mockReturnValue(true);
-      jest.spyOn(BrowserPopupUtils, "closeSingleActionPopout").mockResolvedValue();
+      jest.spyOn(BrowserPopupUtils, "closeSingleActionPopout").mockResolvedValue().mockClear();
+      (closeAddEditVaultItemPopout as jest.Mock).mockClear();
       const sendMessageSpy = jest.spyOn(BrowserApi, "sendMessage").mockResolvedValue(undefined);
       const doAutofillForAccount = jest.fn().mockResolvedValue(true);
       (vaultPopupAutofillService as any).doAutofillForAccount = doAutofillForAccount;
@@ -813,11 +819,44 @@ describe("AddEditComponent", () => {
       void component.onCipherSaved(cipher);
       tick();
 
-      expect(doAutofillForAccount).toHaveBeenCalledWith({ userId: otherUserId, cipher }, false);
+      // The form was just saved by the user, so the fill does not ask for the master password.
+      expect(doAutofillForAccount).toHaveBeenCalledWith(
+        { userId: otherUserId, cipher },
+        false,
+        true,
+      );
       expect(vaultPopupAutofillService.doAutofill).not.toHaveBeenCalled();
       expect(sendMessageSpy).toHaveBeenCalledWith(
         "showLoginSavedNotification",
         expect.objectContaining({ userId: otherUserId, cipherId: "123-456-789" }),
+      );
+      // Only the add/edit popouts of that account close: another account's stays open.
+      expect(closeAddEditVaultItemPopout).toHaveBeenCalledWith(undefined, otherUserId);
+      expect(BrowserPopupUtils.closeSingleActionPopout).not.toHaveBeenCalled();
+      jest.restoreAllMocks();
+    }));
+
+    it("answers a passkey request with that account, so the passkey is saved to the new login there", fakeAsync(() => {
+      const confirmNewCredentialResponse = jest
+        .spyOn(BrowserFido2UserInterfaceSession, "confirmNewCredentialResponse")
+        .mockImplementation(() => undefined);
+      open();
+      // @ts-expect-error - `inFido2PopoutWindow` is a private getter, mocked as in `onCipherSaved`
+      jest.spyOn(component, "inFido2PopoutWindow", "get").mockReturnValue(true);
+      (component as any).fido2PopoutSessionData = {
+        sessionId: "fido2-session",
+        userVerification: true,
+      };
+
+      void component.onCipherSaved({ id: "123-456-789" } as CipherView);
+      tick();
+
+      expect(confirmNewCredentialResponse).toHaveBeenCalledTimes(1);
+      expect(confirmNewCredentialResponse).toHaveBeenCalledWith(
+        "fido2-session",
+        "123-456-789",
+        true,
+        otherUserId,
       );
       jest.restoreAllMocks();
     }));

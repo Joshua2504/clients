@@ -127,7 +127,12 @@ export class OpenAttachmentsComponent implements OnInit, OnChanges {
   /** Routes the user to the attachments screen, if available */
   async openAttachments() {
     if (!this.canAccessAttachments) {
-      await this.premiumUpgradeService.promptForPremium();
+      // The prompt is for the account whose vault holds the cipher.
+      if (this.userId != null) {
+        await this.premiumUpgradeService.promptForPremium(undefined, this.userId);
+      } else {
+        await this.premiumUpgradeService.promptForPremium();
+      }
       return;
     }
 

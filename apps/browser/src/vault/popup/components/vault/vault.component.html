@@ -34,6 +34,11 @@
 
   <!-- When vfo1 is enabled, the table (mounted below regardless of vaultState) owns this case
        itself via EmptyVaultComponent — this hand-rolled block is legacy-path only. -->
+  @if (!vfo1Enabled() && vaultState === VaultStateEnum.Empty && otherAccountsHaveSuggestions()) {
+    <!-- The active account has nothing to suggest, the further autofill accounts do. -->
+    <app-autofill-vault-list-items otherAccountsOnly></app-autofill-vault-list-items>
+  }
+
   @if (!vfo1Enabled() && vaultState === VaultStateEnum.Empty) {
     <vault-fade-in-out>
       <div class="tw-flex tw-flex-col tw-h-full tw-justify-center">

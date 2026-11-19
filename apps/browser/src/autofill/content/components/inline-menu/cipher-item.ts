@@ -138,7 +138,6 @@ export function InlineMenuCipherItem({
           class=${viewCipherButtonStyles(theme)}
           @click=${onViewCipher}
           @keyup=${onViewKeyUp}
-          ?hidden=${cipher.canView === false}
         >
           ${ExternalLink({ theme, color: themes[theme].primary["600"] })}
         </button>
@@ -237,15 +236,8 @@ function getAdjacentCipherItem(
 }
 
 function focusViewCipherButton(currentListItem: HTMLElement, currentButtonElement: HTMLElement) {
-  // The vault item view shows the active account only, so a cipher of another account has its
-  // view button hidden.
-  const viewCipherButton = currentButtonElement.nextElementSibling as HTMLElement | null;
-  if (!viewCipherButton || viewCipherButton.hidden) {
-    return;
-  }
-
   currentListItem.querySelector(CIPHER_CONTENT_SELECTOR)?.classList.add("remove-outline");
-  viewCipherButton.focus();
+  (currentButtonElement.nextElementSibling as HTMLElement | null)?.focus();
 }
 
 function getFillAriaDescription(
@@ -334,10 +326,6 @@ const viewCipherButtonStyles = (theme: Theme) => css`
   background: transparent;
   cursor: pointer;
   line-height: 0;
-
-  &[hidden] {
-    display: none;
-  }
 
   :focus {
     outline: 2px solid ${themes[theme].primary["600"]};

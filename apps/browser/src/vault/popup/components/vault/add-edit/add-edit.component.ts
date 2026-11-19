@@ -64,7 +64,7 @@ import {
   fido2PopoutSessionData$,
   Fido2SessionData,
 } from "../../../utils/fido2-popout-session-data";
-import { VaultPopoutType } from "../../../utils/vault-popout-window";
+import { closeAddEditVaultItemPopout, VaultPopoutType } from "../../../utils/vault-popout-window";
 import { ItemAccountHintComponent } from "../../item-account-hint/item-account-hint.component";
 import { OpenAttachmentsComponent } from "../attachments/open-attachments/open-attachments.component";
 
@@ -352,12 +352,27 @@ export class AddEditComponent implements OnInit, OnDestroy {
     }
 
     if (this.inSingleActionPopout) {
-      await BrowserPopupUtils.closeSingleActionPopout(VaultPopoutType.addEditVaultItem);
+      await this.closeSingleActionPopout();
       return;
     }
 
     await this.popupRouterCacheService.back();
   };
+
+  /**
+   * Closes the add/edit popout this page is in. A popout that was opened for an account closes
+   * the popouts of that account alone, so the add/edit popout of another account stays open.
+   */
+  private closeSingleActionPopout(delayClose?: number): Promise<void> {
+    const userId = this.itemAccount.explicitUserId();
+    if (userId != null) {
+      return closeAddEditVaultItemPopout(delayClose, userId);
+    }
+
+    return delayClose == null
+      ? BrowserPopupUtils.closeSingleActionPopout(VaultPopoutType.addEditVaultItem)
+      : BrowserPopupUtils.closeSingleActionPopout(VaultPopoutType.addEditVaultItem, delayClose);
+  }
 
   async onCipherSaved(cipher: CipherView) {
     if (BrowserPopupUtils.inPopout(window)) {
@@ -365,10 +380,12 @@ export class AddEditComponent implements OnInit, OnDestroy {
     }
 
     if (this.inFido2PopoutWindow) {
+      // The passkey is saved to the login just created, in the vault of the form's account
       BrowserFido2UserInterfaceSession.confirmNewCredentialResponse(
         this.fido2PopoutSessionData.sessionId,
         cipher.id,
         this.fido2PopoutSessionData.userVerification,
+        this.itemAccount.explicitUserId(),
       );
       return;
     }
@@ -378,13 +395,13 @@ export class AddEditComponent implements OnInit, OnDestroy {
         const userId = this.itemAccount.explicitUserId();
         await (userId == null
           ? this.vaultPopupAutofillService.doAutofill(cipher, false, true)
-          : this.vaultPopupAutofillService.doAutofillForAccount({ userId, cipher }, false));
+          : this.vaultPopupAutofillService.doAutofillForAccount({ userId, cipher }, false, true));
       }
       if (this.saveAndFillEnabled) {
         await this.showLoginSavedNotification(cipher);
-        await BrowserPopupUtils.closeSingleActionPopout(VaultPopoutType.addEditVaultItem);
+        await this.closeSingleActionPopout();
       } else {
-        await BrowserPopupUtils.closeSingleActionPopout(VaultPopoutType.addEditVaultItem, 1000);
+        await this.closeSingleActionPopout(1000);
       }
       return;
     }

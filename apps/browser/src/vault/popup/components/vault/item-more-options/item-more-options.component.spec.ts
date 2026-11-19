@@ -1,5 +1,5 @@
 import { OverlayContainer } from "@angular/cdk/overlay";
-import { CUSTOM_ELEMENTS_SCHEMA } from "@angular/core";
+import { ChangeDetectionStrategy, Component, CUSTOM_ELEMENTS_SCHEMA, input } from "@angular/core";
 import { ComponentFixture, TestBed, waitForAsync } from "@angular/core/testing";
 import { NoopAnimationsModule } from "@angular/platform-browser/animations";
 import { Router } from "@angular/router";
@@ -7,6 +7,7 @@ import { mock } from "jest-mock-extended";
 import { BehaviorSubject, of } from "rxjs";
 
 import { CollectionService } from "@bitwarden/admin-console/common";
+import { PremiumBadgeComponent } from "@bitwarden/angular/billing/components/premium-badge";
 import { OrganizationService } from "@bitwarden/common/admin-console/abstractions/organization/organization.service.abstraction";
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { DomainSettingsService } from "@bitwarden/common/autofill/services/domain-settings.service";
@@ -30,7 +31,11 @@ import {
 } from "@bitwarden/common/vault/utils/cipher-view-like-utils";
 import { RestrictedCipherAction } from "@bitwarden/common/vault/utils/restricted-cipher-policy";
 import { DialogService, ToastService } from "@bitwarden/components";
-import { ShareLinkService } from "@bitwarden/tools-share";
+import {
+  SHARE_ITEM_PRESENTER,
+  SHARE_PASSWORD_REPROMPT,
+  ShareLinkService,
+} from "@bitwarden/tools-share";
 import {
   PasswordRepromptService,
   VAULT_ROW_ACTIONS,
@@ -45,6 +50,17 @@ import {
 } from "../autofill-confirmation-dialog/autofill-confirmation-dialog.component";
 
 import { ItemMoreOptionsComponent } from "./item-more-options.component";
+
+/** Stands in for the premium badge and records the account the menu names to it. */
+@Component({
+  selector: "app-premium-badge",
+  template: `<span data-testid="premium-badge-account">{{ userId() }}</span>`,
+  changeDetection: ChangeDetectionStrategy.OnPush,
+})
+class PremiumBadgeStubComponent {
+  readonly userId = input<UserId | undefined>(undefined);
+  readonly promptForPremium = jest.fn();
+}
 
 describe("ItemMoreOptionsComponent", () => {
   let fixture: ComponentFixture<ItemMoreOptionsComponent>;
@@ -84,6 +100,13 @@ describe("ItemMoreOptionsComponent", () => {
   let revealed$: BehaviorSubject<ReadonlyMap<CipherId, CipherView>>;
   /** Contributed menu actions (`VAULT_ROW_ACTIONS`), read when the component is created. */
   let rowActions: VaultItemsTableRowAction<CipherViewLike>[];
+  /** Whether the item can be shared by link, as the share service answers for the asked account. */
+  let canBeShared: boolean;
+  const cipherCanBeShared$ = jest.fn();
+  const sharePresenter = { present: jest.fn() };
+  /** Whether the item's account may archive. Without it the menu offers the upgrade instead. */
+  let userCanArchive: boolean;
+  const userCanArchive$ = jest.fn();
 
   const baseCipher = {
     id: "cipher-1",
@@ -106,6 +129,8 @@ describe("ItemMoreOptionsComponent", () => {
   beforeEach(waitForAsync(async () => {
     jest.clearAllMocks();
     rowActions = [];
+    canBeShared = false;
+    userCanArchive = true;
     await setup();
   }));
 
@@ -132,10 +157,15 @@ describe("ItemMoreOptionsComponent", () => {
           useValue: { canDeleteCipher$: () => of(true), canCloneCipher$: () => of(true) },
         },
         { provide: CollectionService, useValue: { decryptedCollections$: () => of([]) } },
-        { provide: RestrictedItemTypesService, useValue: { restricted$: of([]) } },
+        {
+          provide: RestrictedItemTypesService,
+          useValue: { restricted$: of([]), restrictedFor$: () => of([]) },
+        },
         {
           provide: CipherArchiveService,
-          useValue: { userCanArchive$: () => of(true) },
+          useValue: {
+            userCanArchive$: userCanArchive$.mockImplementation(() => of(userCanArchive)),
+          },
         },
         { provide: ToastService, useValue: { showToast: () => {} } },
         { provide: Router, useValue: { navigate: () => Promise.resolve(true) } },
@@ -154,12 +184,20 @@ describe("ItemMoreOptionsComponent", () => {
         },
         {
           provide: ShareLinkService,
-          useValue: { cipherCanBeShared$: () => of(false) },
+          useValue: {
+            cipherCanBeShared$: cipherCanBeShared$.mockImplementation(() => of(canBeShared)),
+          },
         },
+        { provide: SHARE_ITEM_PRESENTER, useValue: sharePresenter },
+        { provide: SHARE_PASSWORD_REPROMPT, useValue: passwordRepromptService },
       ],
       schemas: [CUSTOM_ELEMENTS_SCHEMA],
     });
     TestBed.overrideProvider(DialogService, { useValue: dialogService });
+    TestBed.overrideComponent(ItemMoreOptionsComponent, {
+      remove: { imports: [PremiumBadgeComponent] },
+      add: { imports: [PremiumBadgeStubComponent] },
+    });
     await TestBed.compileComponents();
     fixture = TestBed.createComponent(ItemMoreOptionsComponent);
     component = fixture.componentInstance;
@@ -651,7 +689,8 @@ describe("ItemMoreOptionsComponent", () => {
       await provideActions([action("hidden", { show })]);
 
       expect(menuItem("hidden")).toBeUndefined();
-      expect(show).toHaveBeenCalledWith(baseCipher);
+      // No account is named for a row of the active account.
+      expect(show).toHaveBeenCalledWith(baseCipher, undefined);
     });
 
     it("disables an action whose disabled returns true for the row", async () => {
@@ -670,7 +709,7 @@ describe("ItemMoreOptionsComponent", () => {
 
       menuItem("run")!.click();
 
-      expect(run).toHaveBeenCalledWith(baseCipher);
+      expect(run).toHaveBeenCalledWith(baseCipher, undefined);
     });
 
     it("shows contributed actions on a restricted row", async () => {
@@ -776,7 +815,7 @@ describe("ItemMoreOptionsComponent", () => {
       expect(archiveWithServer).toHaveBeenCalledWith("cipher-1", otherUserId);
     });
 
-    it("fills from that account's vault and does not offer to save the URL", async () => {
+    it("asks for that account's master password, then fills from its vault", async () => {
       autofillSvc.currentAutofillTab$.next({ url: "https://page.example.com" });
       const openSpy = mockConfirmDialogResult(AutofillConfirmationDialogResult.AutofilledOnly);
       jest.spyOn(CipherViewLikeUtils, "matchesUri").mockReturnValue(false);
@@ -787,29 +826,165 @@ describe("ItemMoreOptionsComponent", () => {
       expect(
         (domainSettingsService as any).resolvedDefaultUriMatchStrategyFor$,
       ).toHaveBeenCalledWith(otherUserId);
-      // `doAutofillForAccount` asks for the re-prompt of that account itself.
-      expect(passwordRepromptService.passwordRepromptCheck).not.toHaveBeenCalled();
+      expect(passwordRepromptService.passwordRepromptCheck).toHaveBeenCalledWith(
+        baseCipher,
+        otherUserId,
+      );
       expect(domainSettingsService.getUrlEquivalentDomains).toHaveBeenCalledWith(
         "https://page.example.com",
         otherUserId,
       );
-      expect(openSpy.mock.calls[0][1].data.viewOnly).toBe(true);
+      // Adding the URL is offered: it is saved to the cipher's own vault.
+      expect(openSpy.mock.calls[0][1].data.viewOnly).toBe(false);
+      // The re-prompt was answered above, so the fill does not ask again.
       expect((autofillSvc as any).doAutofillForAccount).toHaveBeenCalledWith(
         { userId: otherUserId, cipher: expect.objectContaining({ id: "cipher-1" }) },
+        true,
         true,
       );
       expect(autofillSvc.doAutofill).not.toHaveBeenCalled();
       expect(autofillSvc.doAutofillAndSave).not.toHaveBeenCalled();
     });
 
-    it("does not offer actions that can only act on the active account", async () => {
-      expect(component["otherAccount"]()).toBe(true);
+    it("does not fill when that account's master password is not given", async () => {
+      autofillSvc.currentAutofillTab$.next({ url: "https://page.example.com" });
+      passwordRepromptService.passwordRepromptCheck.mockResolvedValue(false);
 
-      component.userId = "UserId" as UserId;
-      expect(component["otherAccount"]()).toBe(false);
+      await component.doAutofill();
 
-      component.userId = undefined;
-      expect(component["otherAccount"]()).toBe(false);
+      expect(passwordRepromptService.passwordRepromptCheck).toHaveBeenCalledWith(
+        baseCipher,
+        otherUserId,
+      );
+      expect((autofillSvc as any).doAutofillForAccount).not.toHaveBeenCalled();
+      expect(autofillSvc.doAutofill).not.toHaveBeenCalled();
+      expect(autofillSvc.doAutofillAndSave).not.toHaveBeenCalled();
+    });
+
+    it("fills and adds the URL to the cipher in that account's vault", async () => {
+      autofillSvc.currentAutofillTab$.next({ url: "https://page.example.com" });
+      mockConfirmDialogResult(AutofillConfirmationDialogResult.AutofillAndUrlAdded);
+      jest.spyOn(CipherViewLikeUtils, "matchesUri").mockReturnValue(false);
+
+      await component.doAutofill();
+
+      expect(autofillSvc.doAutofillAndSave).toHaveBeenCalledTimes(1);
+      expect(autofillSvc.doAutofillAndSave).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "cipher-1" }),
+        false,
+        true,
+        otherUserId,
+      );
+      expect(autofillSvc.doAutofill).not.toHaveBeenCalled();
+    });
+
+    it("autofills and saves for that account", async () => {
+      await component.doAutofillAndSave();
+
+      expect(cipherService.getFullCipherView).toHaveBeenCalledWith(baseCipher, otherUserId);
+      expect(autofillSvc.doAutofillAndSave).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "cipher-1" }),
+        true,
+        false,
+        otherUserId,
+      );
+    });
+
+    describe("the menu", () => {
+      let overlayContainer: OverlayContainer;
+
+      /** Rebuilds the menu for the other account with the given contributed actions. */
+      async function rebuild(actions: VaultItemsTableRowAction<CipherViewLike>[] = []) {
+        TestBed.resetTestingModule();
+        rowActions = actions;
+        await setup();
+        component.userId = otherUserId;
+        overlayContainer = TestBed.inject(OverlayContainer);
+      }
+
+      function menuItems(): HTMLElement[] {
+        fixture.detectChanges();
+        fixture.nativeElement.querySelector('button[biticonbutton="bwi-ellipsis-v"]')!.click();
+        fixture.detectChanges();
+        return Array.from(
+          overlayContainer.getContainerElement().querySelectorAll<HTMLElement>("[bitmenuitem]"),
+        );
+      }
+
+      const menuItem = (label: string) =>
+        menuItems().find((item) => item.textContent?.trim().startsWith(label));
+
+      afterEach(() => {
+        overlayContainer?.ngOnDestroy();
+      });
+
+      it("offers every action of a row of the active account", async () => {
+        await rebuild();
+        fixture.componentRef.setInput("showViewOption", true);
+
+        const labels = menuItems().map((item) => item.textContent?.trim());
+
+        expect(labels).toEqual(["view", "favorite", "edit", "clone", "archiveVerb", "delete"]);
+      });
+
+      it("offers contributed actions and gives them the row's account", async () => {
+        const show = jest.fn().mockReturnValue(true);
+        const disabled = jest.fn().mockReturnValue(false);
+        const run = jest.fn();
+        await rebuild([
+          { id: "contributed", label: "contributed", icon: "bwi-lock", show, run, disabled },
+        ]);
+
+        menuItem("contributed")!.click();
+
+        expect(show).toHaveBeenCalledWith(baseCipher, otherUserId);
+        expect(disabled).toHaveBeenCalledWith(baseCipher, otherUserId);
+        expect(run).toHaveBeenCalledWith(baseCipher, otherUserId);
+      });
+
+      it("offers share via link when that account can share the item", async () => {
+        canBeShared = true;
+        await rebuild();
+
+        const share = menuItem("shareViaLink");
+        expect(share).toBeDefined();
+        // Asked for the item's account, never for the active account in its place.
+        expect(cipherCanBeShared$).toHaveBeenCalledWith(baseCipher, otherUserId);
+        expect(cipherCanBeShared$).not.toHaveBeenCalledWith(baseCipher);
+
+        share!.click();
+        await fixture.whenStable();
+
+        expect(passwordRepromptService.passwordRepromptCheck).toHaveBeenCalledWith(
+          baseCipher,
+          otherUserId,
+        );
+        expect(sharePresenter.present).toHaveBeenCalledWith(baseCipher, otherUserId);
+      });
+
+      it("offers the archive upgrade and names the account that needs premium", async () => {
+        userCanArchive = false;
+        await rebuild();
+
+        expect(menuItem("archiveVerb")).toBeDefined();
+        expect(userCanArchive$).toHaveBeenCalledWith(otherUserId);
+        const badge = overlayContainer
+          .getContainerElement()
+          .querySelector("[data-testid='premium-badge-account']");
+        expect(badge?.textContent).toBe(otherUserId);
+      });
+
+      it("names no account to the archive upgrade of the active account's row", async () => {
+        userCanArchive = false;
+        await rebuild();
+        component.userId = undefined;
+
+        expect(menuItem("archiveVerb")).toBeDefined();
+        const badge = overlayContainer
+          .getContainerElement()
+          .querySelector("[data-testid='premium-badge-account']");
+        expect(badge?.textContent).toBe("");
+      });
     });
   });
 });

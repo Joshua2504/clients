@@ -375,6 +375,7 @@ import {
   BrowserFido2ParentWindowReference,
   BrowserFido2UserInterfaceService,
 } from "../autofill/fido2/services/browser-fido2-user-interface.service";
+import { lockedPasskeyUserIds$ } from "../autofill/fido2/utils/locked-passkey-accounts";
 import { AutofillLifecycleService } from "../autofill/services/abstractions/autofill-lifecycle.service";
 import { AutofillService as AutofillServiceAbstraction } from "../autofill/services/abstractions/autofill.service";
 import { FillCipherPolicy } from "../autofill/services/abstractions/fill-cipher-policy";
@@ -1417,7 +1418,6 @@ export default class MainBackground {
       this.messageListener,
       this.animationControlService,
       this.autofillLifecycleService,
-      (userId) => this.switchAccount(userId),
     );
     this.autofillOrchestrator = new DefaultAutofillOrchestrator(
       this.autofillLifecycleService,
@@ -1578,6 +1578,7 @@ export default class MainBackground {
       this.accountService,
       this.logService,
       this.autofillAccountsService.autofillUserIds$,
+      lockedPasskeyUserIds$(this.accountService, this.authService, this.autofillAccountsService),
     );
     this.fido2ActiveRequestManager = new Fido2ActiveRequestManager();
     this.fido2ClientService = new Fido2ClientService(
@@ -1745,7 +1746,6 @@ export default class MainBackground {
       this.messageListener,
       this.multiAccountFillCipherPolicy,
       this.autofillAccountsService,
-      (userId) => this.switchAccount(userId),
     );
 
     this.overlayNotificationsBackground = new OverlayNotificationsBackground(
@@ -1797,7 +1797,6 @@ export default class MainBackground {
       new WebmapperDraftService(this.stateProvider),
       this.#intraprocessMessageSender,
       this.multiAccountFillCipherPolicy,
-      (userId) => this.switchAccount(userId),
     );
 
     this.contextMenusBackground = new ContextMenusBackground(
@@ -2263,15 +2262,24 @@ export default class MainBackground {
     }
   }
 
-  /** Opens the `/at-risk-passwords` page within the popup */
-  async openAtRisksPasswordsPage() {
+  /**
+   * Opens the `/at-risk-passwords` page within the popup.
+   *
+   * @param userId - The account whose at-risk passwords the page shows, without making it the
+   * active account. Without it, the active account.
+   */
+  async openAtRisksPasswordsPage(userId?: string) {
     const browserAction = BrowserApi.getBrowserAction();
 
     try {
       // Set route of the popup before attempting to open it.
       // If the vault is locked, this won't have an effect as the auth guards will
       // redirect the user to the login page.
-      await browserAction.setPopup({ popup: ExtensionPageUrls.AtRiskPasswords });
+      await browserAction.setPopup({
+        popup: userId
+          ? `${ExtensionPageUrls.AtRiskPasswords}?userId=${encodeURIComponent(userId)}`
+          : ExtensionPageUrls.AtRiskPasswords,
+      });
 
       await this.openPopup();
     } finally {
@@ -2505,7 +2513,6 @@ export default class MainBackground {
       this.multiAccountFillCipherPolicy,
       this.autofillAccountsService,
       this.billingAccountProfileStateService,
-      (userId) => this.switchAccount(userId),
     );
 
     this.autofillBadgeUpdaterService = new AutofillBadgeUpdaterService(

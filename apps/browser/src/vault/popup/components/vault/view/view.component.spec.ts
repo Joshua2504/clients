@@ -47,7 +47,7 @@ import { CipherAuthorizationService } from "@bitwarden/common/vault/services/cip
 import { TaskService } from "@bitwarden/common/vault/tasks";
 import { RestrictedCipherAction } from "@bitwarden/common/vault/utils/restricted-cipher-policy";
 import { DialogService, ToastService } from "@bitwarden/components";
-import { ShareLinkService } from "@bitwarden/tools-share";
+import { ShareButtonComponent, ShareLinkService } from "@bitwarden/tools-share";
 import {
   ArchiveCipherUtilitiesService,
   CipherViewComponent,
@@ -90,6 +90,8 @@ describe("ViewComponent", () => {
   const showPasswordPrompt = jest.fn().mockResolvedValue(true);
   const currentAutofillTab$ = of({ url: "https://example.com", id: 1 });
   const doAutofillForAccount = jest.fn().mockResolvedValue(true);
+  /** Whether the item can be shared by link, as the share service answers for the asked account. */
+  const cipherCanBeShared$ = jest.fn().mockReturnValue(of(false));
   const disableCloseWarning = jest.fn();
   /** Whether each account currently serves autofill, as `AutofillAccountsService` reports it. */
   const autofillUsers = new Map<UserId, BehaviorSubject<boolean>>();
@@ -159,6 +161,8 @@ describe("ViewComponent", () => {
     collect.mockClear();
     doAutofill.mockClear();
     doAutofillForAccount.mockClear();
+    cipherCanBeShared$.mockClear();
+    cipherCanBeShared$.mockReturnValue(of(false));
     disableCloseWarning.mockClear();
     autofillUsers.clear();
     isAutofillUser$.mockClear();
@@ -267,6 +271,7 @@ describe("ViewComponent", () => {
             environment$: of({
               getIconsUrl: () => "https://example.com",
             }),
+            getEnvironment$: () => of({ getIconsUrl: () => "https://example.com" }),
           },
         },
         {
@@ -300,7 +305,7 @@ describe("ViewComponent", () => {
         },
         {
           provide: ShareLinkService,
-          useValue: { cipherCanBeShared$: () => of(false) },
+          useValue: { cipherCanBeShared$ },
         },
       ],
     })
@@ -1362,10 +1367,43 @@ describe("ViewComponent", () => {
     it("fills from that account's vault", fakeAsync(() => {
       open({ action: AUTOFILL_ID });
 
+      // Not skipping the re-prompt: the fill asks for that account's master password.
       expect(doAutofillForAccount).toHaveBeenCalledWith(
         { userId: otherUserId, cipher: expect.objectContaining({ id: mockCipher.id }) },
         false,
+        false,
       );
+      expect(doAutofill).not.toHaveBeenCalled();
+    }));
+
+    it("fills from the page without asking again for the master password", fakeAsync(() => {
+      open();
+      jest.spyOn(component as any, "_domainMatched").mockResolvedValue(true);
+
+      void component.doAutofill();
+      flush();
+
+      expect(doAutofillForAccount).toHaveBeenCalledWith(
+        { userId: otherUserId, cipher: component.cipher },
+        true,
+        true,
+      );
+      expect(doAutofill).not.toHaveBeenCalled();
+    }));
+
+    it("offers to add the page's URL and saves it to that account's vault", fakeAsync(() => {
+      open();
+      component.cipher.edit = true;
+      jest.spyOn(component as any, "_domainMatched").mockResolvedValue(false);
+      const openDialog = jest.spyOn(AutofillConfirmationDialogComponent, "open").mockReturnValue({
+        closed: of(AutofillConfirmationDialogResult.AutofillAndUrlAdded),
+      } as any);
+
+      void component.doAutofill();
+      flush();
+
+      expect(openDialog.mock.calls[0][1].data.viewOnly).toBe(false);
+      expect(doAutofillAndSave).toHaveBeenCalledWith(component.cipher, true, true, otherUserId);
       expect(doAutofill).not.toHaveBeenCalled();
     }));
 
@@ -1379,10 +1417,19 @@ describe("ViewComponent", () => {
       expect(showPasswordPrompt).toHaveBeenCalledWith(otherUserId);
     }));
 
-    it("does not offer to share the item, which would share it from the active account", fakeAsync(() => {
+    it("offers to share the item from that account", fakeAsync(() => {
+      cipherCanBeShared$.mockReturnValue(of(true));
+
       open();
 
-      expect(fixture.debugElement.query(By.css("app-share-button"))).toBeNull();
+      const share = fixture.debugElement.query(By.directive(ShareButtonComponent));
+      expect(share.componentInstance.userId()).toBe(otherUserId);
+      // Asked for the item's account, never for the active account in its place.
+      expect(cipherCanBeShared$).toHaveBeenCalledWith(expect.anything(), otherUserId);
+      expect(cipherCanBeShared$.mock.calls.every(([, userId]) => userId === otherUserId)).toBe(
+        true,
+      );
+      expect(share.nativeElement.querySelector("button")).not.toBeNull();
     }));
 
     it("leaves the page when that account locks while it is open", fakeAsync(() => {
