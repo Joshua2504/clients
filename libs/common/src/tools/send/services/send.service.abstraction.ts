@@ -16,6 +16,12 @@ import { SendView } from "../models/view/send.view";
 export abstract class SendService implements UserKeyRotationDataProvider<SendWithIdRequest> {
   abstract sends$: Observable<Send[]>;
   abstract sendViews$: Observable<SendView[]>;
+  /**
+   * The decrypted sends of the given user, whether or not that user is the active account,
+   * sorted by name like {@link sendViews$}.
+   * @param userId The user whose sends to read. It must be unlocked.
+   */
+  abstract sendViewsFor$(userId: UserId): Observable<SendView[]>;
 
   /**
    * @param file The plaintext file bytes for a file send create, or `null` for text sends and
@@ -53,9 +59,10 @@ export abstract class SendService implements UserKeyRotationDataProvider<SendWit
    */
   abstract getAll(): Promise<Send[]>;
   /**
+   * Reads from the active account, or from `userId` when it is given.
    * @deprecated Only use in CLI
    */
-  abstract getFromState(id: string): Promise<Send>;
+  abstract getFromState(id: string, userId?: UserId): Promise<Send>;
   /**
    * @deprecated Only use in CLI
    */
@@ -63,7 +70,10 @@ export abstract class SendService implements UserKeyRotationDataProvider<SendWit
 }
 
 export abstract class InternalSendService extends SendService {
-  abstract upsert(send: SendData | SendData[]): Promise<any>;
+  /**
+   * Adds or replaces sends of the active account, or of `userId` when it is given.
+   */
+  abstract upsert(send: SendData | SendData[], userId?: UserId): Promise<any>;
   abstract replace(sends: { [id: string]: SendData }, userId: UserId): Promise<void>;
   /**
    * Deletes sends from the active account, or from `userId` when it is given.

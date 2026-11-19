@@ -2,9 +2,13 @@ import { inject, Injectable } from "@angular/core";
 import { Jsonify } from "type-fest";
 
 import { ViewCacheService } from "@bitwarden/angular/platform/view-cache";
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 
 const CIPHER_FORM_CACHE_KEY = "cipher-form-cache";
+
+/** The account whose form wrote the draft under {@link CIPHER_FORM_CACHE_KEY}. */
+const CIPHER_FORM_CACHE_ACCOUNT_KEY = "cipher-form-cache-account";
 
 @Injectable()
 export class CipherFormCacheService {
@@ -30,9 +34,43 @@ export class CipherFormCacheService {
     deserializer: CipherView.fromJSON,
   });
 
+  /**
+   * The account whose form wrote the cached draft, null when the draft was written without one.
+   * The view cache is shared by the popup and its popouts, which can show the forms of different
+   * accounts, and a cipher id does not identify an account. The draft is therefore only ever
+   * handed to a form of the account that wrote it, see {@link useAccount}.
+   */
+  private cacheAccount = this.viewCacheService.signal<UserId | null>({
+    key: CIPHER_FORM_CACHE_ACCOUNT_KEY,
+    initialValue: null,
+  });
+
+  /** The account of the form this service serves, once the form has named it. */
+  private formAccount: UserId | null = null;
+
   constructor() {
     this.initializedWithValue = !!this.cipherCache();
     this.initialCacheValue = this.cipherCache();
+  }
+
+  /**
+   * Names the account whose vault the form reads and writes. Call it before the cached draft is
+   * read. A draft that another account's form wrote is dropped: it is not returned by
+   * {@link getCachedCipherView}, {@link initializedWithValue} becomes false, and the stored draft
+   * is cleared. Drafts cached from now on belong to `userId`.
+   */
+  useAccount(userId: UserId | null): void {
+    this.formAccount = userId;
+
+    const cached = this.cipherCache();
+    if (this.initialCacheValue == null && cached == null) {
+      return;
+    }
+
+    if ((this.cacheAccount() ?? null) !== userId) {
+      this.initializedWithValue = false;
+      this.clearCache();
+    }
   }
 
   /**
@@ -43,6 +81,7 @@ export class CipherFormCacheService {
     // By default, signals use `Object.is` to determine equality
     // Docs: https://angular.dev/guide/signals#signal-equality-functions
     this.cipherCache.set(CipherView.fromJSON(cipherView as Jsonify<CipherView>));
+    this.cacheAccount.set(this.formAccount);
   }
 
   /**
@@ -58,5 +97,6 @@ export class CipherFormCacheService {
   clearCache(): void {
     this.initialCacheValue = null;
     this.cipherCache.set(null);
+    this.cacheAccount.set(null);
   }
 }

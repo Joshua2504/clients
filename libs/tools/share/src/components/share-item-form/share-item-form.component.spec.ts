@@ -45,6 +45,15 @@ describe("ShareItemFormComponent", () => {
   let i18nService: MockProxy<I18nService>;
   let collections$: BehaviorSubject<CollectionView[]>;
   let folderViews$: BehaviorSubject<FolderView[]>;
+  let collectionService: MockProxy<CollectionService>;
+  let folderService: MockProxy<FolderService>;
+  let organizationService: { organizations$: jest.Mock };
+  let sendPolicyService: {
+    deletionDatePolicyInfo$: BehaviorSubject<unknown>;
+    allowedDomains$: BehaviorSubject<string[]>;
+    deletionDatePolicyInfoFor$: jest.Mock;
+    allowedDomainsFor$: jest.Mock;
+  };
   // Mock SendPolicyService observables
   let deletionDatePolicyInfo$: BehaviorSubject<{
     deletionHours: SendDeletionDatePreset | null;
@@ -68,11 +77,11 @@ describe("ShareItemFormComponent", () => {
     shareLinkService["links$"] = new BehaviorSubject<ShareLink[]>([]);
 
     collections$ = new BehaviorSubject<CollectionView[]>([]);
-    const collectionService = mock<CollectionService>();
+    collectionService = mock<CollectionService>();
     collectionService.decryptedCollections$.mockReturnValue(collections$);
 
     folderViews$ = new BehaviorSubject<FolderView[]>([]);
-    const folderService = mock<FolderService>();
+    folderService = mock<FolderService>();
     folderService.folderViews$.mockReturnValue(folderViews$);
 
     deletionDatePolicyInfo$ = new BehaviorSubject<{
@@ -86,6 +95,14 @@ describe("ShareItemFormComponent", () => {
         name: string;
       }[]
     >([]);
+
+    organizationService = { organizations$: jest.fn(() => organizations$) };
+    sendPolicyService = {
+      deletionDatePolicyInfo$,
+      allowedDomains$,
+      deletionDatePolicyInfoFor$: jest.fn(() => of({ deletionHours: null, orgId: null })),
+      allowedDomainsFor$: jest.fn(() => of(null)),
+    };
 
     await TestBed.configureTestingModule({
       imports: [ReactiveFormsModule, ShareItemFormComponent],
@@ -108,9 +125,9 @@ describe("ShareItemFormComponent", () => {
         { provide: ShareLinkService, useValue: shareLinkService },
         { provide: CollectionService, useValue: collectionService },
         { provide: FolderService, useValue: folderService },
-        { provide: SendPolicyService, useValue: { deletionDatePolicyInfo$, allowedDomains$ } },
+        { provide: SendPolicyService, useValue: sendPolicyService },
         { provide: LogService, useValue: mock<LogService>() },
-        { provide: OrganizationService, useValue: { organizations$: () => organizations$ } },
+        { provide: OrganizationService, useValue: organizationService },
       ],
     }).compileComponents();
 
@@ -171,6 +188,77 @@ describe("ShareItemFormComponent", () => {
 
       expect(accordion()).toBeNull();
       expect(summary()).not.toBeNull();
+    });
+  });
+
+  it("reads the active account when no account is given", async () => {
+    await hostFixture.whenStable();
+
+    expect(collectionService.decryptedCollections$).toHaveBeenCalledWith(mockUserId);
+    expect(folderService.folderViews$).toHaveBeenCalledWith(mockUserId);
+    expect(organizationService.organizations$).toHaveBeenCalledWith(mockUserId);
+    expect(shareLinkService.setCipher).toHaveBeenCalledWith("cipher-123");
+    expect(sendPolicyService.deletionDatePolicyInfoFor$).not.toHaveBeenCalled();
+    expect(sendPolicyService.allowedDomainsFor$).not.toHaveBeenCalled();
+  });
+
+  describe("for an item of an account other than the active one", () => {
+    const otherUserId = "other-user" as UserId;
+
+    beforeEach(async () => {
+      // A fresh form, so nothing was read for the active account before the account was given.
+      jest.clearAllMocks();
+      hostFixture = TestBed.createComponent(ShareItemFormComponent);
+      component = hostFixture.componentInstance;
+      hostFixture.componentRef.setInput("cipher", mockCipher);
+      hostFixture.componentRef.setInput("userId", otherUserId);
+      hostFixture.detectChanges();
+      await hostFixture.whenStable();
+    });
+
+    it("lists the folders, collections and organizations of that account only", () => {
+      expect(collectionService.decryptedCollections$).toHaveBeenCalledWith(otherUserId);
+      expect(folderService.folderViews$).toHaveBeenCalledWith(otherUserId);
+      expect(organizationService.organizations$).toHaveBeenCalledWith(otherUserId);
+
+      expect(collectionService.decryptedCollections$).not.toHaveBeenCalledWith(mockUserId);
+      expect(folderService.folderViews$).not.toHaveBeenCalledWith(mockUserId);
+      expect(organizationService.organizations$).not.toHaveBeenCalledWith(mockUserId);
+    });
+
+    it("applies the Send policies of that account", () => {
+      expect(sendPolicyService.deletionDatePolicyInfoFor$).toHaveBeenCalledWith(otherUserId);
+      expect(sendPolicyService.allowedDomainsFor$).toHaveBeenCalledWith(otherUserId);
+    });
+
+    it("enforces the deletion date that account's policy mandates, not the active account's", () => {
+      // The active account's policy mandates 72 hours; the item's account has none.
+      deletionDatePolicyInfo$.next({ deletionHours: 72, orgId: null });
+      hostFixture.detectChanges();
+
+      expect(component.form.controls.expiryHours.value).toEqual(168);
+      expect(component.form.controls.expiryHours.disabled).toEqual(false);
+      deletionDatePolicyInfo$.next(null);
+    });
+
+    it("lists the links of that account", () => {
+      expect(shareLinkService.setCipher).toHaveBeenCalledWith("cipher-123", otherUserId);
+      expect(shareLinkService.setCipher).not.toHaveBeenCalledWith("cipher-123");
+    });
+
+    it("creates the link in that account", async () => {
+      component.form.controls.emails.setValue("a@test.com");
+      shareLinkService.createShareLink.mockResolvedValue("https://send.example/access-id/key");
+
+      await component.createAndCopyLink();
+
+      expect(shareLinkService.createShareLink).toHaveBeenCalledWith(
+        mockCipher,
+        ["a@test.com"],
+        168,
+        false,
+        otherUserId,
+      );
     });
   });
 

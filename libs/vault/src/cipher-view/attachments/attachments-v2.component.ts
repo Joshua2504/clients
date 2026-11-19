@@ -4,7 +4,7 @@ import { CommonModule } from "@angular/common";
 import { Component, HostListener, Inject } from "@angular/core";
 
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
-import { CipherId, OrganizationId } from "@bitwarden/common/types/guid";
+import { CipherId, OrganizationId, UserId } from "@bitwarden/common/types/guid";
 import { UnionOfValues } from "@bitwarden/common/vault/types/union-of-values";
 import {
   ButtonModule,
@@ -22,6 +22,8 @@ export interface AttachmentsDialogParams {
   canEditCipher?: boolean;
   admin?: boolean;
   organizationId?: OrganizationId;
+  /** The account whose vault holds the cipher. Defaults to the active account. */
+  userId?: UserId;
 }
 
 /**
@@ -54,6 +56,8 @@ export class AttachmentsV2Component {
   admin: boolean = false;
   organizationId?: OrganizationId;
   canEditCipher: boolean;
+  /** The account whose vault holds the cipher, undefined for the active account. */
+  userId?: UserId;
   attachmentFormId = CipherAttachmentsComponent.attachmentFormID;
   buttonText: string;
   private isUploading = false;
@@ -70,6 +74,7 @@ export class AttachmentsV2Component {
   ) {
     this.cipherId = params.cipherId;
     this.organizationId = params.organizationId;
+    this.userId = params.userId;
     this.admin = params.admin ?? false;
     this.canEditCipher = params?.canEditCipher ?? false;
     this.buttonText =

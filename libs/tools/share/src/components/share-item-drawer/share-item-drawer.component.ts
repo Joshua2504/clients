@@ -3,6 +3,7 @@ import { takeUntilDestroyed } from "@angular/core/rxjs-interop";
 import { NavigationEnd, Router } from "@angular/router";
 import { filter } from "rxjs";
 
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 import {
   AsyncActionsModule,
@@ -18,6 +19,8 @@ import { ShareItemFormComponent } from "../share-item-form/share-item-form.compo
 
 export interface ShareItemDrawerData {
   cipher: CipherView;
+  /** The account whose vault holds the cipher. Defaults to the active account. */
+  userId?: UserId;
 }
 
 @Component({

@@ -179,4 +179,42 @@ describe("SendPolicyService", () => {
       ]);
     });
   });
+
+  describe("readers for a given account", () => {
+    const otherUserId = "other-user-id" as UserId;
+
+    beforeEach(() => {
+      // The active account has no Send Controls policy; the other account's organization has one.
+      policyServiceMock.policiesByType$.mockImplementation((_, forUserId) =>
+        of(
+          forUserId === otherUserId
+            ? [makePolicy({ allowedDomains: "Example.com, example.org", deletionHours: 24 })]
+            : [],
+        ),
+      );
+    });
+
+    it("allowedDomainsFor$ reads the policy of that account", async () => {
+      expect(await firstValueFrom(service.allowedDomainsFor$(otherUserId))).toEqual([
+        "example.com",
+        "example.org",
+      ]);
+      expect(await firstValueFrom(service.allowedDomains$)).toBeNull();
+      expect(policyServiceMock.policiesByType$).toHaveBeenCalledWith(
+        PolicyType.SendControls,
+        otherUserId,
+      );
+    });
+
+    it("deletionDatePolicyInfoFor$ reads the policy of that account", async () => {
+      expect(await firstValueFrom(service.deletionDatePolicyInfoFor$(otherUserId))).toEqual({
+        deletionHours: 24,
+        orgId: "test-org-id",
+      });
+      expect(await firstValueFrom(service.deletionDatePolicyInfo$)).toEqual({
+        deletionHours: null,
+        orgId: null,
+      });
+    });
+  });
 });

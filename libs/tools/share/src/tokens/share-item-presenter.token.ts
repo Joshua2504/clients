@@ -1,3 +1,4 @@
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherViewLike } from "@bitwarden/common/vault/utils/cipher-view-like-utils";
 import { SafeInjectionToken } from "@bitwarden/ui-common";
 
@@ -10,9 +11,12 @@ import { SafeInjectionToken } from "@bitwarden/ui-common";
  * one itself, and a surface that only needs the id does not pay for a lookup it cannot use.
  *
  * Resolve once the surface is on screen, not once the user is done with it.
+ *
+ * `userId` is the account whose vault holds the item. The surface then shares from that account
+ * alone. Without it the item is the active account's.
  */
 export interface ShareItemPresenter {
-  present(cipher: CipherViewLike): Promise<void>;
+  present(cipher: CipherViewLike, userId?: UserId): Promise<void>;
 }
 
 export const SHARE_ITEM_PRESENTER = new SafeInjectionToken<ShareItemPresenter>(

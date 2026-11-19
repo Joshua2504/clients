@@ -18,7 +18,7 @@ import {
   ValidatorFn,
   Validators,
 } from "@angular/forms";
-import { combineLatest, switchMap } from "rxjs";
+import { combineLatest, of, switchMap } from "rxjs";
 
 import { CollectionService } from "@bitwarden/admin-console/common";
 import { OrganizationService } from "@bitwarden/common/admin-console/abstractions/organization/organization.service.abstraction";
@@ -28,7 +28,7 @@ import { getUserId } from "@bitwarden/common/auth/services/account.service";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
 import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
 import { SendDeletionDatePreset } from "@bitwarden/common/tools/models/send-deletion-date-preset";
-import { CipherId } from "@bitwarden/common/types/guid";
+import { CipherId, UserId } from "@bitwarden/common/types/guid";
 import { FolderService } from "@bitwarden/common/vault/abstractions/folder/folder.service.abstraction";
 import { CipherType } from "@bitwarden/common/vault/enums";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
@@ -93,6 +93,13 @@ export class ShareItemFormComponent implements OnDestroy {
 
   /** The cipher to share. Provided by the shell component. */
   readonly cipher = input.required<CipherView>();
+
+  /**
+   * The account whose vault holds the cipher. The form then lists that account's links, folder
+   * and collections, applies its Send policies and creates the Send in it. Defaults to the active
+   * account.
+   */
+  readonly userId = input<UserId | undefined>(undefined);
 
   protected readonly activeLinks = signal<ShareLink[]>([]);
   protected readonly collections = signal<CollectionView[]>([]);
@@ -201,14 +208,27 @@ export class ShareItemFormComponent implements OnDestroy {
     oneTimeShare: new FormControl(false, { nonNullable: true }),
   });
 
-  private readonly activeUserId$ = this.accountService.activeAccount$.pipe(getUserId);
+  private readonly explicitUserId$ = toObservable(this.userId);
+
+  /** {@link userId} when given, else the active account. Named from when it always was that. */
+  private readonly activeUserId$ = this.explicitUserId$.pipe(
+    switchMap((userId) =>
+      userId == null ? this.accountService.activeAccount$.pipe(getUserId) : of(userId),
+    ),
+  );
   private readonly policyAllowedDomains = signal<string[] | undefined>(undefined);
 
   protected readonly policyDeletionHoursOrgName = signal<string | undefined>(undefined);
 
   constructor() {
     combineLatest([
-      this.sendPolicyService.deletionDatePolicyInfo$,
+      this.explicitUserId$.pipe(
+        switchMap((userId) =>
+          userId == null
+            ? this.sendPolicyService.deletionDatePolicyInfo$
+            : this.sendPolicyService.deletionDatePolicyInfoFor$(userId),
+        ),
+      ),
       this.activeUserId$.pipe(switchMap((userId) => this.orgService.organizations$(userId))),
     ])
       .pipe(takeUntilDestroyed())
@@ -227,8 +247,15 @@ export class ShareItemFormComponent implements OnDestroy {
         }
       });
 
-    this.sendPolicyService.allowedDomains$
-      .pipe(takeUntilDestroyed())
+    this.explicitUserId$
+      .pipe(
+        switchMap((userId) =>
+          userId == null
+            ? this.sendPolicyService.allowedDomains$
+            : this.sendPolicyService.allowedDomainsFor$(userId),
+        ),
+        takeUntilDestroyed(),
+      )
       .subscribe((allowedDomains) => {
         const emailsControl = this.form.get("emails");
         if (allowedDomains && allowedDomains.length > 0) {
@@ -268,9 +295,15 @@ export class ShareItemFormComponent implements OnDestroy {
         );
       });
 
-    cipher$.pipe(takeUntilDestroyed()).subscribe((cipher) => {
-      void this.shareLinkService.setCipher(cipher.id as CipherId);
-    });
+    combineLatest([cipher$, this.explicitUserId$])
+      .pipe(takeUntilDestroyed())
+      .subscribe(([cipher, userId]) => {
+        if (userId == null) {
+          void this.shareLinkService.setCipher(cipher.id as CipherId);
+        } else {
+          void this.shareLinkService.setCipher(cipher.id as CipherId, userId);
+        }
+      });
 
     this.shareLinkService.links$.pipe(takeUntilDestroyed()).subscribe((links) => {
       this.activeLinks.set(links);
@@ -323,13 +356,24 @@ export class ShareItemFormComponent implements OnDestroy {
       .map((e) => e.trim())
       .filter((e) => e.length > 0);
 
+    const userId = this.userId();
+
     try {
-      const link = await this.shareLinkService.createShareLink(
-        currentCipher,
-        emails,
-        formValue.expiryHours,
-        formValue.oneTimeShare,
-      );
+      const link =
+        userId == null
+          ? await this.shareLinkService.createShareLink(
+              currentCipher,
+              emails,
+              formValue.expiryHours,
+              formValue.oneTimeShare,
+            )
+          : await this.shareLinkService.createShareLink(
+              currentCipher,
+              emails,
+              formValue.expiryHours,
+              formValue.oneTimeShare,
+              userId,
+            );
 
       if (link) {
         this.platformUtilsService.copyToClipboard(link);

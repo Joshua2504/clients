@@ -359,6 +359,17 @@ describe("SendApiService", () => {
       expect(apiService.send).not.toHaveBeenCalled();
     });
 
+    it("deletes a send of the given account with that account's SDK client and state", async () => {
+      const otherUserId = Utils.newGuid() as UserId;
+
+      await service.delete(sendId, otherUserId);
+
+      expect(sdkService.userClient$).toHaveBeenCalledWith(otherUserId);
+      expect(sdkService.userClient$).not.toHaveBeenCalledWith(mockUserId);
+      expect(sendsClient.delete).toHaveBeenCalledWith(sendId);
+      expect(sendService.delete).toHaveBeenCalledWith(sendId, otherUserId);
+    });
+
     it("removes all auth through the SDK, then refetches the send over REST", async () => {
       await service.removeAuth(sendId);
 
@@ -705,6 +716,41 @@ describe("SendApiService", () => {
         await service.saveView(fileView({ id: existingId }), null);
 
         expect(sendsClient.edit).toHaveBeenCalledWith(existingId, expect.anything());
+      });
+    });
+
+    describe("refreshAfterMutation for a given account", () => {
+      const otherUserId = Utils.newGuid() as UserId;
+
+      it("refetches as that account and stores the send in its state", async () => {
+        await service.refreshAfterMutation("server-id", otherUserId);
+
+        expect(apiService.send).toHaveBeenCalledTimes(1);
+        expect(apiService.send).toHaveBeenCalledWith(
+          "GET",
+          "/sends/server-id",
+          null,
+          otherUserId,
+          true,
+        );
+        expect(sendService.upsert).toHaveBeenCalledWith(expect.anything(), otherUserId);
+      });
+
+      it("falls back to that account's local copy when the refetch fails", async () => {
+        apiService.send.mockRejectedValue(new Error("network down"));
+        const local = new Send();
+        local.id = "server-id";
+        sendService.getFromState.mockResolvedValue(local);
+
+        expect(await service.refreshAfterMutation("server-id", otherUserId)).toBe(local);
+        expect(sendService.getFromState).toHaveBeenCalledWith("server-id", otherUserId);
+      });
+
+      it("refetches as the active account without one", async () => {
+        await service.refreshAfterMutation("server-id");
+
+        expect(apiService.send).toHaveBeenCalledWith(...refreshCall("server-id"));
+        expect(sendService.upsert).toHaveBeenCalledWith(expect.anything());
       });
     });
 

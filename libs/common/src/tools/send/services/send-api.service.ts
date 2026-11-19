@@ -127,8 +127,10 @@ export class SendApiService implements SendApiServiceAbstraction {
     return await this.refreshAfterMutation(sdkView.id as unknown as string);
   }
 
-  async delete(id: string): Promise<any> {
-    const userId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+  async delete(id: string, userId?: UserId): Promise<any> {
+    // Without an account the send is the active account's, as it always was.
+    const explicitUserId = userId;
+    userId ??= await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
     await firstValueFrom(
       this.sdkService.userClient$(userId).pipe(
         concatMap(async (sdk) => {
@@ -144,7 +146,11 @@ export class SendApiService implements SendApiServiceAbstraction {
         }),
       ),
     );
-    await this.sendService.delete(id);
+    if (explicitUserId == null) {
+      await this.sendService.delete(id);
+    } else {
+      await this.sendService.delete(id, explicitUserId);
+    }
   }
 
   // Removes all auth (password or email OTP) from the send.
@@ -242,13 +248,15 @@ export class SendApiService implements SendApiServiceAbstraction {
   /**
    * Falls back to the SDK's local copy if the server refetch fails, rather than failing a
    * mutation that already landed (a retry would duplicate the send).
+   *
+   * @param userId The account that owns the send. Defaults to the active account.
    */
-  async refreshAfterMutation(sendId: string): Promise<Send> {
+  async refreshAfterMutation(sendId: string, userId?: UserId): Promise<Send> {
     try {
-      return await this.refreshSendFromServer(sendId);
+      return await this.refreshSendFromServer(sendId, userId);
     } catch (error) {
       this.logService.error(`Send refresh failed after successful mutation: ${error}`);
-      const local = await this.sendService.getFromState(sendId);
+      const local = await this.sendService.getFromState(sendId, userId);
       if (local == null) {
         throw error;
       }
@@ -358,10 +366,18 @@ export class SendApiService implements SendApiServiceAbstraction {
   }
 
   // The SDK only exposes plaintext views; local state needs the wire-encrypted form.
-  private async refreshSendFromServer(id: string): Promise<Send> {
-    const r = await this.apiService.send("GET", "/sends/" + id, null, true, true);
+  private async refreshSendFromServer(id: string, userId?: UserId): Promise<Send> {
+    if (userId == null) {
+      const r = await this.apiService.send("GET", "/sends/" + id, null, true, true);
+      const data = new SendData(new SendResponse(r));
+      await this.sendService.upsert(data);
+      return new Send(data);
+    }
+
+    // Authenticated as, and stored for, the account that owns the send.
+    const r = await this.apiService.send("GET", "/sends/" + id, null, userId, true);
     const data = new SendData(new SendResponse(r));
-    await this.sendService.upsert(data);
+    await this.sendService.upsert(data, userId);
     return new Send(data);
   }
 

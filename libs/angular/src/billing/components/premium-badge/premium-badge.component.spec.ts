@@ -8,6 +8,7 @@ import { BillingAccountProfileStateService } from "@bitwarden/common/billing/abs
 import { FeatureFlag } from "@bitwarden/common/enums/feature-flag.enum";
 import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+import { UserId } from "@bitwarden/common/types/guid";
 import { PremiumUpgradePromptService } from "@bitwarden/common/vault/abstractions/premium-upgrade-prompt.service";
 import {
   BitIconButtonComponent,
@@ -56,7 +57,12 @@ describe("PremiumBadgeComponent", () => {
 
   /** Create the component after flag/input setup, optionally binding the click output first. */
   async function render(
-    opts: { iconOnly?: boolean; organizationId?: string; bindClick?: boolean } = {},
+    opts: {
+      iconOnly?: boolean;
+      organizationId?: string;
+      bindClick?: boolean;
+      userId?: UserId;
+    } = {},
   ) {
     fixture = TestBed.createComponent(PremiumBadgeComponent);
     if (opts.iconOnly != null) {
@@ -64,6 +70,9 @@ describe("PremiumBadgeComponent", () => {
     }
     if (opts.organizationId != null) {
       fixture.componentRef.setInput("organizationId", opts.organizationId);
+    }
+    if (opts.userId != null) {
+      fixture.componentRef.setInput("userId", opts.userId);
     }
     const clickSpy = jest.fn();
     if (opts.bindClick) {
@@ -97,6 +106,29 @@ describe("PremiumBadgeComponent", () => {
       expect(event.stopPropagation).toHaveBeenCalled();
       expect(event.preventDefault).toHaveBeenCalled();
       expect(promptService.promptForPremium).toHaveBeenCalledWith("org-1");
+    });
+
+    it("asks about and prompts for the named account instead of the active account", async () => {
+      const otherUserId = "user-2" as UserId;
+      const otherHasPremium$ = new BehaviorSubject<boolean>(false);
+      billingAccountProfileStateService.hasPremiumFromAnySource$.mockImplementation((userId) =>
+        userId === otherUserId ? otherHasPremium$ : of(true),
+      );
+
+      await render({ organizationId: "org-1", userId: otherUserId });
+
+      // The active account has premium; the badge still shows because the named one does not.
+      expect(chip()).not.toBeNull();
+      expect(billingAccountProfileStateService.hasPremiumFromAnySource$).not.toHaveBeenCalledWith(
+        "user-1",
+      );
+
+      chip().triggerEventHandler("click", clickEvent());
+      expect(promptService.promptForPremium).toHaveBeenCalledWith("org-1", otherUserId);
+
+      otherHasPremium$.next(true);
+      fixture.detectChanges();
+      expect(chip()).toBeNull();
     });
 
     it("renders today's icon button when iconOnly", async () => {

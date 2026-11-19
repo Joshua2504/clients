@@ -12,6 +12,7 @@ import { Subject } from "rxjs";
 
 import { FeatureFlag } from "@bitwarden/common/enums/feature-flag.enum";
 import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
+import { UserId } from "@bitwarden/common/types/guid";
 import { PremiumUpgradePromptService } from "@bitwarden/common/vault/abstractions/premium-upgrade-prompt.service";
 import {
   BitIconButtonComponent,
@@ -31,7 +32,7 @@ type ComponentMode = "premiumChip" | "premiumIcon" | "premiumLabel" | "upgradeIc
       @case ("premiumChip") {
         <button
           type="button"
-          *appNotPremium
+          *appNotPremium="userId()"
           bit-chip-action
           class="!tw-rounded-3xl"
           startIcon="bwi-premium"
@@ -42,7 +43,7 @@ type ComponentMode = "premiumChip" | "premiumIcon" | "premiumLabel" | "upgradeIc
       }
       @case ("premiumIcon") {
         <bit-icon-tile
-          *appNotPremium
+          *appNotPremium="userId()"
           icon="bwi-premium"
           variant="teal"
           size="sm"
@@ -51,7 +52,7 @@ type ComponentMode = "premiumChip" | "premiumIcon" | "premiumLabel" | "upgradeIc
       }
       @case ("premiumLabel") {
         <span
-          *appNotPremium
+          *appNotPremium="userId()"
           class="tw-inline-flex tw-items-center tw-gap-2 tw-text-main tw-text-lg"
         >
           <bit-icon-tile icon="bwi-premium" variant="teal" size="sm" />
@@ -63,7 +64,7 @@ type ComponentMode = "premiumChip" | "premiumIcon" | "premiumLabel" | "upgradeIc
           type="button"
           buttonType="side-nav"
           size="xsmall"
-          *appNotPremium
+          *appNotPremium="userId()"
           bitIconButton="bwi-premium"
           [label]="'upgradeToPremium' | i18n"
           (click)="promptForPremium($event)"
@@ -72,7 +73,7 @@ type ComponentMode = "premiumChip" | "premiumIcon" | "premiumLabel" | "upgradeIc
       @case ("upgradeChip") {
         <button
           type="button"
-          *appNotPremium
+          *appNotPremium="userId()"
           bit-chip-action
           startIcon="bwi-premium"
           [variant]="'accent-primary'"
@@ -94,6 +95,11 @@ type ComponentMode = "premiumChip" | "premiumIcon" | "premiumLabel" | "upgradeIc
 export class PremiumBadgeComponent implements OnInit {
   readonly organizationId = input<string>();
   readonly iconOnly = input<boolean>(false);
+  /**
+   * The account the badge is about: its premium decides whether the badge shows, and the upgrade
+   * prompt is for it. Defaults to the active account.
+   */
+  readonly userId = input<UserId | undefined>(undefined);
 
   private readonly premiumUpgradePromptService = inject(PremiumUpgradePromptService);
   private readonly configService = inject(ConfigService);
@@ -128,7 +134,12 @@ export class PremiumBadgeComponent implements OnInit {
   async promptForPremium(event: Event) {
     event.stopPropagation();
     event.preventDefault();
-    await this.premiumUpgradePromptService.promptForPremium(this.organizationId());
+    const userId = this.userId();
+    if (userId == null) {
+      await this.premiumUpgradePromptService.promptForPremium(this.organizationId());
+      return;
+    }
+    await this.premiumUpgradePromptService.promptForPremium(this.organizationId(), userId);
   }
 
   /** Flag-on clickable path: emit only; the host owns the behavior. */

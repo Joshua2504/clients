@@ -1,15 +1,19 @@
-@if (type === "password") {
-  <tools-password-generator
-    [disableMargin]="disableMargin"
-    (onGenerated)="onCredentialGenerated($event)"
-    (onAlgorithm)="onAlgorithmSelected($event)"
-  ></tools-password-generator>
-}
-@if (type === "username") {
-  <tools-username-generator
-    [website]="uri"
-    [disableMargin]="disableMargin"
-    (onGenerated)="onCredentialGenerated($event)"
-    (onAlgorithm)="onAlgorithmSelected($event)"
-  ></tools-username-generator>
+@if (binding$ | async; as binding) {
+  @if (binding.ready && type === "password") {
+    <tools-password-generator
+      [account]="binding.account"
+      [disableMargin]="disableMargin"
+      (onGenerated)="onCredentialGenerated($event)"
+      (onAlgorithm)="onAlgorithmSelected($event)"
+    ></tools-password-generator>
+  }
+  @if (binding.ready && type === "username") {
+    <tools-username-generator
+      [account]="binding.account"
+      [website]="uri"
+      [disableMargin]="disableMargin"
+      (onGenerated)="onCredentialGenerated($event)"
+      (onAlgorithm)="onAlgorithmSelected($event)"
+    ></tools-username-generator>
+  }
 }

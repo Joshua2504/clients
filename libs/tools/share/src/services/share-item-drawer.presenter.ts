@@ -4,7 +4,7 @@ import { firstValueFrom } from "rxjs";
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { getUserId } from "@bitwarden/common/auth/services/account.service";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
-import { CipherId } from "@bitwarden/common/types/guid";
+import { CipherId, UserId } from "@bitwarden/common/types/guid";
 import { CipherService } from "@bitwarden/common/vault/abstractions/cipher.service";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 import {
@@ -28,8 +28,8 @@ export class ShareItemDrawerPresenter implements ShareItemPresenter {
   private i18nService = inject(I18nService);
   private toastService = inject(ToastService);
 
-  async present(cipher: CipherViewLike): Promise<void> {
-    const cipherView = await this.resolveCipherView(cipher);
+  async present(cipher: CipherViewLike, userId?: UserId): Promise<void> {
+    const cipherView = await this.resolveCipherView(cipher, userId);
 
     if (!cipherView) {
       this.toastService.showToast({
@@ -40,7 +40,7 @@ export class ShareItemDrawerPresenter implements ShareItemPresenter {
     }
 
     await this.dialogService.openDrawer(ShareItemDrawerComponent, {
-      data: { cipher: cipherView },
+      data: { cipher: cipherView, ...(userId == null ? {} : { userId }) },
       closeOnNavigation: true,
     });
   }
@@ -51,7 +51,10 @@ export class ShareItemDrawerPresenter implements ShareItemPresenter {
    * not necessarily in the acting user's own vault — pass it straight through, because looking it
    * up by id would come back empty for them.
    */
-  private async resolveCipherView(cipher: CipherViewLike): Promise<CipherView | undefined> {
+  private async resolveCipherView(
+    cipher: CipherViewLike,
+    explicitUserId?: UserId,
+  ): Promise<CipherView | undefined> {
     if (!CipherViewLikeUtils.isCipherListView(cipher)) {
       return cipher;
     }
@@ -60,7 +63,8 @@ export class ShareItemDrawerPresenter implements ShareItemPresenter {
       return undefined;
     }
 
-    const userId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+    const userId =
+      explicitUserId ?? (await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId)));
     // The SDK and `common` tag cipher ids separately, so the two do not overlap structurally.
     return await firstValueFrom(
       this.cipherService.cipherView$(userId, cipher.id as unknown as CipherId),

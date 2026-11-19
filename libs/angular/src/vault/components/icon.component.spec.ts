@@ -6,6 +6,7 @@ import { BehaviorSubject, of } from "rxjs";
 import { DomainSettingsService } from "@bitwarden/common/autofill/services/domain-settings.service";
 import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
 import { EnvironmentService } from "@bitwarden/common/platform/abstractions/environment.service";
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherType } from "@bitwarden/common/vault/enums";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 import { LoginUriView } from "@bitwarden/common/vault/models/view/login-uri.view";
@@ -50,7 +51,11 @@ describe("IconComponent", () => {
       providers: [
         {
           provide: EnvironmentService,
-          useValue: { environment$: of({ getIconsUrl: () => ICONS_URL }) },
+          useValue: {
+            environment$: of({ getIconsUrl: () => ICONS_URL }),
+            getEnvironment$: (userId: UserId) =>
+              of({ getIconsUrl: () => `https://icons.${userId}.example` }),
+          },
         },
         {
           provide: DomainSettingsService,
@@ -75,6 +80,13 @@ describe("IconComponent", () => {
       "Icons",
       "Load icon",
     );
+  });
+
+  it("requests the favicon from the icons server of the account that holds the cipher", async () => {
+    fixture.componentRef.setInput("userId", "other-user" as UserId);
+    await render(login("https://b.example"));
+
+    expect(img().attributes["src"]).toBe("https://icons.other-user.example/b.example/icon.png");
   });
 
   it("finishes the entry once the image loads", () => {

@@ -11,7 +11,7 @@ import { WhoCanAccessType } from "@bitwarden/common/tools/models/send-who-can-ac
 import { Send } from "@bitwarden/common/tools/send/models/domain/send";
 import { SendView } from "@bitwarden/common/tools/send/models/view/send.view";
 import { SendType } from "@bitwarden/common/tools/send/types/send-type";
-import { OrganizationId } from "@bitwarden/common/types/guid";
+import { OrganizationId, UserId } from "@bitwarden/common/types/guid";
 
 /**
  * Service for evaluating Send-related policy restrictions for the current user.
@@ -74,41 +74,55 @@ export class SendPolicyService {
   );
 
   readonly allowedDomains$: Observable<string[] | null> = this.activeUserId$.pipe(
-    switchMap((userId) =>
-      this.policyService.policiesByType$(PolicyType.SendControls, userId).pipe(
-        map((policies) => {
-          const policy = policies?.find((p) => p.data?.allowedDomains);
-          const raw = policy?.data?.allowedDomains as string;
-          if (!raw) {
-            return null;
-          }
-          return raw
-            .split(",")
-            .map((d: string) => d.trim().toLowerCase())
-            .filter((d: string) => d.length > 0);
-        }),
-      ),
-    ),
+    switchMap((userId) => this.allowedDomainsFor$(userId)),
     shareReplay({ bufferSize: 1, refCount: true }),
   );
+
+  /**
+   * {@link allowedDomains$} for the given user, whether or not that user is the active account.
+   */
+  allowedDomainsFor$(userId: UserId): Observable<string[] | null> {
+    return this.policyService.policiesByType$(PolicyType.SendControls, userId).pipe(
+      map((policies) => {
+        const policy = policies?.find((p) => p.data?.allowedDomains);
+        const raw = policy?.data?.allowedDomains as string;
+        if (!raw) {
+          return null;
+        }
+        return raw
+          .split(",")
+          .map((d: string) => d.trim().toLowerCase())
+          .filter((d: string) => d.length > 0);
+      }),
+    );
+  }
 
   // Returns whatever deletion date preset is mandated by policy and the ID of the organization whose policy set it
   readonly deletionDatePolicyInfo$: Observable<{
     deletionHours: SendDeletionDatePreset | null;
     orgId: OrganizationId | null;
   } | null> = this.activeUserId$.pipe(
-    switchMap((userId) =>
-      this.policyService.policiesByType$(PolicyType.SendControls, userId).pipe(
-        map((policies) => {
-          const policy = policies?.find((p) => p.data?.deletionHours != null);
-          const deletionHours = (policy?.data?.deletionHours as SendDeletionDatePreset) ?? null;
-          const orgId = policy?.organizationId ?? null;
-          return { deletionHours, orgId };
-        }),
-      ),
-    ),
+    switchMap((userId) => this.deletionDatePolicyInfoFor$(userId)),
     shareReplay({ bufferSize: 1, refCount: true }),
   );
+
+  /**
+   * {@link deletionDatePolicyInfo$} for the given user, whether or not that user is the active
+   * account.
+   */
+  deletionDatePolicyInfoFor$(userId: UserId): Observable<{
+    deletionHours: SendDeletionDatePreset | null;
+    orgId: OrganizationId | null;
+  } | null> {
+    return this.policyService.policiesByType$(PolicyType.SendControls, userId).pipe(
+      map((policies) => {
+        const policy = policies?.find((p) => p.data?.deletionHours != null);
+        const deletionHours = (policy?.data?.deletionHours as SendDeletionDatePreset) ?? null;
+        const orgId = policy?.organizationId ?? null;
+        return { deletionHours, orgId };
+      }),
+    );
+  }
 
   /**
    * Emits the SendTypes that are allowed by policy

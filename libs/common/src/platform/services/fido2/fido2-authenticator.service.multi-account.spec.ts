@@ -40,6 +40,7 @@ describe("Fido2AuthenticatorService serving several accounts", () => {
 
   let vaults: Map<UserId, CipherView[]>;
   let candidateUserIds$: BehaviorSubject<UserId[]>;
+  let lockedCandidateUserIds$: BehaviorSubject<UserId[]>;
   let cipherService: MockProxy<CipherService>;
   let userInterface: MockProxy<Fido2UserInterfaceService<ParentWindowReference>>;
   let userInterfaceSession: MockProxy<Fido2UserInterfaceSession>;
@@ -52,6 +53,7 @@ describe("Fido2AuthenticatorService serving several accounts", () => {
       [otherUserId, []],
     ]);
     candidateUserIds$ = new BehaviorSubject([activeUserId, otherUserId]);
+    lockedCandidateUserIds$ = new BehaviorSubject<UserId[]>([]);
 
     cipherService = mock<CipherService>();
     cipherService.cipherListViews$.mockImplementation((userId) => of(vaults.get(userId) ?? []));
@@ -83,6 +85,7 @@ describe("Fido2AuthenticatorService serving several accounts", () => {
       mockAccountServiceWith(activeUserId),
       undefined,
       candidateUserIds$,
+      lockedCandidateUserIds$,
     );
 
     (SdkLoadService as any).Ready = jest.fn().mockResolvedValue(true);
@@ -484,6 +487,260 @@ describe("Fido2AuthenticatorService serving several accounts", () => {
       await authenticator.makeCredential(makeCredentialParams(), "window");
 
       expect(syncService.fullSync.mock.calls).toEqual([[false, { userId: otherUserId }]]);
+    });
+  });
+
+  describe("with the active account locked while the other account serves", () => {
+    /** The user unlocks the active account in the user interface, which then answers `retry`. */
+    const unlockActiveAccount = () => {
+      candidateUserIds$.next([activeUserId, otherUserId]);
+      lockedCandidateUserIds$.next([]);
+    };
+
+    beforeEach(() => {
+      candidateUserIds$.next([otherUserId]);
+      lockedCandidateUserIds$.next([activeUserId]);
+    });
+
+    describe("getAssertion", () => {
+      let activeCipher: CipherView;
+
+      beforeEach(() => {
+        activeCipher = createCipherView();
+        vaults.set(activeUserId, [activeCipher]);
+      });
+
+      it("names the locked account when it finds no credential, instead of concluding", async () => {
+        userInterfaceSession.informCredentialNotFound.mockResolvedValue(undefined);
+
+        await expect(authenticator.getAssertion(assertionParams(), "window")).rejects.toThrow(
+          Fido2AuthenticatorErrorCode.NotAllowed,
+        );
+
+        expect(userInterfaceSession.informCredentialNotFound).toHaveBeenCalledTimes(1);
+        expect(userInterfaceSession.informCredentialNotFound).toHaveBeenCalledWith(undefined, {
+          lockedUserIds: [activeUserId],
+        });
+        expect(cipherService.cipherListViews$).not.toHaveBeenCalledWith(activeUserId);
+      });
+
+      it("searches again after the user unlocked the account, and signs with its credential in the same session", async () => {
+        userInterfaceSession.informCredentialNotFound.mockImplementation(async () => {
+          unlockActiveAccount();
+          return { retry: true };
+        });
+        userInterfaceSession.pickCredential.mockResolvedValue({
+          cipherId: activeCipher.id,
+          userId: activeUserId,
+          userVerified: false,
+        });
+
+        const result = await authenticator.getAssertion(assertionParams(), "window");
+
+        expect(userInterface.newSession).toHaveBeenCalledTimes(1);
+        expect(userInterfaceSession.informCredentialNotFound).toHaveBeenCalledTimes(1);
+        // Asked anew, now with the credential of the unlocked account and no locked account
+        expect(userInterfaceSession.pickCredential).toHaveBeenCalledTimes(1);
+        expect(userInterfaceSession.pickCredential.mock.calls[0][0]).toEqual({
+          cipherIds: [activeCipher.id],
+          cipherRefs: [{ userId: activeUserId, cipherId: activeCipher.id }],
+          userVerification: false,
+          assumeUserPresence: undefined,
+          masterPasswordRepromptRequired: false,
+        });
+        expect(result.selectedCredential.id).toEqual(
+          parseCredentialId(activeCipher.login.fido2Credentials[0].credentialId),
+        );
+      });
+
+      it("concludes not found when the unlocked account holds no credential either", async () => {
+        vaults.set(activeUserId, []);
+        userInterfaceSession.informCredentialNotFound.mockImplementationOnce(async () => {
+          unlockActiveAccount();
+          return { retry: true };
+        });
+
+        await expect(authenticator.getAssertion(assertionParams(), "window")).rejects.toThrow(
+          Fido2AuthenticatorErrorCode.NotAllowed,
+        );
+
+        expect(userInterfaceSession.informCredentialNotFound.mock.calls).toEqual([
+          [undefined, { lockedUserIds: [activeUserId] }],
+          [],
+        ]);
+      });
+
+      it("names the locked account next to the credentials found, and offers its credentials once unlocked", async () => {
+        const otherCipher = createCipherView();
+        vaults.set(otherUserId, [otherCipher]);
+        userInterfaceSession.pickCredential
+          .mockImplementationOnce(async () => {
+            unlockActiveAccount();
+            return { cipherId: undefined, userVerified: false, retry: true };
+          })
+          .mockResolvedValueOnce({
+            cipherId: activeCipher.id,
+            userId: activeUserId,
+            userVerified: false,
+          });
+
+        const result = await authenticator.getAssertion(assertionParams(), "window");
+
+        expect(userInterfaceSession.pickCredential.mock.calls[0][0]).toEqual(
+          expect.objectContaining({
+            cipherRefs: [{ userId: otherUserId, cipherId: otherCipher.id }],
+            lockedUserIds: [activeUserId],
+          }),
+        );
+        expect(userInterfaceSession.pickCredential.mock.calls[1][0].cipherRefs).toEqual([
+          { userId: activeUserId, cipherId: activeCipher.id },
+          { userId: otherUserId, cipherId: otherCipher.id },
+        ]);
+        expect(userInterfaceSession.pickCredential.mock.calls[1][0]).not.toHaveProperty(
+          "lockedUserIds",
+        );
+        expect(result.selectedCredential.id).toEqual(
+          parseCredentialId(activeCipher.login.fido2Credentials[0].credentialId),
+        );
+      });
+
+      it("does not use a credential of an account that is still locked after a retry", async () => {
+        const otherCipher = createCipherView();
+        vaults.set(otherUserId, [otherCipher]);
+        userInterfaceSession.pickCredential
+          .mockResolvedValueOnce({ cipherId: undefined, userVerified: false, retry: true })
+          .mockResolvedValueOnce({
+            cipherId: activeCipher.id,
+            userId: activeUserId,
+            userVerified: true,
+          });
+
+        await expect(authenticator.getAssertion(assertionParams(), "window")).rejects.toThrow(
+          Fido2AuthenticatorErrorCode.NotAllowed,
+        );
+        expect(userInterfaceSession.pickCredential.mock.calls[1][0].cipherRefs).toEqual([
+          { userId: otherUserId, cipherId: otherCipher.id },
+        ]);
+      });
+
+      it("does not name a locked account other than the one the request is for", async () => {
+        const otherCipher = createCipherView();
+        vaults.set(otherUserId, [otherCipher]);
+        userInterfaceSession.pickCredential.mockResolvedValue({
+          cipherId: otherCipher.id,
+          userId: otherUserId,
+          userVerified: false,
+        });
+
+        await authenticator.getAssertion(assertionParams({ userId: otherUserId }), "window");
+
+        expect(userInterfaceSession.pickCredential.mock.calls[0][0]).not.toHaveProperty(
+          "lockedUserIds",
+        );
+      });
+
+      it("never asks to unlock during silent discovery", async () => {
+        expect(await authenticator.silentCredentialDiscovery(RpId)).toEqual([]);
+
+        expect(userInterface.newSession).not.toHaveBeenCalled();
+      });
+    });
+
+    describe("makeCredential", () => {
+      let activeLogin: CipherView;
+      let otherLogin: CipherView;
+
+      beforeEach(() => {
+        activeLogin = createLoginView();
+        otherLogin = createLoginView();
+        vaults.set(activeUserId, [activeLogin]);
+        vaults.set(otherUserId, [otherLogin]);
+      });
+
+      it("offers the account that serves and names the locked one", async () => {
+        userInterfaceSession.confirmNewCredential.mockResolvedValue({
+          cipherId: otherLogin.id,
+          userId: otherUserId,
+          userVerified: false,
+        });
+
+        await authenticator.makeCredential(makeCredentialParams(), "window");
+
+        expect(userInterfaceSession.confirmNewCredential).toHaveBeenCalledWith(
+          expect.objectContaining({ userIds: [otherUserId], lockedUserIds: [activeUserId] }),
+        );
+        expect(cipherService.updateWithServer).toHaveBeenCalledWith(otherLogin, otherUserId);
+      });
+
+      it("does not save to the locked account when the answer names it", async () => {
+        userInterfaceSession.confirmNewCredential.mockResolvedValue({
+          cipherId: activeLogin.id,
+          userId: activeUserId,
+          userVerified: true,
+        });
+
+        await expect(
+          authenticator.makeCredential(makeCredentialParams(), "window"),
+        ).rejects.toThrow(Fido2AuthenticatorErrorCode.NotAllowed);
+        expect(cipherService.updateWithServer).not.toHaveBeenCalled();
+      });
+
+      it("offers the account once the user unlocked it, and saves there in the same session", async () => {
+        userInterfaceSession.confirmNewCredential
+          .mockImplementationOnce(async () => {
+            unlockActiveAccount();
+            return { userVerified: false, retry: true };
+          })
+          .mockResolvedValueOnce({
+            cipherId: activeLogin.id,
+            userId: activeUserId,
+            userVerified: false,
+          });
+
+        await authenticator.makeCredential(makeCredentialParams(), "window");
+
+        expect(userInterface.newSession).toHaveBeenCalledTimes(1);
+        expect(userInterfaceSession.confirmNewCredential.mock.calls[1][0].userIds).toEqual([
+          activeUserId,
+          otherUserId,
+        ]);
+        expect(userInterfaceSession.confirmNewCredential.mock.calls[1][0]).not.toHaveProperty(
+          "lockedUserIds",
+        );
+        expect(cipherService.updateWithServer).toHaveBeenCalledTimes(1);
+        expect(cipherService.updateWithServer).toHaveBeenCalledWith(activeLogin, activeUserId);
+        expect(otherLogin.login.fido2Credentials).toHaveLength(0);
+      });
+
+      it("reports an excluded credential found in the account the user unlocked", async () => {
+        const excluded = createCipherView();
+        vaults.set(activeUserId, [excluded]);
+        userInterfaceSession.confirmNewCredential.mockImplementationOnce(async () => {
+          unlockActiveAccount();
+          return { userVerified: false, retry: true };
+        });
+
+        await expect(
+          authenticator.makeCredential(
+            makeCredentialParams({
+              excludeCredentialDescriptorList: [
+                {
+                  id: parseCredentialId(excluded.login.fido2Credentials[0].credentialId),
+                  type: "public-key",
+                },
+              ],
+            }),
+            "window",
+          ),
+        ).rejects.toThrow(Fido2AuthenticatorErrorCode.NotAllowed);
+
+        expect(userInterfaceSession.confirmNewCredential).toHaveBeenCalledTimes(1);
+        expect(userInterfaceSession.informExcludedCredential).toHaveBeenCalledWith(
+          [excluded.id],
+          [{ userId: activeUserId, cipherId: excluded.id }],
+        );
+        expect(cipherService.updateWithServer).not.toHaveBeenCalled();
+      });
     });
   });
 });

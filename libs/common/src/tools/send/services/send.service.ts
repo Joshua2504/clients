@@ -52,6 +52,19 @@ export class SendService implements InternalSendServiceAbstraction {
     ),
   );
 
+  sendViewsFor$(userId: UserId): Observable<SendView[]> {
+    return this.stateProvider.encryptedStateFor$(userId).pipe(
+      concatMap(([sendsUserId, record]) =>
+        this.sendDecryptionService
+          .decryptSends(
+            Object.values(record || {}).map((data) => new Send(data)),
+            sendsUserId,
+          )
+          .then((sends) => sends.sort(Utils.getSortFunction(this.i18nService, "name"))),
+      ),
+    );
+  }
+
   constructor(
     private accountService: AccountService,
     private keyService: KeyService,
@@ -231,8 +244,8 @@ export class SendService implements InternalSendServiceAbstraction {
     );
   }
 
-  async getFromState(id: string): Promise<Send> {
-    const [, sends] = await this.stateProvider.getEncryptedSends();
+  async getFromState(id: string, userId?: UserId): Promise<Send> {
+    const [, sends] = await this.stateProvider.getEncryptedSends(userId);
     // eslint-disable-next-line
     if (sends == null || !sends.hasOwnProperty(id)) {
       return null;
@@ -275,8 +288,8 @@ export class SendService implements InternalSendServiceAbstraction {
     return decSends;
   }
 
-  async upsert(send: SendData | SendData[]): Promise<any> {
-    const [userId, currentSends] = await this.stateProvider.getEncryptedSends();
+  async upsert(send: SendData | SendData[], userId?: UserId): Promise<any> {
+    const [sendsUserId, currentSends] = await this.stateProvider.getEncryptedSends(userId);
     let sends = currentSends;
     if (sends == null) {
       sends = {};
@@ -290,7 +303,7 @@ export class SendService implements InternalSendServiceAbstraction {
       });
     }
 
-    await this.replace(sends, userId);
+    await this.replace(sends, sendsUserId);
   }
 
   async delete(id: string | string[], userId?: UserId): Promise<any> {

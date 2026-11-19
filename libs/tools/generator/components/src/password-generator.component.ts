@@ -130,10 +130,12 @@ export class PasswordGeneratorComponent implements OnInit, OnChanges, OnDestroy 
 
   async ngOnChanges(changes: SimpleChanges) {
     const account = changes?.account;
+    // The first value is published by `ngOnInit`; a later one switches the bound account.
     if (
       account &&
-      account.currentValue.id &&
-      account.previousValue.id !== account.currentValue.id
+      !account.firstChange &&
+      account.currentValue?.id &&
+      account.previousValue?.id !== account.currentValue.id
     ) {
       this.log.debug(
         {
@@ -142,7 +144,7 @@ export class PasswordGeneratorComponent implements OnInit, OnChanges, OnDestroy 
         },
         "account input change detected",
       );
-      this.account$.next(account.currentValue.id);
+      this.account$.next(account.currentValue);
     }
   }
 
@@ -221,6 +223,8 @@ export class PasswordGeneratorComponent implements OnInit, OnChanges, OnDestroy 
 
       this.log.info({ userId: account.id }, "account not specified; using active account settings");
       this.account$.next(account);
+    } else {
+      this.account$.next(this.account);
     }
 
     this.generatorService

@@ -5,6 +5,7 @@ import { mock, MockProxy } from "jest-mock-extended";
 import { BehaviorSubject } from "rxjs";
 
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 import { DialogRef } from "@bitwarden/components";
 
@@ -14,24 +15,29 @@ import { ShareLinkService } from "../../services/share-link.service";
 import { ShareButtonComponent } from "./share-button.component";
 
 @Component({
-  template: `<app-share-button [cipher]="cipher" />`,
+  template: `<app-share-button [cipher]="cipher" [userId]="userId" />`,
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [ShareButtonComponent],
 })
 class HostComponent {
   cipher = Object.assign(new CipherView(), { id: "cipher-id", name: "item" });
+  userId: UserId | undefined = hostUserId;
 }
+
+/** The account the host binds. Undefined, as on web and desktop, unless a test sets it. */
+let hostUserId: UserId | undefined;
 
 describe("ShareButtonComponent", () => {
   let canBeShared: BehaviorSubject<boolean>;
   let shareItemService: MockProxy<ShareItemService>;
   let hostDialog: MockProxy<DialogRef> | null;
+  let shareLinkService: MockProxy<ShareLinkService>;
 
   const button = (fixture: ComponentFixture<HostComponent>) =>
     fixture.debugElement.query(By.css("button"));
 
   async function render(): Promise<ComponentFixture<HostComponent>> {
-    const shareLinkService = mock<ShareLinkService>();
+    shareLinkService = mock<ShareLinkService>();
     shareLinkService.cipherCanBeShared$.mockReturnValue(canBeShared.asObservable());
 
     const i18nService = mock<I18nService>();
@@ -56,6 +62,45 @@ describe("ShareButtonComponent", () => {
     canBeShared = new BehaviorSubject(true);
     shareItemService = mock<ShareItemService>();
     hostDialog = null;
+    hostUserId = undefined;
+  });
+
+  it("asks whether the active account can share when no account is given", async () => {
+    const fixture = await render();
+
+    expect(shareLinkService.cipherCanBeShared$).toHaveBeenCalledWith(
+      fixture.componentInstance.cipher,
+    );
+  });
+
+  describe("for an item of an account other than the active one", () => {
+    const otherUserId = "other-user" as UserId;
+
+    beforeEach(() => {
+      hostUserId = otherUserId;
+    });
+
+    it("asks whether that account can share the item", async () => {
+      const fixture = await render();
+
+      expect(shareLinkService.cipherCanBeShared$).toHaveBeenCalledWith(
+        fixture.componentInstance.cipher,
+        otherUserId,
+      );
+      expect(shareLinkService.cipherCanBeShared$).toHaveBeenCalledTimes(1);
+    });
+
+    it("starts the share flow for that account", async () => {
+      const fixture = await render();
+
+      button(fixture).nativeElement.click();
+      await fixture.whenStable();
+
+      expect(shareItemService.share).toHaveBeenCalledWith(fixture.componentInstance.cipher, {
+        alreadyVerified: false,
+        userId: otherUserId,
+      });
+    });
   });
 
   it("renders a button for an item that can be shared", async () => {

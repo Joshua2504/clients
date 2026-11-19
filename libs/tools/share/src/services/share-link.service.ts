@@ -28,7 +28,7 @@ import { SendApiService } from "@bitwarden/common/tools/send/services/send-api.s
 import { SendService } from "@bitwarden/common/tools/send/services/send.service.abstraction";
 import { AuthType } from "@bitwarden/common/tools/send/types/auth-type";
 import { SendType } from "@bitwarden/common/tools/send/types/send-type";
-import { CipherId } from "@bitwarden/common/types/guid";
+import { CipherId, UserId } from "@bitwarden/common/types/guid";
 import { FolderService } from "@bitwarden/common/vault/abstractions/folder/folder.service.abstraction";
 import { RevealedCipherService } from "@bitwarden/common/vault/abstractions/revealed-cipher.service";
 import { CipherRepromptType, CipherType } from "@bitwarden/common/vault/enums";
@@ -74,15 +74,21 @@ export class ShareLinkService {
   private folderService = inject(FolderService);
   private revealedCipherService = inject(RevealedCipherService);
 
-  private cipherId = new BehaviorSubject<CipherId | undefined>(undefined);
-  /** Observable of all active share links. */
-  links$ = this.cipherId.pipe(
-    switchMap((cipherId) => {
-      if (!cipherId) {
+  /** The cipher whose links are listed, and the account that owns it when one was named. */
+  private target = new BehaviorSubject<{ cipherId: CipherId; userId?: UserId } | undefined>(
+    undefined,
+  );
+  /** Observable of all active share links. They are read from the account of {@link setCipher}. */
+  links$ = this.target.pipe(
+    switchMap((target) => {
+      if (!target) {
         return of([] as ShareLink[]);
       }
-      return this.sendService.sendViews$.pipe(
-        switchMap((sendViews) => this.getLinksForCipher(cipherId, sendViews)),
+      const { cipherId, userId } = target;
+      const sendViews$ =
+        userId == null ? this.sendService.sendViews$ : this.sendService.sendViewsFor$(userId);
+      return sendViews$.pipe(
+        switchMap((sendViews) => this.getLinksForCipher(cipherId, sendViews, userId)),
       );
     }),
     shareReplay({ bufferSize: 1, refCount: true }),
@@ -96,6 +102,9 @@ export class ShareLinkService {
    * @param emails - Comma-delimited email addresses
    * @param expiryHours - Number of hours until expiry
    * @param oneTimeShare - Whether the link can only be viewed once
+   * @param explicitUserId - The account whose vault holds the cipher. The Send is created in
+   * that account, with its folder, collection and organization names and its server's link.
+   * Defaults to the active account.
    * @returns The created share link
    */
   async createShareLink(
@@ -103,6 +112,7 @@ export class ShareLinkService {
     emails: string[],
     expiryHours: number,
     oneTimeShare: boolean,
+    explicitUserId?: UserId,
   ): Promise<string | undefined> {
     const sendView = new SendView();
     sendView.name = this.i18nService.t("itemSendTitle", cipherView.name);
@@ -120,7 +130,8 @@ export class ShareLinkService {
     }
 
     // Fetch cipher metadata
-    const userId = await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId));
+    const userId =
+      explicitUserId ?? (await firstValueFrom(this.accountService.activeAccount$.pipe(getUserId)));
     let folderName: string | undefined = undefined;
     if (sharedCipherView.folderId) {
       const folder = await firstValueFrom(
@@ -158,8 +169,8 @@ export class ShareLinkService {
     };
 
     const createdSdkSendView = await this.sendApiService.mutateSend(sendView, userId, null as any);
-    await this.sendApiService.refreshAfterMutation(createdSdkSendView.id as any);
-    const env = await firstValueFrom(this.environmentService.environment$);
+    await this.sendApiService.refreshAfterMutation(createdSdkSendView.id as any, explicitUserId);
+    const env = await this.environment(explicitUserId);
     if (!createdSdkSendView.key) {
       return;
     }
@@ -192,14 +203,36 @@ export class ShareLinkService {
     return sharedCipherView;
   }
 
-  setCipher(cipherId: CipherId | undefined) {
-    this.cipherId.next(cipherId);
+  /**
+   * Sets the cipher whose links {@link links$} lists and {@link deleteLink} deletes.
+   * @param userId - The account whose vault holds the cipher. Defaults to the active account.
+   */
+  setCipher(cipherId: CipherId | undefined, userId?: UserId) {
+    this.target.next(cipherId == null ? undefined : { cipherId, userId });
+  }
+
+  /** The environment of `userId`, whose server the links point to. Defaults to the active account. */
+  private environment(userId: UserId | undefined) {
+    return firstValueFrom(
+      userId == null
+        ? this.environmentService.environment$
+        : this.environmentService.getEnvironment$(userId),
+    );
+  }
+
+  /** `userId` when given, else the active account. */
+  private userId$(userId: UserId | undefined): Observable<UserId> {
+    return userId == null ? this.accountService.activeAccount$.pipe(getUserId) : of(userId);
   }
 
   /** Recalculates active share links for a given cipher. */
-  private async getLinksForCipher(cipherId: CipherId, sendViews: SendView[]): Promise<ShareLink[]> {
+  private async getLinksForCipher(
+    cipherId: CipherId,
+    sendViews: SendView[],
+    userId?: UserId,
+  ): Promise<ShareLink[]> {
     const newLinks: ShareLink[] = [];
-    const env = await firstValueFrom(this.environmentService.environment$);
+    const env = await this.environment(userId);
     for (const send of sendViews) {
       if (send.type === SendType.Item && (send.data?.data?.id as any) === cipherId && send.key) {
         const sendLink = env.getSendUrl() + send.accessId + "/" + Utils.fromArrayToUrlB64(send.key);
@@ -216,40 +249,39 @@ export class ShareLinkService {
     return newLinks;
   }
 
-  /** Deletes a share link by Send id. */
+  /** Deletes a share link by Send id, in the account of {@link setCipher}. */
   async deleteLink(sendId: string): Promise<void> {
+    const userId = this.target.value?.userId;
     const link = (await firstValueFrom(this.links$)).find((l) => l.sendId === sendId);
     if (link) {
-      await this.sendApiService.delete(link.sendId);
+      if (userId == null) {
+        await this.sendApiService.delete(link.sendId);
+      } else {
+        await this.sendApiService.delete(link.sendId, userId);
+      }
     }
   }
 
-  /** Returns whether a cipher can be shared or not */
-  cipherCanBeShared$(c: CipherViewLike | undefined): Observable<boolean> {
+  /**
+   * Returns whether a cipher can be shared or not
+   * @param userId - The account whose vault holds the cipher: its premium, organizations,
+   * policies and collections decide. Defaults to the active account.
+   */
+  cipherCanBeShared$(c: CipherViewLike | undefined, userId?: UserId): Observable<boolean> {
+    const userId$ = this.userId$(userId);
     return combineLatest([
       this.configService.getFeatureFlag$(FeatureFlag.PM34203TemporaryItemSharing),
-      this.accountService.activeAccount$.pipe(
-        getUserId,
+      userId$.pipe(
         switchMap((userId) =>
           this.billingAccountProfileStateService.hasPremiumFromAnySource$(userId),
         ),
       ),
-      this.accountService.activeAccount$.pipe(
-        getUserId,
-        switchMap((userId) => this.organizationService.organizations$(userId)),
-      ),
-      this.accountService.activeAccount$.pipe(
-        getUserId,
+      userId$.pipe(switchMap((userId) => this.organizationService.organizations$(userId))),
+      userId$.pipe(
         switchMap((userId) => this.policyService.policiesByType$(PolicyType.SendControls, userId)),
       ),
-      this.accountService.activeAccount$.pipe(
-        getUserId,
-        switchMap((userId) => this.collectionService.decryptedCollections$(userId)),
-      ),
-      this.accountService.activeAccount$.pipe(
-        getUserId,
-        switchMap((userId) => this.revealedCipherService.revealed$(userId)),
-      ),
+      userId$.pipe(switchMap((userId) => this.collectionService.decryptedCollections$(userId))),
+      userId$.pipe(switchMap((userId) => this.revealedCipherService.revealed$(userId))),
     ]).pipe(
       map(([ffEnabled, hasPremium, organizations, sendControlsPolicies, collections, revealed]) => {
         // Sharing feature must be enabled and, as a premium feature, accessible

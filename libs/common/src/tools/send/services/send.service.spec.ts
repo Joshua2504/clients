@@ -653,6 +653,51 @@ describe("SendService", () => {
     ]);
   });
 
+  it("upserts into the given user and leaves the active account's sends alone", async () => {
+    const otherUserId = Utils.newGuid() as UserId;
+    await sendService.replace({ "1": testSendData("1", "Other 1") }, otherUserId);
+
+    await sendService.upsert(testSendData("2", "Other 2"), otherUserId);
+
+    expect(await firstValueFrom(sendService.get$("1", otherUserId))).toEqual(
+      testSend("1", "Other 1"),
+    );
+    expect(await firstValueFrom(sendService.get$("2", otherUserId))).toEqual(
+      testSend("2", "Other 2"),
+    );
+    expect(await firstValueFrom(sendService.sends$)).toEqual([testSend("1", "Test Send")]);
+  });
+
+  it("reads a send from the state of the given user", async () => {
+    const otherUserId = Utils.newGuid() as UserId;
+    await sendService.replace({ "2": testSendData("2", "Other 2") }, otherUserId);
+
+    expect(await sendService.getFromState("2", otherUserId)).toEqual(testSend("2", "Other 2"));
+    expect(await sendService.getFromState("1", otherUserId)).toBeNull();
+    expect(await sendService.getFromState("2")).toBeNull();
+  });
+
+  describe("sendViewsFor$", () => {
+    it("decrypts the sends of the given user for that user, not the active account", async () => {
+      const otherUserId = Utils.newGuid() as UserId;
+      await sendService.replace({ "2": testSendData("2", "Other 2") }, otherUserId);
+      const views = [testSendViewData("2", "Other 2")];
+      sendDecryptionService.decryptSends.mockResolvedValue(views);
+
+      const result = await firstValueFrom(sendService.sendViewsFor$(otherUserId));
+
+      expect(result).toEqual(views);
+      expect(sendDecryptionService.decryptSends).toHaveBeenCalledWith(
+        [testSend("2", "Other 2")],
+        otherUserId,
+      );
+      expect(sendDecryptionService.decryptSends).not.toHaveBeenCalledWith(
+        expect.anything(),
+        mockUserId,
+      );
+    });
+  });
+
   it("replace", async () => {
     await sendService.replace({ "2": testSendData("2", "test 2") }, mockUserId);
 

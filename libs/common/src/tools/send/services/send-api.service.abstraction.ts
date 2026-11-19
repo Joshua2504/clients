@@ -2,6 +2,7 @@
 import { EncArrayBuffer } from "@bitwarden/legacy-crypto";
 
 import { SendAccessToken } from "../../../auth/send-access";
+import { UserId } from "../../../types/guid";
 import { Send } from "../models/domain/send";
 import { SendAccessResponse } from "../models/response/send-access.response";
 import { SendFileDownloadDataResponse } from "../models/response/send-file-download-data.response";
@@ -23,7 +24,11 @@ export abstract class SendApiService {
    * requirement — and updates local send state with the result.
    */
   abstract removeAuth(id: string): Promise<any>;
-  abstract delete(id: string): Promise<any>;
+  /**
+   * Deletes a send on the server and from local state.
+   * @param userId The account that owns the send. Defaults to the active account.
+   */
+  abstract delete(id: string, userId?: UserId): Promise<any>;
   /**
    * Persists a send.
    *

@@ -1,5 +1,6 @@
 import { inject, Injectable, Injector } from "@angular/core";
 
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherViewLike } from "@bitwarden/common/vault/utils/cipher-view-like-utils";
 
 import { SHARE_ITEM_PRESENTER, ShareItemPresenter } from "../tokens/share-item-presenter.token";
@@ -16,6 +17,11 @@ export interface ShareItemOptions {
    * asking a second time.
    */
   alreadyVerified?: boolean;
+  /**
+   * The account whose vault holds the item. The re-prompt asks for its master password and the
+   * sharing surface shares from it. Defaults to the active account.
+   */
+  userId?: UserId;
 }
 
 /**
@@ -46,11 +52,19 @@ export class ShareItemService {
     if (!options.alreadyVerified) {
       const passwordReprompt = this.injector.get<SharePasswordReprompt>(SHARE_PASSWORD_REPROMPT);
 
-      if (!(await passwordReprompt.passwordRepromptCheck(cipher))) {
+      const passed =
+        options.userId == null
+          ? await passwordReprompt.passwordRepromptCheck(cipher)
+          : await passwordReprompt.passwordRepromptCheck(cipher, options.userId);
+      if (!passed) {
         return;
       }
     }
 
-    await presenter.present(cipher);
+    if (options.userId == null) {
+      await presenter.present(cipher);
+    } else {
+      await presenter.present(cipher, options.userId);
+    }
   }
 }

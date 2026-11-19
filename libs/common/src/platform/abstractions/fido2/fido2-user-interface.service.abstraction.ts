@@ -35,6 +35,25 @@ export interface NewCredentialParams {
    * that ignores this saves to the active account.
    */
   userIds?: UserId[];
+
+  /**
+   * The accounts that could receive the credential but are locked. See
+   * {@link Fido2RetryAnswer}.
+   */
+  lockedUserIds?: UserId[];
+}
+
+/**
+ * The answer of a user interface in which the user unlocked an account instead of answering.
+ *
+ * A request names the accounts that are logged in and would serve it, but are locked
+ * (`lockedUserIds`). A user interface may offer to unlock them. When the user unlocked one, the
+ * user interface answers with `retry`, and the authenticator runs the request again from the
+ * search of the vaults and asks anew, in the same session. A user interface that ignores
+ * `lockedUserIds` never answers with it.
+ */
+export interface Fido2RetryAnswer {
+  retry?: boolean;
 }
 
 /**
@@ -52,6 +71,12 @@ export interface PickCredentialParams {
    * organization has the same id in every member's vault.
    */
   cipherRefs?: AccountCipherRef[];
+
+  /**
+   * The accounts that could hold further credentials but are locked. See
+   * {@link Fido2RetryAnswer}.
+   */
+  lockedUserIds?: UserId[];
 
   /**
    * Whether or not the user must be verified before completing the operation.
@@ -101,11 +126,14 @@ export abstract class Fido2UserInterfaceSession {
    * `userId` is the account of the picked cipher, as named in {@link PickCredentialParams.cipherRefs}.
    * It is required when the credentials offered belong to more than one account; the authenticator
    * rejects an answer that does not name one of the offered credentials. `userVerified` must be
-   * the result of verifying the user of that account.
+   * the result of verifying the user of that account. With `retry`, nothing was picked: see
+   * {@link Fido2RetryAnswer}.
    */
   abstract pickCredential(
     params: PickCredentialParams,
-  ): Promise<{ cipherId: string | undefined; userVerified: boolean; userId?: UserId }>;
+  ): Promise<
+    { cipherId: string | undefined; userVerified: boolean; userId?: UserId } & Fido2RetryAnswer
+  >;
 
   /**
    * Ask the user to confirm the creation of a new credential.
@@ -115,11 +143,12 @@ export abstract class Fido2UserInterfaceSession {
    * @returns The ID of the cipher where the new credential should be saved. `userId` is the
    * account whose vault holds that cipher, one of {@link NewCredentialParams.userIds}; when it is
    * left out, the cipher is looked up in the active account. `userVerified` must be the result
-   * of verifying the user of that account.
+   * of verifying the user of that account. With `retry`, nothing was confirmed: see
+   * {@link Fido2RetryAnswer}.
    */
   abstract confirmNewCredential(
     params: NewCredentialParams,
-  ): Promise<{ cipherId?: string; userVerified: boolean; userId?: UserId }>;
+  ): Promise<{ cipherId?: string; userVerified: boolean; userId?: UserId } & Fido2RetryAnswer>;
 
   /**
    * Make sure that the vault is unlocked.
@@ -141,8 +170,15 @@ export abstract class Fido2UserInterfaceSession {
 
   /**
    * Inform the user that the operation was cancelled because their vault does not contain any useable credentials.
+   *
+   * @param options.lockedUserIds The accounts that could hold a credential but are locked.
+   * @returns Nothing when the user was informed. `retry` when the user unlocked one of
+   * `lockedUserIds` instead: see {@link Fido2RetryAnswer}.
    */
-  abstract informCredentialNotFound(abortController?: AbortController): Promise<void>;
+  abstract informCredentialNotFound(
+    abortController?: AbortController,
+    options?: { lockedUserIds?: UserId[] },
+  ): Promise<void | Fido2RetryAnswer>;
 
   /**
    * Close the session, including any windows that may be open.

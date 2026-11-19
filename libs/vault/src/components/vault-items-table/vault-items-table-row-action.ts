@@ -1,3 +1,4 @@
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherViewLike } from "@bitwarden/common/vault/utils/cipher-view-like-utils";
 import { BitwardenIcon } from "@bitwarden/components";
 
@@ -15,6 +16,12 @@ import { BitwardenIcon } from "@bitwarden/components";
  *   },
  * ]);
  * ```
+ *
+ * Each callback also receives `userId`: the account whose vault holds `item`, when the menu was
+ * given one. The browser popup passes it for a row of an account other than the active one. An
+ * action that reads or changes the item must do so for that account and never for the active
+ * account in its place; an item id does not identify an account. Without `userId` the item is
+ * the active account's, which is all web and desktop show.
  */
 export type VaultItemsTableRowAction<C extends CipherViewLike> = {
   /** Stable identifier. Drives the menu item's QA id and the `@for` track expression. */
@@ -26,13 +33,13 @@ export type VaultItemsTableRowAction<C extends CipherViewLike> = {
   icon: BitwardenIcon;
 
   /** Executes the action for `item` when the menu item is chosen. */
-  run: (item: C) => void | Promise<void>;
+  run: (item: C, userId?: UserId) => void | Promise<void>;
 
   /** Whether the action shows for `item`. Omit for always-shown. */
-  show?: (item: C) => boolean;
+  show?: (item: C, userId?: UserId) => boolean;
 
   /** Whether the shown action is disabled for `item`. Omit for always-enabled. */
-  disabled?: (item: C) => boolean;
+  disabled?: (item: C, userId?: UserId) => boolean;
 
   /**
    * Whether the action is gated behind a premium upgrade for `item` — Archive, for one, is only

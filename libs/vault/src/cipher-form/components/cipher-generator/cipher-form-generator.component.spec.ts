@@ -1,8 +1,11 @@
-import { Component, EventEmitter, Output } from "@angular/core";
+import { Component, EventEmitter, Input, Output } from "@angular/core";
 import { ComponentFixture, TestBed } from "@angular/core/testing";
 import { By } from "@angular/platform-browser";
+import { BehaviorSubject } from "rxjs";
 
+import { Account, AccountService } from "@bitwarden/common/auth/abstractions/account.service";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+import { UserId } from "@bitwarden/common/types/guid";
 import { GeneratorModule } from "@bitwarden/generator-components";
 
 import { CipherFormGeneratorComponent } from "../../..";
@@ -17,6 +20,9 @@ class MockPasswordGeneratorComponent {
   // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
   // eslint-disable-next-line @angular-eslint/prefer-output-emitter-ref
   @Output() onGenerated = new EventEmitter();
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-signals
+  @Input() account: Account | null = null;
 }
 
 // FIXME(https://bitwarden.atlassian.net/browse/CL-764): Migrate to OnPush
@@ -29,16 +35,33 @@ class MockUsernameGeneratorComponent {
   // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
   // eslint-disable-next-line @angular-eslint/prefer-output-emitter-ref
   @Output() onGenerated = new EventEmitter();
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-signals
+  @Input() account: Account | null = null;
 }
 
 describe("CipherFormGeneratorComponent", () => {
   let component: CipherFormGeneratorComponent;
   let fixture: ComponentFixture<CipherFormGeneratorComponent>;
 
+  const otherUserId = "other-user" as UserId;
+  const accounts$ = new BehaviorSubject<Record<string, { email: string }>>({});
+  const accountService = {
+    accounts$,
+    get activeAccount$(): never {
+      throw new Error("The form generator must not read the active account.");
+    },
+  };
+
   beforeEach(async () => {
+    accounts$.next({ [otherUserId]: { email: "other@example.com" } });
+
     await TestBed.configureTestingModule({
       imports: [CipherFormGeneratorComponent],
-      providers: [{ provide: I18nService, useValue: { t: (key: string) => key } }],
+      providers: [
+        { provide: I18nService, useValue: { t: (key: string) => key } },
+        { provide: AccountService, useValue: accountService },
+      ],
       // FIXME(PM-18598): Replace unknownElements and unknownProperties with actual imports
       errorOnUnknownProperties: false,
     })
@@ -104,6 +127,52 @@ describe("CipherFormGeneratorComponent", () => {
 
       expect(component.valueGenerated.emit).toHaveBeenCalledTimes(1);
       expect(component.valueGenerated.emit).toHaveBeenCalledWith("new-cred-username!");
+    });
+  });
+
+  describe("account", () => {
+    const passwordGenerator = () =>
+      fixture.debugElement.query(By.directive(MockPasswordGeneratorComponent));
+    const usernameGenerator = () =>
+      fixture.debugElement.query(By.directive(MockUsernameGeneratorComponent));
+
+    it("leaves the generators on the active account when no account is named", () => {
+      component.type = "password";
+      fixture.detectChanges();
+
+      expect(passwordGenerator().componentInstance.account).toBeNull();
+    });
+
+    it("binds the password generator to the named account", () => {
+      component.type = "password";
+      component.userId = otherUserId;
+      fixture.detectChanges();
+
+      expect(passwordGenerator().componentInstance.account).toEqual({
+        id: otherUserId,
+        email: "other@example.com",
+      });
+    });
+
+    it("binds the username generator to the named account", () => {
+      component.type = "username";
+      component.userId = otherUserId;
+      fixture.detectChanges();
+
+      expect(usernameGenerator().componentInstance.account).toEqual({
+        id: otherUserId,
+        email: "other@example.com",
+      });
+    });
+
+    it("renders no generator for a named account that is gone, instead of the active account's", () => {
+      component.type = "password";
+      component.userId = otherUserId;
+      accounts$.next({});
+      fixture.detectChanges();
+
+      expect(passwordGenerator()).toBeNull();
+      expect(usernameGenerator()).toBeNull();
     });
   });
 });

@@ -1,6 +1,7 @@
 import { TestBed } from "@angular/core/testing";
 import { mock, MockProxy } from "jest-mock-extended";
 
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 
 import { SHARE_ITEM_PRESENTER, ShareItemPresenter } from "../tokens/share-item-presenter.token";
@@ -62,6 +63,32 @@ describe("ShareItemService", () => {
     await service.share(listViewRow);
 
     expect(presenter.present).toHaveBeenCalledWith(listViewRow);
+  });
+
+  describe("for an item of an account other than the active one", () => {
+    const otherUserId = "other-user" as UserId;
+
+    it("re-prompts for that account and presents the item for it", async () => {
+      await service.share(cipher, { userId: otherUserId });
+
+      expect(passwordReprompt.passwordRepromptCheck).toHaveBeenCalledWith(cipher, otherUserId);
+      expect(presenter.present).toHaveBeenCalledWith(cipher, otherUserId);
+    });
+
+    it("does not present when that account's re-prompt fails", async () => {
+      passwordReprompt.passwordRepromptCheck.mockResolvedValue(false);
+
+      await service.share(cipher, { userId: otherUserId });
+
+      expect(presenter.present).not.toHaveBeenCalled();
+    });
+
+    it("carries the account to the presenter when the caller has already verified", async () => {
+      await service.share(cipher, { alreadyVerified: true, userId: otherUserId });
+
+      expect(passwordReprompt.passwordRepromptCheck).not.toHaveBeenCalled();
+      expect(presenter.present).toHaveBeenCalledWith(cipher, otherUserId);
+    });
   });
 
   it("fails rather than sharing when the client provided no re-prompt", async () => {

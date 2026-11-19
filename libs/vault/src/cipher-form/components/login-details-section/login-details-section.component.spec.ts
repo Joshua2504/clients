@@ -9,6 +9,7 @@ import { AuditService } from "@bitwarden/common/abstractions/audit.service";
 import { EventCollectionService, EventType } from "@bitwarden/common/dirt/event-logs";
 import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
+import { UserId } from "@bitwarden/common/types/guid";
 import { Cipher } from "@bitwarden/common/vault/models/domain/cipher";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
 import { Fido2CredentialView } from "@bitwarden/common/vault/models/view/fido2-credential.view";
@@ -255,6 +256,30 @@ describe("LoginDetailsSectionComponent", () => {
       expect(component.loginDetailsForm.controls.username.value).toEqual("generated-username");
     }));
 
+    it("generates the username for the active account when the form names no account", fakeAsync(() => {
+      generationService.generateUsername.mockResolvedValue("generated-username");
+
+      getGenerateUsernameBtn().click();
+      tick();
+
+      expect(generationService.generateUsername).toHaveBeenCalledTimes(1);
+      expect(generationService.generateUsername.mock.calls[0]).toHaveLength(1);
+    }));
+
+    it("generates the username for the account the form writes to", fakeAsync(() => {
+      cipherFormContainer.config.userId = "form-account" as UserId;
+      generationService.generateUsername.mockResolvedValue("generated-username");
+
+      getGenerateUsernameBtn().click();
+      tick();
+
+      expect(generationService.generateUsername).toHaveBeenCalledWith(
+        cipherFormContainer.website,
+        "form-account",
+      );
+      delete cipherFormContainer.config.userId;
+    }));
+
     it("should not replace an existing username if generation returns null", fakeAsync(() => {
       generationService.generateUsername.mockResolvedValue(null);
 
@@ -339,6 +364,26 @@ describe("LoginDetailsSectionComponent", () => {
         tick();
 
         expect(component.loginDetailsForm.controls.password.value).toEqual("generated-password");
+      }));
+
+      it("generates the password for the active account when the form names no account", fakeAsync(() => {
+        generationService.generatePassword.mockResolvedValue("generated-password");
+
+        getGeneratePasswordBtn().click();
+        tick();
+
+        expect(generationService.generatePassword).toHaveBeenCalledWith();
+      }));
+
+      it("generates the password for the account the form writes to", fakeAsync(() => {
+        cipherFormContainer.config.userId = "form-account" as UserId;
+        generationService.generatePassword.mockResolvedValue("generated-password");
+
+        getGeneratePasswordBtn().click();
+        tick();
+
+        expect(generationService.generatePassword).toHaveBeenCalledWith("form-account");
+        delete cipherFormContainer.config.userId;
       }));
 
       it("should not replace an existing password if generation returns null", fakeAsync(() => {

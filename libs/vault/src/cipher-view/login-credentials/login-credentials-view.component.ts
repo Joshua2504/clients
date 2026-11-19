@@ -63,6 +63,12 @@ type TotpCodeValues = {
 export class LoginCredentialsViewComponent implements OnChanges {
   private readonly cipherAccountContext = inject(CipherAccountContext);
 
+  /**
+   * The account the host named, for the premium badge: the badge and its upgrade prompt are then
+   * about that account. Undefined when the view follows the active account.
+   */
+  protected readonly premiumBadgeUserId = this.cipherAccountContext.explicitUserId;
+
   // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
   // eslint-disable-next-line @angular-eslint/prefer-signals
   @Input() cipher: CipherView;

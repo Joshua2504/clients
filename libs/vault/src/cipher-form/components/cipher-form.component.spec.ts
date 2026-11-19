@@ -10,6 +10,7 @@ import { ConfigService } from "@bitwarden/common/platform/abstractions/config/co
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
 import { CipherArchiveService } from "@bitwarden/common/vault/abstractions/cipher-archive.service";
 import { RestrictedCipherWriteError } from "@bitwarden/common/vault/abstractions/cipher.service";
+import { CipherType } from "@bitwarden/common/vault/enums";
 import { Cipher } from "@bitwarden/common/vault/models/domain/cipher";
 import { AttachmentView } from "@bitwarden/common/vault/models/view/attachment.view";
 import { CipherView } from "@bitwarden/common/vault/models/view/cipher.view";
@@ -34,6 +35,7 @@ describe("CipherFormComponent", () => {
 
   beforeEach(async () => {
     decryptCipher.mockClear();
+    mockAccountService.activeAccount$ = of({ id: "user-id" }) as Observable<Account | null>;
 
     await TestBed.configureTestingModule({
       imports: [CipherFormComponent, ReactiveFormsModule],
@@ -44,7 +46,12 @@ describe("CipherFormComponent", () => {
         { provide: CipherFormService, useValue: mockAddEditFormService },
         {
           provide: CipherFormCacheService,
-          useValue: { init: jest.fn(), getCachedCipherView: jest.fn(), clearCache: jest.fn() },
+          useValue: {
+            init: jest.fn(),
+            getCachedCipherView: jest.fn(),
+            clearCache: jest.fn(),
+            useAccount: jest.fn(),
+          },
         },
         {
           provide: ViewCacheService,
@@ -239,6 +246,46 @@ describe("CipherFormComponent", () => {
       await component.ngOnInit();
 
       expect(component["updatedCipherView"]?.archivedDate).toBe(cipherView.archivedDate);
+    });
+  });
+
+  describe("cached draft", () => {
+    let useAccount: jest.SpyInstance;
+    let getCachedCipherView: jest.SpyInstance;
+
+    beforeEach(() => {
+      // The component provides its own cache service.
+      const cacheService = component["cipherFormCacheService"];
+      useAccount = jest.spyOn(cacheService, "useAccount");
+      getCachedCipherView = jest.spyOn(cacheService, "getCachedCipherView");
+    });
+
+    it("names the form's account before it reads the cached draft", async () => {
+      const order: string[] = [];
+      useAccount.mockImplementation(() => order.push("useAccount"));
+      getCachedCipherView.mockImplementation(() => {
+        order.push("read");
+        return null;
+      });
+      component.config = {
+        mode: "add",
+        cipherType: CipherType.Login,
+        userId: "other-account",
+      } as unknown as CipherFormConfig;
+
+      await component.ngOnInit();
+
+      expect(useAccount).toHaveBeenCalledWith("other-account");
+      expect(order[0]).toBe("useAccount");
+      expect(order).toContain("read");
+    });
+
+    it("names the active account when the form's config names none", async () => {
+      component.config = { mode: "add", cipherType: CipherType.Login } as CipherFormConfig;
+
+      await component.ngOnInit();
+
+      expect(useAccount).toHaveBeenCalledWith("user-id");
     });
   });
 

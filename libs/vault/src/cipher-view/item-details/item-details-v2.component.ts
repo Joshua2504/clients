@@ -24,6 +24,7 @@ import {
 
 import { OrgIconDirective } from "../../components/org-icon.directive";
 import { Vfo1I18nPipe } from "../../pipes/vfo1-i18n.pipe";
+import { CipherAccountContext } from "../../services/cipher-account-context";
 import { Vfo1TerminologyService } from "../../services/vfo1-terminology.service";
 import { ITEM_DETAILS_BADGE, ItemDetailsBadge } from "../../tokens/item-details-badge.token";
 import { sharedFolderDisplayName } from "../../utils/shared-folder-name";
@@ -46,6 +47,9 @@ import { sharedFolderDisplayName } from "../../utils/shared-folder-name";
 })
 export class ItemDetailsV2Component {
   private readonly vfo1TerminologyService = inject(Vfo1TerminologyService);
+
+  /** The account the host named: its icons server serves the favicon. Undefined for the active account. */
+  protected readonly iconUserId = inject(CipherAccountContext).explicitUserId;
   protected readonly vfo1Enabled = this.vfo1TerminologyService.enabled;
 
   /** Optional host-provided badge on the item name row; null when unprovided. */

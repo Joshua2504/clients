@@ -1,7 +1,8 @@
 import { ChangeDetectionStrategy, Component, inject, input } from "@angular/core";
 import { toObservable, toSignal } from "@angular/core/rxjs-interop";
-import { switchMap } from "rxjs";
+import { combineLatest, switchMap } from "rxjs";
 
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherViewLike } from "@bitwarden/common/vault/utils/cipher-view-like-utils";
 import { ButtonModule, DialogRef } from "@bitwarden/components";
 import { I18nPipe } from "@bitwarden/ui-common";
@@ -29,6 +30,11 @@ import { ShareLinkService } from "../../services/share-link.service";
 export class ShareButtonComponent {
   /** The item to share. */
   readonly cipher = input.required<CipherViewLike>();
+  /**
+   * The account whose vault holds the item. Whether it can be shared, the re-prompt and the Send
+   * are then that account's. Defaults to the active account.
+   */
+  readonly userId = input<UserId | undefined>(undefined);
   /** Whether to skip the master password reprompt when opening the share form */
   readonly skipPasswordPrompt = input<boolean>(false);
 
@@ -39,15 +45,21 @@ export class ShareButtonComponent {
   private readonly hostDialog = inject(DialogRef, { optional: true });
 
   protected readonly canShare = toSignal(
-    toObservable(this.cipher).pipe(
-      switchMap((cipher) => this.shareLinkService.cipherCanBeShared$(cipher)),
+    combineLatest([toObservable(this.cipher), toObservable(this.userId)]).pipe(
+      switchMap(([cipher, userId]) =>
+        userId == null
+          ? this.shareLinkService.cipherCanBeShared$(cipher)
+          : this.shareLinkService.cipherCanBeShared$(cipher, userId),
+      ),
     ),
     { initialValue: false },
   );
 
   protected async share(): Promise<void> {
+    const userId = this.userId();
     await this.shareItemService.share(this.cipher(), {
       alreadyVerified: this.skipPasswordPrompt() || this.hostDialog != null,
+      ...(userId == null ? {} : { userId }),
     });
     await this.hostDialog?.close();
   }

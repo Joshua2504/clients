@@ -8,8 +8,9 @@ import {
   untracked,
 } from "@angular/core";
 import { toObservable, toSignal } from "@angular/core/rxjs-interop";
-import { switchMap } from "rxjs";
+import { combineLatest, switchMap } from "rxjs";
 
+import { UserId } from "@bitwarden/common/types/guid";
 import { CipherViewLike } from "@bitwarden/common/vault/utils/cipher-view-like-utils";
 
 import { ShareItemService } from "../../services/share-item.service";
@@ -52,6 +53,14 @@ export class ShareLinkMenuItemDirective {
   /** The item to share. */
   readonly cipher = input.required<CipherViewLike>({ alias: "appShareLinkMenuItem" });
 
+  /**
+   * The account whose vault holds the item, for a host that lists items of an account other than
+   * the active one: `*appShareLinkMenuItem="cipher; userId: userId; let share = share"`. Whether
+   * the item can be shared, the re-prompt and the Send are then that account's. Defaults to the
+   * active account.
+   */
+  readonly userId = input<UserId | undefined>(undefined, { alias: "appShareLinkMenuItemUserId" });
+
   private templateRef = inject<TemplateRef<ShareLinkMenuItemContext>>(
     TemplateRef<ShareLinkMenuItemContext>,
   );
@@ -60,8 +69,12 @@ export class ShareLinkMenuItemDirective {
   private shareItemService = inject(ShareItemService);
 
   private readonly canShare = toSignal(
-    toObservable(this.cipher).pipe(
-      switchMap((cipher) => this.shareLinkService.cipherCanBeShared$(cipher)),
+    combineLatest([toObservable(this.cipher), toObservable(this.userId)]).pipe(
+      switchMap(([cipher, userId]) =>
+        userId == null
+          ? this.shareLinkService.cipherCanBeShared$(cipher)
+          : this.shareLinkService.cipherCanBeShared$(cipher, userId),
+      ),
     ),
     { initialValue: false },
   );
@@ -75,7 +88,12 @@ export class ShareLinkMenuItemDirective {
 
         if (canShare) {
           this.viewContainerRef.createEmbeddedView(this.templateRef, {
-            share: () => this.shareItemService.share(this.cipher()),
+            share: () => {
+              const userId = this.userId();
+              return userId == null
+                ? this.shareItemService.share(this.cipher())
+                : this.shareItemService.share(this.cipher(), { userId });
+            },
           });
         }
       });

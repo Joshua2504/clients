@@ -1,7 +1,10 @@
 import { coerceBooleanProperty } from "@angular/cdk/coercion";
 import { CommonModule } from "@angular/common";
-import { Component, EventEmitter, Input, Output } from "@angular/core";
+import { Component, EventEmitter, inject, Input, Output } from "@angular/core";
+import { BehaviorSubject, map, Observable, of, switchMap } from "rxjs";
 
+import { Account, AccountService } from "@bitwarden/common/auth/abstractions/account.service";
+import { UserId } from "@bitwarden/common/types/guid";
 import { GeneratorModule } from "@bitwarden/generator-components";
 import { AlgorithmInfo, GeneratedCredential } from "@bitwarden/generator-core";
 
@@ -29,6 +32,41 @@ export class CipherFormGeneratorComponent {
   // eslint-disable-next-line @angular-eslint/prefer-signals
   @Input({ required: true })
   type: "password" | "username" = "password";
+
+  private readonly accountService = inject(AccountService);
+  private readonly userId$ = new BehaviorSubject<UserId | undefined>(undefined);
+
+  /**
+   * The account whose options, policies and history the generator uses: the account the cipher
+   * form writes to. Defaults to the active account.
+   */
+  // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals
+  // eslint-disable-next-line @angular-eslint/prefer-signals
+  @Input()
+  set userId(userId: UserId | null | undefined) {
+    this.userId$.next(userId ?? undefined);
+  }
+
+  /**
+   * What the generator is bound to. `account` is null when it follows the active account. While
+   * {@link userId} names an account that is not known (it logged out), `ready` is false and no
+   * generator renders: it must not fall back to the active account.
+   */
+  protected readonly binding$: Observable<{ ready: boolean; account: Account | null }> =
+    this.userId$.pipe(
+      switchMap((userId) =>
+        userId == null
+          ? of({ ready: true, account: null })
+          : this.accountService.accounts$.pipe(
+              map((accounts) => {
+                const info = accounts[userId];
+                return info == null
+                  ? { ready: false, account: null }
+                  : { ready: true, account: { id: userId, ...info } };
+              }),
+            ),
+      ),
+    );
 
   /** Removes bottom margin of internal sections */
   // FIXME(https://bitwarden.atlassian.net/browse/CL-903): Migrate to Signals

@@ -64,6 +64,10 @@ export class Fido2AuthenticatorService<
    * precedence. Credentials are searched in all of them, excluded credentials are checked in all
    * of them, and a new credential is saved to one of them. An account that is not listed when
    * the user confirms is not used. Without it, the authenticator serves the active account.
+   * @param lockedCandidateUserIds$ The accounts that would be among `candidateUserIds$` if they
+   * were unlocked. They are named to the user interface, which may let the user unlock one; the
+   * request then runs again from the search of the vaults. A request is never concluded "not
+   * found" for them without the user having been offered that. Without it, no account is named.
    */
   constructor(
     private cipherService: CipherService,
@@ -72,6 +76,7 @@ export class Fido2AuthenticatorService<
     private accountService: AccountService,
     private logService?: LogService,
     private candidateUserIds$?: Observable<UserId[]>,
+    private lockedCandidateUserIds$?: Observable<UserId[]>,
   ) {}
 
   async makeCredential(
@@ -120,55 +125,68 @@ export class Fido2AuthenticatorService<
 
       await userInterfaceSession.ensureUnlockedVault();
 
-      const userIds = await this.candidateUserIds();
-      if (userIds.length === 0) {
-        this.logService?.warning(
-          `[Fido2Authenticator] Aborting because no account can receive the credential.`,
-        );
-        throw new Fido2AuthenticatorError(Fido2AuthenticatorErrorCode.NotAllowed);
-      }
-
-      // Avoid syncing if we did it reasonably soon as the only reason for syncing is to validate excludeCredentials
-      const threshold = new Date().getTime() - 1000 * 60 * 30; // 30 minutes ago
-      for (const userId of userIds) {
-        const lastSync = await firstValueFrom(this.lastSync$(userId));
-
-        if (!lastSync || lastSync.getTime() < threshold) {
-          await this.sync(userId);
-        }
-      }
-
-      // A credential in the vault of any account counts as excluded
-      const existingCiphers = await this.findExcludedCredentials(
-        params.excludeCredentialDescriptorList,
-        userIds,
-      );
-      if (existingCiphers.length > 0) {
-        this.logService?.info(
-          `[Fido2Authenticator] Aborting due to excluded credential found in vault.`,
-        );
-        await userInterfaceSession.informExcludedCredential(
-          existingCiphers.map((ref) => ref.cipherId),
-          existingCiphers,
-        );
-        throw new Fido2AuthenticatorError(Fido2AuthenticatorErrorCode.NotAllowed);
-      }
-
       let cipher: CipherView;
       let fido2Credential: Fido2CredentialView;
       let keyPair: CryptoKeyPair;
       let userVerified = false;
       let credentialId: string;
       let pubKeyDer: Uint8Array<ArrayBuffer>;
-      const response = await userInterfaceSession.confirmNewCredential({
-        credentialName: params.rpEntity.name,
-        userName: params.userEntity.name,
-        userHandle: Fido2Utils.arrayToString(params.userEntity.id),
-        userVerification: params.requireUserVerification,
-        rpId: params.rpEntity.id,
-        userIds,
-      });
-      const cipherId = response.cipherId;
+      let response: Awaited<ReturnType<typeof userInterfaceSession.confirmNewCredential>>;
+
+      // Runs once, and again each time the user unlocked an account instead of confirming. The
+      // unlocked account is then served: its vault is checked for excluded credentials like the
+      // others, and it is offered as a target.
+      for (;;) {
+        const userIds = await this.candidateUserIds();
+        if (userIds.length === 0) {
+          this.logService?.warning(
+            `[Fido2Authenticator] Aborting because no account can receive the credential.`,
+          );
+          throw new Fido2AuthenticatorError(Fido2AuthenticatorErrorCode.NotAllowed);
+        }
+
+        // Avoid syncing if we did it reasonably soon as the only reason for syncing is to validate excludeCredentials
+        const threshold = new Date().getTime() - 1000 * 60 * 30; // 30 minutes ago
+        for (const userId of userIds) {
+          const lastSync = await firstValueFrom(this.lastSync$(userId));
+
+          if (!lastSync || lastSync.getTime() < threshold) {
+            await this.sync(userId);
+          }
+        }
+
+        // A credential in the vault of any account counts as excluded
+        const existingCiphers = await this.findExcludedCredentials(
+          params.excludeCredentialDescriptorList,
+          userIds,
+        );
+        if (existingCiphers.length > 0) {
+          this.logService?.info(
+            `[Fido2Authenticator] Aborting due to excluded credential found in vault.`,
+          );
+          await userInterfaceSession.informExcludedCredential(
+            existingCiphers.map((ref) => ref.cipherId),
+            existingCiphers,
+          );
+          throw new Fido2AuthenticatorError(Fido2AuthenticatorErrorCode.NotAllowed);
+        }
+
+        const lockedUserIds = await this.lockedUserIds(userIds);
+        response = await userInterfaceSession.confirmNewCredential({
+          credentialName: params.rpEntity.name,
+          userName: params.userEntity.name,
+          userHandle: Fido2Utils.arrayToString(params.userEntity.id),
+          userVerification: params.requireUserVerification,
+          rpId: params.rpEntity.id,
+          userIds,
+          ...(lockedUserIds.length > 0 ? { lockedUserIds } : {}),
+        });
+
+        if (response.retry !== true || lockedUserIds.length === 0) {
+          break;
+        }
+      }
+      const cipherId = response.retry === true ? undefined : response.cipherId;
       userVerified = response.userVerified;
 
       if (cipherId === undefined) {
@@ -290,55 +308,84 @@ export class Fido2AuthenticatorService<
       }
 
       let cipherOptions: AccountCipher[];
+      let response: { cipherId: string | undefined; userVerified: boolean; userId?: UserId };
 
       await userInterfaceSession.ensureUnlockedVault();
 
-      const userIds = (await this.candidateUserIds()).filter(
-        (userId) => params.userId == undefined || userId === params.userId,
-      );
-
-      // Try to find the passkey locally before causing a sync to speed things up
-      // only skip syncing if we found credentials AND all of them have a counter = 0
-      cipherOptions = await this.findCredential(params, userIds);
-      if (
-        cipherOptions.length === 0 ||
-        cipherOptions.some((c) => c.cipher.login.fido2Credentials.some((p) => p.counter > 0))
-      ) {
-        // If no passkey is found, or any had a non-zero counter, sync to get the latest data
-        for (const userId of userIds) {
-          await this.sync(userId);
-        }
-        cipherOptions = await this.findCredential(params, userIds);
-      }
-
-      if (cipherOptions.length === 0) {
-        this.logService?.info(
-          `[Fido2Authenticator] Aborting because no matching credentials were found in the vault.`,
+      // Runs once, and again each time the user unlocked an account instead of answering. The
+      // request is concluded only by an answer that is not `retry`.
+      for (;;) {
+        const userIds = (await this.candidateUserIds()).filter(
+          (userId) => params.userId == undefined || userId === params.userId,
         );
 
-        await userInterfaceSession.informCredentialNotFound();
-        throw new Fido2AuthenticatorError(Fido2AuthenticatorErrorCode.NotAllowed);
-      }
+        // Try to find the passkey locally before causing a sync to speed things up
+        // only skip syncing if we found credentials AND all of them have a counter = 0
+        cipherOptions = await this.findCredential(params, userIds);
+        if (
+          cipherOptions.length === 0 ||
+          cipherOptions.some((c) => c.cipher.login.fido2Credentials.some((p) => p.counter > 0))
+        ) {
+          // If no passkey is found, or any had a non-zero counter, sync to get the latest data
+          for (const userId of userIds) {
+            await this.sync(userId);
+          }
+          cipherOptions = await this.findCredential(params, userIds);
+        }
 
-      let response: { cipherId: string | undefined; userVerified: boolean; userId?: UserId } = {
-        cipherId: cipherOptions[0].cipher.id,
-        userId: cipherOptions[0].userId,
-        userVerified: false,
-      };
-      const masterPasswordRepromptRequired = cipherOptions.some(
-        ({ cipher }) => cipher.reprompt !== CipherRepromptType.None,
-      );
+        // The locked accounts that could hold a credential for this request
+        const lockedUserIds = (await this.lockedUserIds(userIds)).filter(
+          (userId) => params.userId == undefined || userId === params.userId,
+        );
 
-      if (
-        this.requiresUserVerificationPrompt(params, cipherOptions, masterPasswordRepromptRequired)
-      ) {
-        response = await userInterfaceSession.pickCredential({
-          cipherIds: cipherOptions.map(({ cipher }) => cipher.id),
-          cipherRefs: cipherOptions.map(accountCipherRef),
-          userVerification: params.requireUserVerification,
-          assumeUserPresence: params.assumeUserPresence,
-          masterPasswordRepromptRequired,
-        });
+        if (cipherOptions.length === 0) {
+          this.logService?.info(
+            `[Fido2Authenticator] No matching credentials were found in the vault.`,
+          );
+
+          if (lockedUserIds.length === 0) {
+            await userInterfaceSession.informCredentialNotFound();
+          } else {
+            const answer = await userInterfaceSession.informCredentialNotFound(undefined, {
+              lockedUserIds,
+            });
+            if (typeof answer === "object" && answer.retry === true) {
+              continue;
+            }
+          }
+          this.logService?.info(
+            `[Fido2Authenticator] Aborting because no matching credentials were found in the vault.`,
+          );
+          throw new Fido2AuthenticatorError(Fido2AuthenticatorErrorCode.NotAllowed);
+        }
+
+        response = {
+          cipherId: cipherOptions[0].cipher.id,
+          userId: cipherOptions[0].userId,
+          userVerified: false,
+        };
+        const masterPasswordRepromptRequired = cipherOptions.some(
+          ({ cipher }) => cipher.reprompt !== CipherRepromptType.None,
+        );
+
+        if (
+          this.requiresUserVerificationPrompt(params, cipherOptions, masterPasswordRepromptRequired)
+        ) {
+          const answer = await userInterfaceSession.pickCredential({
+            cipherIds: cipherOptions.map(({ cipher }) => cipher.id),
+            cipherRefs: cipherOptions.map(accountCipherRef),
+            userVerification: params.requireUserVerification,
+            assumeUserPresence: params.assumeUserPresence,
+            masterPasswordRepromptRequired,
+            ...(lockedUserIds.length > 0 ? { lockedUserIds } : {}),
+          });
+          if (answer.retry === true && lockedUserIds.length > 0) {
+            continue;
+          }
+          response = answer;
+        }
+
+        break;
       }
 
       const userVerified = response.userVerified;
@@ -475,6 +522,20 @@ export class Fido2AuthenticatorService<
     }
 
     return await firstValueFrom(this.candidateUserIds$);
+  }
+
+  /**
+   * The locked accounts that would be served if they were unlocked, read when it is called. An
+   * account in `servedUserIds` is unlocked by now and left out.
+   */
+  private async lockedUserIds(servedUserIds: UserId[]): Promise<UserId[]> {
+    if (this.lockedCandidateUserIds$ == undefined) {
+      return [];
+    }
+
+    return (await firstValueFrom(this.lockedCandidateUserIds$)).filter(
+      (userId) => !servedUserIds.includes(userId),
+    );
   }
 
   private lastSync$(userId: UserId): Observable<Date | null> {

@@ -9,12 +9,14 @@ import {
   Observable,
   startWith,
   pairwise,
+  switchMap,
 } from "rxjs";
 
 import { DomainSettingsService } from "@bitwarden/common/autofill/services/domain-settings.service";
 import { FeatureFlag } from "@bitwarden/common/enums/feature-flag.enum";
 import { ConfigService } from "@bitwarden/common/platform/abstractions/config/config.service";
 import { EnvironmentService } from "@bitwarden/common/platform/abstractions/environment.service";
+import { UserId } from "@bitwarden/common/types/guid";
 import { buildCipherIcon, CipherIconDetails } from "@bitwarden/common/vault/icon/build-cipher-icon";
 import { CipherViewLike } from "@bitwarden/common/vault/utils/cipher-view-like-utils";
 import { LogService, Measurement, PerfTrackGroup } from "@bitwarden/logging";
@@ -39,6 +41,13 @@ export class IconComponent {
    * The cipher to display the icon for.
    */
   readonly cipher = input.required<CipherViewLike>();
+
+  /**
+   * The account whose vault holds the cipher. The favicon is then requested from that account's
+   * icons server, so the cipher's domain is not sent to the server of another account. Defaults
+   * to the active account.
+   */
+  readonly userId = input<UserId | undefined>(undefined);
 
   /**
    * coloredIcon will adjust the size of favicons and the colors of the text icon when user is in the item details view.
@@ -84,7 +93,16 @@ export class IconComponent {
     private readonly configService: ConfigService,
   ) {
     const iconSettings$ = combineLatest([
-      this.environmentService.environment$.pipe(map((e) => e.getIconsUrl())),
+      // The icons server is the one of the account that holds the cipher. Without an account it
+      // is the active account's, as it always was.
+      toObservable(this.userId).pipe(
+        switchMap((userId) =>
+          userId == null
+            ? this.environmentService.environment$
+            : this.environmentService.getEnvironment$(userId),
+        ),
+        map((e) => e.getIconsUrl()),
+      ),
       this.domainSettingsService.showFavicons$.pipe(distinctUntilChanged()),
     ]).pipe(
       map(([iconsUrl, showFavicon]) => ({ iconsUrl, showFavicon })),

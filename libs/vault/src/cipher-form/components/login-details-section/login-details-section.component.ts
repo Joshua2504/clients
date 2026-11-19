@@ -259,7 +259,12 @@ export class LoginDetailsSectionComponent implements OnInit {
    * TODO: Browser extension needs a means to cache the current form so values are not lost upon navigating to the generator.
    */
   generatePassword = async () => {
-    const newPassword = await this.generationService.generatePassword();
+    // The generator follows the account the form writes to; without one, the active account.
+    const userId = this.cipherFormContainer.config?.userId;
+    const newPassword =
+      userId == null
+        ? await this.generationService.generatePassword()
+        : await this.generationService.generatePassword(userId);
 
     if (newPassword) {
       this.loginDetailsForm.controls.password.patchValue(newPassword);
@@ -272,9 +277,11 @@ export class LoginDetailsSectionComponent implements OnInit {
    * TODO: Browser extension needs a means to cache the current form so values are not lost upon navigating to the generator.
    */
   generateUsername = async () => {
-    const newUsername = await this.generationService.generateUsername(
-      this.cipherFormContainer.website,
-    );
+    const userId = this.cipherFormContainer.config?.userId;
+    const newUsername =
+      userId == null
+        ? await this.generationService.generateUsername(this.cipherFormContainer.website)
+        : await this.generationService.generateUsername(this.cipherFormContainer.website, userId);
     if (newUsername) {
       this.loginDetailsForm.controls.username.patchValue(newUsername);
     }

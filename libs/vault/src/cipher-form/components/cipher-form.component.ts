@@ -19,7 +19,7 @@ import { FormBuilder, FormGroup, ReactiveFormsModule } from "@angular/forms";
 import { BehaviorSubject, firstValueFrom, of, Subject, switchMap } from "rxjs";
 
 import { AccountService } from "@bitwarden/common/auth/abstractions/account.service";
-import { getUserId } from "@bitwarden/common/auth/services/account.service";
+import { getOptionalUserId, getUserId } from "@bitwarden/common/auth/services/account.service";
 import { I18nService } from "@bitwarden/common/platform/abstractions/i18n.service";
 import { CipherArchiveService } from "@bitwarden/common/vault/abstractions/cipher-archive.service";
 import { RestrictedCipherWriteError } from "@bitwarden/common/vault/abstractions/cipher.service";
@@ -309,6 +309,12 @@ export class CipherFormComponent implements AfterViewInit, OnInit, OnChanges, Ci
       }
     }
 
+    // A cached draft is restored only into the form of the account that wrote it.
+    this.cipherFormCacheService.useAccount(
+      this.config.userId ??
+        (await firstValueFrom(this.accountService.activeAccount$.pipe(getOptionalUserId))) ??
+        null,
+    );
     this.setInitialCipherFromCache();
 
     this.loading = false;
