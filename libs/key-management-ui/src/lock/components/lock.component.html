@@ -50,7 +50,10 @@
         </button>
       </ng-container>
 
-      <bit-unlock-via-prf (unlockSuccess)="onPrfUnlockSuccess($event)"></bit-unlock-via-prf>
+      <bit-unlock-via-prf
+        [userId]="scopedUserId"
+        (unlockSuccess)="onPrfUnlockSuccess($event)"
+      ></bit-unlock-via-prf>
 
       <button type="button" bitButton block (click)="logOut()">
         {{ "logOut" | i18n }}
@@ -130,6 +133,7 @@
 
         <bit-unlock-via-prf
           [formButton]="true"
+          [userId]="scopedUserId"
           (unlockSuccess)="onPrfUnlockSuccess($event)"
         ></bit-unlock-via-prf>
 
@@ -145,6 +149,8 @@
     <bit-master-password-lock
       [unlockOptions]="unlockOptions"
       [biometricUnlockBtnText]="biometricUnlockBtnText"
+      [userId]="scopedUserId"
+      (unlockAttempt)="unlockingViaMasterPassword = $event"
       (successfulUnlock)="successfulMasterPasswordUnlock($event)"
       (swapToBiometrics)="swapUnlockOption(UnlockOption.Biometrics)"
       (swapToPin)="swapUnlockOption(UnlockOption.Pin)"

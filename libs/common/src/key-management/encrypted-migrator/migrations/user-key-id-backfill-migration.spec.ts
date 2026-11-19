@@ -87,7 +87,7 @@ describe("UserKeyIdBackfillMigration", () => {
       const result = await sut.needsMigration(mockUserId);
 
       expect(result).toBe("needsMigration");
-      expect(mockSyncService.fullSync).toHaveBeenCalledWith(false);
+      expect(mockSyncService.fullSync).toHaveBeenCalledWith(false, { userId: mockUserId });
       expect(needsBackfill).toHaveBeenCalledTimes(2);
     });
 
@@ -97,7 +97,7 @@ describe("UserKeyIdBackfillMigration", () => {
       const result = await sut.needsMigration(mockUserId);
 
       expect(result).toBe("noMigrationNeeded");
-      expect(mockSyncService.fullSync).toHaveBeenCalledWith(false);
+      expect(mockSyncService.fullSync).toHaveBeenCalledWith(false, { userId: mockUserId });
     });
 
     it("returns 'noMigrationNeeded' without syncing while a failed attempt is in cooldown", async () => {

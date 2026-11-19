@@ -87,7 +87,7 @@ export class UserKeyIdBackfillMigration implements EncryptedMigration {
 
       // If another device has performed the backfill, but the local device has not
       // synced recently, we want to perform a sync so that we avoid doing a second backfill.
-      await this.syncService.fullSync(false);
+      await this.syncService.fullSync(false, { userId });
       if (!(await this.needsBackfill(userId))) {
         this.logService.info(
           `[UserKeyIdBackfillMigration] After syncing, user ${userId} does not need migration anymore. This means the migration was likely already performed on another client!`,

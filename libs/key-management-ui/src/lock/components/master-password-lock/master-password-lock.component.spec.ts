@@ -577,6 +577,31 @@ describe("MasterPasswordLockComponent", () => {
       );
     });
 
+    it("unlocks the account it was given instead of the active account", async () => {
+      const otherUserId = "other-user-id" as UserId;
+      unlockService.unlockWithMasterPassword.mockResolvedValue(undefined);
+      keyService.userKey$.mockReturnValue(of(mockUserKey));
+      accountService.activeAccount$ = of(activeAccount);
+      fixture.componentRef.setInput("userId", otherUserId);
+      component.formGroup.controls.masterPassword.setValue(mockMasterPassword);
+      let emittedEvent: { userKey: UserKey; masterPassword: string } | undefined;
+      component.successfulUnlock.subscribe(
+        (event: { userKey: UserKey; masterPassword: string }) => {
+          emittedEvent = event;
+        },
+      );
+
+      await component.submit();
+
+      expect(unlockService.unlockWithMasterPassword).toHaveBeenCalledTimes(1);
+      expect(unlockService.unlockWithMasterPassword).toHaveBeenCalledWith(
+        otherUserId,
+        mockMasterPassword,
+      );
+      expect(keyService.userKey$).toHaveBeenCalledWith(otherUserId);
+      expect(emittedEvent?.userKey).toEqual(mockUserKey);
+    });
+
     it("emits an error when user key is missing after unlock", async () => {
       unlockService.unlockWithMasterPassword.mockResolvedValue(undefined);
       keyService.userKey$.mockReturnValue(of(null));

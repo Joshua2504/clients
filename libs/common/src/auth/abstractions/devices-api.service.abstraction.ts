@@ -1,4 +1,5 @@
 import { ListResponse } from "../../models/response/list.response";
+import { UserId } from "../../types/guid";
 import { DeviceResponse } from "../abstractions/devices/responses/device.response";
 import { UpdateDevicesTrustRequest } from "../models/request/update-devices-trust.request";
 import { ProtectedDeviceResponse } from "../models/response/protected-device.response";
@@ -10,11 +11,15 @@ export abstract class DevicesApiServiceAbstraction {
 
   abstract getDevices(): Promise<ListResponse<DeviceResponse>>;
 
+  /**
+   * @param userId The account the request is sent as. Without it, the active account.
+   */
   abstract updateTrustedDeviceKeys(
     deviceIdentifier: string,
     devicePublicKeyEncryptedUserKey: string,
     userKeyEncryptedDevicePublicKey: string,
     deviceKeyEncryptedDevicePrivateKey: string,
+    userId?: UserId,
   ): Promise<DeviceResponse>;
 
   abstract updateTrust(

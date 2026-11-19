@@ -54,11 +54,10 @@ export class MinimumKdfMigration implements EncryptedMigration {
     }
 
     // This will be replaced by a separate API call that provides the user decryption options.
-    // This may have a race condition with account switching, since runMigrations is bound to a user-id, but
-    // sync-service takes the active user-id from state. It ensures we have the latest data from the server.
+    // The sync is for the user that is migrated. It ensures we have the latest data from the server.
     // It is possible that the current client was offline while the migration happened. This would cause the
     // local state to still have the old KDF values and prompt another time.
-    await this.syncService.fullSync(false);
+    await this.syncService.fullSync(false, { userId });
     if (!(await this.localStateNeedsMigration(userId))) {
       this.logService.info(
         `[MinimumKdfMigration] After syncing, user ${userId} does not need migration anymore. This means the migration was likely already performed on another client!`,

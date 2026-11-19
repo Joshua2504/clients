@@ -468,6 +468,7 @@ describe("deviceTrustService", () => {
           mockDevicePublicKeyEncryptedUserKey.encryptedString,
           mockUserKeyEncryptedDevicePublicKey.encryptedString,
           mockDeviceKeyEncryptedDevicePrivateKey.encryptedString,
+          mockUserId,
         );
 
         expect(response).toBeInstanceOf(DeviceResponse);

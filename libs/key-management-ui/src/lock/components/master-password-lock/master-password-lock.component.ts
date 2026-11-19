@@ -52,6 +52,8 @@ export class MasterPasswordLockComponent implements OnInit, OnDestroy {
 
   readonly unlockOptions = input.required<UnlockOptions>();
   readonly biometricUnlockBtnText = input.required<string>();
+  /** The account to unlock. Without it, the active account is unlocked. */
+  readonly userId = input<UserId | null>(null);
   readonly showPinSwap = computed(() => this.unlockOptions().pin.enabled ?? false);
   readonly biometricsAvailable = computed(() => this.unlockOptions().biometrics.enabled ?? false);
   readonly showBiometricsSwap = computed(() => {
@@ -62,6 +64,8 @@ export class MasterPasswordLockComponent implements OnInit, OnDestroy {
     );
   });
 
+  /** Emits true when an unlock attempt starts and false when it has ended, whatever its outcome. */
+  unlockAttempt = output<boolean>();
   successfulUnlock = output<{ userKey: UserKey; masterPassword: string }>();
   swapToBiometrics = output<void>();
   swapToPin = output<void>();
@@ -106,14 +110,20 @@ export class MasterPasswordLockComponent implements OnInit, OnDestroy {
       return;
     }
 
-    const activeUserId = await firstValueFrom(getUserId(this.accountService.activeAccount$));
+    const activeUserId =
+      this.userId() ?? (await firstValueFrom(getUserId(this.accountService.activeAccount$)));
 
     // Unlocking runs the KDF synchronously on the main thread, which blocks rendering. The button
     // shows its spinner at once (`instantSpinner`); wait until it has been painted, one frame,
     // rather than through the 75 ms spinner debounce.
     await new Promise<void>((resolve) => requestAnimationFrame(() => setTimeout(resolve)));
 
-    await this.unlockViaMasterPassword(masterPassword, activeUserId);
+    this.unlockAttempt.emit(true);
+    try {
+      await this.unlockViaMasterPassword(masterPassword, activeUserId);
+    } finally {
+      this.unlockAttempt.emit(false);
+    }
   };
 
   private async unlockViaMasterPassword(

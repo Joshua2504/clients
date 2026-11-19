@@ -1,6 +1,7 @@
 import { mock, MockProxy } from "jest-mock-extended";
 
 import { ApiService } from "../../abstractions/api.service";
+import { UserId } from "../../types/guid";
 import { DeviceResponse } from "../abstractions/devices/responses/device.response";
 
 import { DevicesApiServiceImplementation } from "./devices-api.service.implementation";
@@ -84,6 +85,22 @@ describe("DevicesApiServiceImplementation", () => {
           encryptedUserKey: publicKeyEncrypted,
         },
         true,
+        true,
+      );
+    });
+
+    it("sends the request as the given account", async () => {
+      const userId = "other-user-id" as UserId;
+      apiService.send.mockResolvedValue({ id: "123", name: "Test Device" });
+
+      await devicesApiService.updateTrustedDeviceKeys("device123", "a", "b", "c", userId);
+
+      expect(apiService.send).toHaveBeenCalledTimes(1);
+      expect(apiService.send).toHaveBeenCalledWith(
+        "PUT",
+        "/devices/device123/keys",
+        expect.anything(),
+        userId,
         true,
       );
     });

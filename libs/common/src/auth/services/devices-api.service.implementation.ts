@@ -3,6 +3,7 @@
 import { ApiService } from "../../abstractions/api.service";
 import { ListResponse } from "../../models/response/list.response";
 import { Utils } from "../../platform/misc/utils";
+import { UserId } from "../../types/guid";
 import { DeviceResponse } from "../abstractions/devices/responses/device.response";
 import { DevicesApiServiceAbstraction } from "../abstractions/devices-api.service.abstraction";
 import { UntrustDevicesRequestModel } from "../models/request/untrust-devices.request";
@@ -55,6 +56,7 @@ export class DevicesApiServiceImplementation implements DevicesApiServiceAbstrac
     devicePublicKeyEncryptedUserKey: string,
     userKeyEncryptedDevicePublicKey: string,
     deviceKeyEncryptedDevicePrivateKey: string,
+    userId?: UserId,
   ): Promise<DeviceResponse> {
     const request = new TrustedDeviceKeysRequest(
       devicePublicKeyEncryptedUserKey,
@@ -62,13 +64,11 @@ export class DevicesApiServiceImplementation implements DevicesApiServiceAbstrac
       deviceKeyEncryptedDevicePrivateKey,
     );
 
-    const result = await this.apiService.send(
-      "PUT",
-      `/devices/${deviceIdentifier}/keys`,
-      request,
-      true,
-      true,
-    );
+    const path = `/devices/${deviceIdentifier}/keys`;
+    const result =
+      userId != null
+        ? await this.apiService.send("PUT", path, request, userId, true)
+        : await this.apiService.send("PUT", path, request, true, true);
 
     return new DeviceResponse(result);
   }

@@ -55,6 +55,8 @@ import { WebAuthnPrfUnlockService } from "../services/webauthn-prf-unlock.servic
 })
 export class UnlockViaPrfComponent implements OnInit {
   readonly formButton = input<boolean>(false);
+  /** The account to unlock. Without it, the active account is unlocked. */
+  readonly scopedUserId = input<UserId | null>(null, { alias: "userId" });
   readonly unlockSuccess = output<UserKey>();
 
   unlocking = false;
@@ -70,6 +72,13 @@ export class UnlockViaPrfComponent implements OnInit {
   ) {}
 
   async ngOnInit(): Promise<void> {
+    const scopedUserId = this.scopedUserId();
+    if (scopedUserId != null) {
+      this.userId = scopedUserId;
+      this.isAvailable = await this.webAuthnPrfUnlockService.isPrfUnlockAvailable(this.userId);
+      return;
+    }
+
     const activeAccount = await firstValueFrom(this.accountService.activeAccount$);
     if (activeAccount?.id) {
       this.userId = activeAccount.id;

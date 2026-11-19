@@ -4,10 +4,13 @@ import { FormBuilder, FormGroup, ReactiveFormsModule, Validators } from "@angula
 import { Router, ActivatedRoute } from "@angular/router";
 import {
   BehaviorSubject,
+  distinctUntilChanged,
   filter,
   firstValueFrom,
+  map,
   timer,
   mergeMap,
+  Observable,
   Subject,
   switchMap,
   take,
@@ -15,10 +18,13 @@ import {
   tap,
 } from "rxjs";
 
+import { LOCK_USER_ID_QUERY_PARAM } from "@bitwarden/angular/auth/guards/lock.guard";
 import { JslibModule } from "@bitwarden/angular/jslib.module";
 import { InternalPolicyService } from "@bitwarden/common/admin-console/abstractions/policy/policy.service.abstraction";
 import { MasterPasswordPolicyOptions } from "@bitwarden/common/admin-console/models/domain/master-password-policy-options";
 import { Account, AccountService } from "@bitwarden/common/auth/abstractions/account.service";
+import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
+import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
 import { LogoutService } from "@bitwarden/common/auth/logout";
 import { ForceSetPasswordReason } from "@bitwarden/common/auth/models/domain/force-set-password-reason";
 import { getUserId } from "@bitwarden/common/auth/services/account.service";
@@ -117,7 +123,23 @@ export class LockComponent implements OnInit, OnDestroy {
   private activeAccountChange$ = new Subject<void>();
   protected loading = true;
 
+  /**
+   * The account this lock screen unlocks: the active account, or the account named by the
+   * {@link LOCK_USER_ID_QUERY_PARAM} query param.
+   */
   activeAccount: Account | null = null;
+
+  /**
+   * The account named by the {@link LOCK_USER_ID_QUERY_PARAM} query param. When set, the lock
+   * screen unlocks this account and leaves the active account as it is.
+   */
+  protected scopedUserId: UserId | null = null;
+  private readonly authService = inject(AuthService);
+  /** Whether an unlock of this lock screen has reached its shared tail, which navigates away. */
+  private continuationStarted = false;
+  private leftScopedLockScreen = false;
+  protected unlockingViaMasterPassword = false;
+  private unlockingViaPrf = false;
 
   clientType?: ClientType;
 
@@ -192,6 +214,10 @@ export class LockComponent implements OnInit, OnDestroy {
   ) {}
 
   async ngOnInit() {
+    this.scopedUserId =
+      (this.activatedRoute.snapshot.queryParamMap.get(LOCK_USER_ID_QUERY_PARAM) as UserId | null) ??
+      null;
+
     this.listenForActiveUnlockOptionChanges();
 
     // Listen for active account changes
@@ -201,6 +227,8 @@ export class LockComponent implements OnInit, OnDestroy {
 
     // Identify client
     this.clientType = this.platformUtilsService.getClientType();
+
+    this.listenForScopedAccountStatusChanges();
 
     if (this.clientType === ClientType.Desktop) {
       await this.desktopOnInit();
@@ -256,8 +284,59 @@ export class LockComponent implements OnInit, OnDestroy {
     );
   }
 
+  /** The account to unlock: the one the route names, else the active account. */
+  private accountToUnlock$(): Observable<Account | null> {
+    const scopedUserId = this.scopedUserId;
+    if (scopedUserId == null) {
+      return this.accountService.activeAccount$;
+    }
+
+    return this.accountService.accounts$.pipe(
+      map((accounts): Account | null => {
+        const info = accounts[scopedUserId];
+        return info != null ? { id: scopedUserId, ...info } : null;
+      }),
+      distinctUntilChanged((a, b) => a?.id === b?.id && a?.email === b?.email),
+    );
+  }
+
+  /**
+   * Leaves the lock screen of an account named by the route when that account stops being locked
+   * by other means than an unlock performed here: it was logged out, or unlocked elsewhere (in
+   * another window of the client, for example). The active account did not change, so nothing
+   * else navigates away. An unlock performed here navigates itself, once its tail has run.
+   */
+  private listenForScopedAccountStatusChanges() {
+    const scopedUserId = this.scopedUserId;
+    if (scopedUserId == null) {
+      return;
+    }
+
+    this.authService
+      .authStatusFor$(scopedUserId)
+      .pipe(
+        filter((status) => status !== AuthenticationStatus.Locked),
+        takeUntil(this.destroy$),
+      )
+      .subscribe((status) => {
+        const unlockingHere =
+          this.continuationStarted ||
+          this.unlockingViaPin ||
+          this.unlockingViaBiometrics ||
+          this.unlockingViaMasterPassword ||
+          this.unlockingViaPrf;
+        if (status === AuthenticationStatus.Unlocked && unlockingHere) {
+          return;
+        }
+
+        this.ngZone.run((): void => {
+          void this.leaveScopedLockScreen();
+        });
+      });
+  }
+
   private listenForActiveAccountChanges() {
-    this.accountService.activeAccount$
+    this.accountToUnlock$()
       .pipe(
         tap((account) => {
           this.loading = true;
@@ -296,6 +375,7 @@ export class LockComponent implements OnInit, OnDestroy {
         // User has no available unlock options, force logout. This happens for TDE users without a masterpassword, that don't have a persistent unlock method set.
         this.logService.warning("[LockComponent] User cannot unlock again. Logging out!");
         await this.logoutService.logout(activeAccount.id, "noUnlockOptionsAvailable");
+        await this.leaveScopedLockScreen();
         return;
       }
     }
@@ -315,6 +395,7 @@ export class LockComponent implements OnInit, OnDestroy {
         takeUntil(this.destroy$),
       )
       .subscribe(() => {
+        this.continuationStarted = true;
         this.ngZone.run((): void => {
           void this.continueAfterSettingUserKey();
         });
@@ -430,9 +511,33 @@ export class LockComponent implements OnInit, OnDestroy {
 
     if (confirmed && this.activeAccount != null) {
       await this.logoutService.logout(this.activeAccount.id, "userInitiated");
+      if (this.scopedUserId != null) {
+        await this.leaveScopedLockScreen();
+        return;
+      }
       // navigate to root so redirect guard can properly route next active user or null user to correct page
       await this.router.navigate(["/"]);
     }
+  }
+
+  /**
+   * Leaves the lock screen of an account named by the route without an unlock performed here:
+   * the account was logged out, or unlocked elsewhere. Returns to where the lock screen was
+   * opened from. Does nothing on the active account's lock screen, and nothing a second time.
+   */
+  private async leaveScopedLockScreen(): Promise<void> {
+    if (this.scopedUserId == null || this.leftScopedLockScreen) {
+      return;
+    }
+    this.leftScopedLockScreen = true;
+
+    const previousUrl =
+      this.clientType === ClientType.Browser ? this.lockComponentService.getPreviousUrl() : null;
+    if (previousUrl) {
+      await this.router.navigateByUrl(previousUrl);
+      return;
+    }
+    await this.router.navigate(["/"]);
   }
 
   async unlockViaBiometrics(): Promise<void> {
@@ -468,11 +573,16 @@ export class LockComponent implements OnInit, OnDestroy {
       throw new Error("No active user.");
     }
 
-    await this.unlockService.unlockWithDecryptedUserKey(
-      this.activeAccount.id,
-      userKey,
-      UnlockMethod.Prf,
-    );
+    this.unlockingViaPrf = true;
+    try {
+      await this.unlockService.unlockWithDecryptedUserKey(
+        this.activeAccount.id,
+        userKey,
+        UnlockMethod.Prf,
+      );
+    } finally {
+      this.unlockingViaPrf = false;
+    }
   }
 
   /**
@@ -545,6 +655,7 @@ export class LockComponent implements OnInit, OnDestroy {
           message: this.i18nService.t("tooManyInvalidPinEntryAttemptsLoggingOut"),
         });
         await this.logoutService.logout(this.activeAccount.id, "tooManyInvalidPinAttempts");
+        await this.leaveScopedLockScreen();
         return;
       }
 
@@ -567,6 +678,7 @@ export class LockComponent implements OnInit, OnDestroy {
       return;
     }
 
+    this.continuationStarted = true;
     await this.continueAfterSettingUserKey({
       passwordEvaluation: {
         masterPassword: event.masterPassword,
@@ -615,10 +727,16 @@ export class LockComponent implements OnInit, OnDestroy {
       await migrations;
     }
 
-    this.messagingService.send("unlocked");
+    const scopedUserId = this.scopedUserId;
+    if (scopedUserId != null) {
+      // Names the account, so that what is meant for an unlock of the active account is left out
+      this.messagingService.send("unlocked", { userId: scopedUserId });
+    } else {
+      this.messagingService.send("unlocked");
+    }
 
     if (afterUnlockActions.passwordEvaluation) {
-      const userId = (await firstValueFrom(this.accountService.activeAccount$))?.id;
+      const userId = scopedUserId ?? (await firstValueFrom(this.accountService.activeAccount$))?.id;
       if (userId == null) {
         throw new Error("No active user.");
       }
@@ -627,10 +745,12 @@ export class LockComponent implements OnInit, OnDestroy {
         // If we do not have any saved policies, attempt to load them from the service
         if (this.enforcedMasterPasswordOptions == undefined) {
           this.enforcedMasterPasswordOptions = await firstValueFrom(
-            this.accountService.activeAccount$.pipe(
-              getUserId,
-              switchMap((userId) => this.policyService.masterPasswordPolicyOptions$(userId)),
-            ),
+            scopedUserId != null
+              ? this.policyService.masterPasswordPolicyOptions$(scopedUserId)
+              : this.accountService.activeAccount$.pipe(
+                  getUserId,
+                  switchMap((userId) => this.policyService.masterPasswordPolicyOptions$(userId)),
+                ),
           );
         }
 
@@ -648,7 +768,13 @@ export class LockComponent implements OnInit, OnDestroy {
 
     if (this.platformUtilsService.getClientType() == ClientType.Web) {
       // Web does not cache vault data and would be in a unusable state when unlocked.
-      await this.syncService.fullSync(true);
+      if (scopedUserId != null) {
+        await this.syncService.fullSync(true, { userId: scopedUserId });
+      } else {
+        await this.syncService.fullSync(true);
+      }
+    } else if (scopedUserId != null) {
+      void this.syncService.fullSync(false, { userId: scopedUserId });
     } else {
       // On non-web clients, we start a sync in the background, but to not block by it
       void this.syncService.fullSync(false);

@@ -135,7 +135,7 @@ describe("V2KeyRotationMigration", () => {
       const result = await sut.needsMigration(mockUserId);
 
       expect(result).toBe("noMigrationNeeded");
-      expect(mockSyncService.fullSync).toHaveBeenCalledWith(false);
+      expect(mockSyncService.fullSync).toHaveBeenCalledWith(false, { userId: mockUserId });
     });
 
     it("returns 'noMigrationNeeded' when user key is already v2", async () => {
@@ -165,7 +165,7 @@ describe("V2KeyRotationMigration", () => {
       const result = await sut.needsMigration(mockUserId);
 
       expect(result).toBe("noMigrationNeeded");
-      expect(mockSyncService.fullSync).toHaveBeenCalledWith(false);
+      expect(mockSyncService.fullSync).toHaveBeenCalledWith(false, { userId: mockUserId });
       expect(mockLogService.info).toHaveBeenCalledWith(
         `[V2KeyRotationMigration] After syncing, user ${mockUserId} is already on v2. Skipping.`,
       );
@@ -178,7 +178,7 @@ describe("V2KeyRotationMigration", () => {
       const result = await sut.needsMigration(mockUserId);
 
       expect(result).toBe("noMigrationNeeded");
-      expect(mockSyncService.fullSync).toHaveBeenCalledWith(false);
+      expect(mockSyncService.fullSync).toHaveBeenCalledWith(false, { userId: mockUserId });
     });
 
     it("requests untrusted organization public keys for a CreateIfNeeded rotation", async () => {
@@ -198,7 +198,7 @@ describe("V2KeyRotationMigration", () => {
       const result = await sut.needsMigration(mockUserId);
 
       expect(result).toBe("noMigrationNeeded");
-      expect(mockSyncService.fullSync).toHaveBeenCalledWith(false);
+      expect(mockSyncService.fullSync).toHaveBeenCalledWith(false, { userId: mockUserId });
     });
 
     it("returns 'noMigrationNeeded' when user has a corrupted/missing private key", async () => {
@@ -247,7 +247,7 @@ describe("V2KeyRotationMigration", () => {
       const result = await sut.needsMigration(mockUserId);
 
       expect(result).toBe("needsMigrationWithMasterPassword");
-      expect(mockSyncService.fullSync).toHaveBeenCalledWith(false);
+      expect(mockSyncService.fullSync).toHaveBeenCalledWith(false, { userId: mockUserId });
     });
   });
 
@@ -269,7 +269,7 @@ describe("V2KeyRotationMigration", () => {
 
       await sut.runMigrations(mockUserId, mockMasterPassword);
 
-      expect(mockSyncService.fullSync).toHaveBeenCalledWith(true);
+      expect(mockSyncService.fullSync).toHaveBeenCalledWith(true, { userId: mockUserId });
       expect(mockUserKeyRotationService.rotateUserKey).toHaveBeenCalledWith(
         { Password: { password: mockMasterPassword } },
         "CreateIfNeeded",

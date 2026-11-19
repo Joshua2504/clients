@@ -2,14 +2,16 @@ import { ComponentFixture, TestBed, fakeAsync, tick } from "@angular/core/testin
 import { FormBuilder, ReactiveFormsModule } from "@angular/forms";
 import { ActivatedRoute, Router } from "@angular/router";
 import { mock } from "jest-mock-extended";
-import { EMPTY, Subject, firstValueFrom, of } from "rxjs";
+import { BehaviorSubject, EMPTY, Subject, firstValueFrom, of } from "rxjs";
 import { ZXCVBNResult } from "zxcvbn";
 
 import { JslibModule } from "@bitwarden/angular/jslib.module";
 import { InternalPolicyService } from "@bitwarden/common/admin-console/abstractions/policy/policy.service.abstraction";
 import { MasterPasswordPolicyOptions } from "@bitwarden/common/admin-console/models/domain/master-password-policy-options";
 import { Account, AccountService } from "@bitwarden/common/auth/abstractions/account.service";
+import { AuthService } from "@bitwarden/common/auth/abstractions/auth.service";
 import { UserVerificationService } from "@bitwarden/common/auth/abstractions/user-verification/user-verification.service.abstraction";
+import { AuthenticationStatus } from "@bitwarden/common/auth/enums/authentication-status";
 import { LogoutService } from "@bitwarden/common/auth/logout";
 import { ForceSetPasswordReason } from "@bitwarden/common/auth/models/domain/force-set-password-reason";
 import { ClientType, DeviceType } from "@bitwarden/common/enums";
@@ -23,7 +25,7 @@ import { LogService } from "@bitwarden/common/platform/abstractions/log.service"
 import { MessagingService } from "@bitwarden/common/platform/abstractions/messaging.service";
 import { PlatformUtilsService } from "@bitwarden/common/platform/abstractions/platform-utils.service";
 import { SyncService } from "@bitwarden/common/platform/sync";
-import { mockAccountServiceWith } from "@bitwarden/common/spec";
+import { mockAccountInfoWith, mockAccountServiceWith } from "@bitwarden/common/spec";
 import { PasswordStrengthServiceAbstraction } from "@bitwarden/common/tools/password-strength";
 import { UserId } from "@bitwarden/common/types/guid";
 import { UserKey } from "@bitwarden/common/types/key";
@@ -90,10 +92,14 @@ describe("LockComponent", () => {
   const mockWebAuthnPrfUnlockService = mock<WebAuthnPrfUnlockService>();
   const mockEncryptedMigrator = mock<EncryptedMigrator>();
   const mockPinService = mock<PinServiceAbstraction>();
+  const mockAuthService = mock<AuthService>();
   const mockActivatedRoute = {
     snapshot: {
       paramMap: {
         get: jest.fn().mockReturnValue(null), // return null for 'disable-redirect' param
+      },
+      queryParamMap: {
+        get: jest.fn().mockReturnValue(null), // return null for the 'userId' param
       },
     },
   };
@@ -160,6 +166,7 @@ describe("LockComponent", () => {
         { provide: ActivatedRoute, useValue: mockActivatedRoute },
         { provide: EncryptedMigrator, useValue: mockEncryptedMigrator },
         { provide: PinServiceAbstraction, useValue: mockPinService },
+        { provide: AuthService, useValue: mockAuthService },
       ],
     })
       .overrideProvider(DialogService, { useValue: mockDialogService })
@@ -1012,5 +1019,214 @@ describe("LockComponent", () => {
 
       expect(setDefaultSpy).not.toHaveBeenCalled();
     }));
+  });
+
+  describe("the lock screen of an account named by the route", () => {
+    const otherUserId = "other-user-id" as UserId;
+    const otherEmail = "other@example.com";
+    const previousUrl = "/fido2?sessionId=test-session&unlockedUserId=other-user-id";
+    const mockUserKey = new SymmetricCryptoKey(new Uint8Array(64)) as UserKey;
+    const masterPassword = "test-password";
+    let otherStatus: BehaviorSubject<AuthenticationStatus>;
+    const unlockOptions = {
+      masterPassword: { enabled: true },
+      pin: { enabled: true },
+      biometrics: { enabled: false, biometricsStatus: BiometricsStatus.NotEnabledLocally },
+      prf: { enabled: false },
+    };
+
+    beforeEach(() => {
+      mockAccountService.accountsSubject.next({
+        [userId]: mockAccountInfoWith({ email: "active@example.com" }),
+        [otherUserId]: mockAccountInfoWith({ email: otherEmail }),
+      });
+      mockActivatedRoute.snapshot.queryParamMap.get.mockImplementation((name: string) =>
+        name === "userId" ? otherUserId : null,
+      );
+      mockActivatedRoute.snapshot.paramMap.get.mockReturnValue(null);
+      mockPlatformUtilsService.getClientType.mockReturnValue(ClientType.Browser);
+      mockLockComponentService.getAvailableUnlockOptions$.mockReturnValue(of(unlockOptions));
+      mockLockComponentService.getPreviousUrl.mockReturnValue(previousUrl);
+      mockPolicyService.masterPasswordPolicyOptions$.mockReturnValue(of(undefined));
+      mockLogoutService.logout.mockResolvedValue(undefined);
+      otherStatus = new BehaviorSubject<AuthenticationStatus>(AuthenticationStatus.Locked);
+      mockAuthService.authStatusFor$.mockReturnValue(otherStatus);
+    });
+
+    const init = async () => {
+      await component.ngOnInit();
+      await fixture.whenStable();
+    };
+
+    const activeUserId = async () => (await firstValueFrom(mockAccountService.activeAccount$))?.id;
+
+    it("shows that account and its unlock options, not the active account's", async () => {
+      await init();
+
+      expect(component.activeAccount).toEqual(
+        expect.objectContaining({ id: otherUserId, email: otherEmail }),
+      );
+      expect(mockAnonLayoutWrapperDataService.setAnonLayoutWrapperData).toHaveBeenCalledWith({
+        pageSubtitle: otherEmail,
+      });
+      expect(mockLockComponentService.getAvailableUnlockOptions$).toHaveBeenCalledWith(otherUserId);
+      expect(mockLockComponentService.getAvailableUnlockOptions$).not.toHaveBeenCalledWith(userId);
+      expect(component.unlockOptions).toEqual(unlockOptions);
+    });
+
+    it("continues a master password unlock for that account and leaves the active account as it is", async () => {
+      await init();
+
+      await component.successfulMasterPasswordUnlock({ userKey: mockUserKey, masterPassword });
+
+      expect(mockBiometricStateService.resetUserPromptCancelled).toHaveBeenCalledWith(otherUserId);
+      expect(mockEncryptedMigrator.runMigrations).toHaveBeenCalledWith(otherUserId, masterPassword);
+      expect(mockPolicyService.masterPasswordPolicyOptions$).toHaveBeenCalledWith(otherUserId);
+      expect(mockSyncService.fullSync).toHaveBeenCalledWith(false, { userId: otherUserId });
+      expect(mockSyncService.fullSync).not.toHaveBeenCalledWith(false);
+      expect(mockUserAsymmetricKeysRegenerationService.regenerateIfNeeded).toHaveBeenCalledWith(
+        otherUserId,
+      );
+      // The background is told which account, so it does not take it for the active one
+      expect(mockMessagingService.send).toHaveBeenCalledWith("unlocked", { userId: otherUserId });
+      expect(mockRouter.navigateByUrl).toHaveBeenCalledWith(previousUrl);
+      expect(await activeUserId()).toBe(userId);
+      expect(mockAccountService.mock.switchAccount).not.toHaveBeenCalled();
+    });
+
+    it("requires a password change of that account when its policy asks for one", async () => {
+      mockPolicyService.masterPasswordPolicyOptions$.mockReturnValue(
+        of({ enforceOnLogin: true } as MasterPasswordPolicyOptions),
+      );
+      mockPasswordStrengthService.getPasswordStrength.mockReturnValue({ score: 1 } as ZXCVBNResult);
+      mockPolicyService.evaluateMasterPassword.mockReturnValue(false);
+      await init();
+
+      await component.successfulMasterPasswordUnlock({ userKey: mockUserKey, masterPassword });
+
+      expect(mockPasswordStrengthService.getPasswordStrength).toHaveBeenCalledWith(
+        masterPassword,
+        otherEmail,
+      );
+      expect(mockMasterPasswordService.setForceSetPasswordReason).toHaveBeenCalledWith(
+        ForceSetPasswordReason.WeakMasterPassword,
+        otherUserId,
+      );
+    });
+
+    it("goes to the default route when no previous url is kept", async () => {
+      mockLockComponentService.getPreviousUrl.mockReturnValue(null);
+      await init();
+
+      await component.successfulMasterPasswordUnlock({ userKey: mockUserKey, masterPassword });
+
+      expect(mockRouter.navigate).toHaveBeenCalledWith(["/tabs/current"]);
+    });
+
+    it("establishes device trust for that account", async () => {
+      await init();
+
+      await component.successfulMasterPasswordUnlock({ userKey: mockUserKey, masterPassword });
+
+      expect(mockDeviceTrustService.trustDeviceIfRequired).toHaveBeenCalledWith(otherUserId);
+    });
+
+    it.each([AuthenticationStatus.LoggedOut, AuthenticationStatus.Unlocked])(
+      "returns to the previous url when that account becomes %s elsewhere",
+      async (status) => {
+        await init();
+        expect(mockRouter.navigateByUrl).not.toHaveBeenCalled();
+
+        otherStatus.next(status);
+        otherStatus.next(status);
+
+        expect(mockAuthService.authStatusFor$).toHaveBeenCalledWith(otherUserId);
+        expect(mockRouter.navigateByUrl).toHaveBeenCalledTimes(1);
+        expect(mockRouter.navigateByUrl).toHaveBeenCalledWith(previousUrl);
+        // The unlock was not performed here: its tail is not run here either
+        expect(mockMessagingService.send).not.toHaveBeenCalled();
+      },
+    );
+
+    it("leaves the navigation to the unlock while that account is unlocked here", async () => {
+      await init();
+      component.formGroup = new FormBuilder().group({ pin: ["1234"] });
+      let finishUnlock!: () => void;
+      mockUnlockService.unlockWithPin.mockReturnValue(
+        new Promise<void>((resolve) => (finishUnlock = resolve)),
+      );
+
+      const unlock = component["unlockViaPin"]();
+      await Promise.resolve();
+      otherStatus.next(AuthenticationStatus.Unlocked);
+      finishUnlock();
+      await unlock;
+
+      expect(mockRouter.navigateByUrl).not.toHaveBeenCalled();
+    });
+
+    it("leaves the navigation to the tail of a master password unlock", async () => {
+      await init();
+
+      const unlock = component.successfulMasterPasswordUnlock({
+        userKey: mockUserKey,
+        masterPassword,
+      });
+      otherStatus.next(AuthenticationStatus.Unlocked);
+      await unlock;
+
+      expect(mockRouter.navigateByUrl).toHaveBeenCalledTimes(1);
+      expect(mockMessagingService.send).toHaveBeenCalledWith("unlocked", { userId: otherUserId });
+    });
+
+    it("unlocks that account with the PIN", async () => {
+      await init();
+      component.formGroup = new FormBuilder().group({ pin: ["1234"] });
+
+      await component["unlockViaPin"]();
+
+      expect(mockUnlockService.unlockWithPin).toHaveBeenCalledWith(otherUserId, "1234");
+    });
+
+    it("logs out that account alone after too many invalid PINs, and returns to the previous url", async () => {
+      mockUnlockService.unlockWithPin.mockRejectedValue(new Error("invalid PIN"));
+      await init();
+      component.formGroup = new FormBuilder().group({ pin: ["0000"] });
+
+      for (let attempt = 0; attempt < 5; attempt++) {
+        await component["unlockViaPin"]();
+      }
+
+      expect(mockLogoutService.logout).toHaveBeenCalledTimes(1);
+      expect(mockLogoutService.logout).toHaveBeenCalledWith(
+        otherUserId,
+        "tooManyInvalidPinAttempts",
+      );
+      expect(mockRouter.navigateByUrl).toHaveBeenCalledWith(previousUrl);
+      expect(await activeUserId()).toBe(userId);
+    });
+
+    it("logs out that account alone when the user asks to, and returns to the previous url", async () => {
+      mockDialogService.openSimpleDialog.mockResolvedValue(true);
+      await init();
+
+      await component.logOut();
+
+      expect(mockLogoutService.logout).toHaveBeenCalledWith(otherUserId, "userInitiated");
+      expect(mockRouter.navigateByUrl).toHaveBeenCalledWith(previousUrl);
+      expect(mockRouter.navigate).not.toHaveBeenCalledWith(["/"]);
+    });
+
+    it("unlocks that account with biometrics", async () => {
+      await init();
+      component.unlockOptions = {
+        ...unlockOptions,
+        biometrics: { enabled: true, biometricsStatus: BiometricsStatus.Available },
+      };
+
+      await component.unlockViaBiometrics();
+
+      expect(mockUnlockService.unlockWithBiometrics).toHaveBeenCalledWith(otherUserId);
+    });
   });
 });

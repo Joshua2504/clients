@@ -199,6 +199,8 @@ export class DeviceTrustService implements DeviceTrustServiceAbstraction {
       devicePublicKeyEncryptedUserKey.encryptedString,
       userKeyEncryptedDevicePublicKey.encryptedString,
       deviceKeyEncryptedDevicePrivateKey.encryptedString,
+      // Sent as the account that is trusted, which need not be the active one
+      userId,
     );
 
     // store device key in local/secure storage if enc keys posted to server successfully

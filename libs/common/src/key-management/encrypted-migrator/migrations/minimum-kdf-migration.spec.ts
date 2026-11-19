@@ -134,7 +134,7 @@ describe("MinimumKdfMigration", () => {
       const result = await sut.needsMigration(mockUserId);
 
       expect(result).toBe("noMigrationNeeded");
-      expect(mockSyncService.fullSync).toHaveBeenCalledWith(false);
+      expect(mockSyncService.fullSync).toHaveBeenCalledWith(false, { userId: mockUserId });
       expect(mockKdfConfigService.getKdfConfig).toHaveBeenCalledTimes(2);
       expect(mockLogService.info).toHaveBeenCalledWith(
         `[MinimumKdfMigration] After syncing, user ${mockUserId} does not need migration anymore. This means the migration was likely already performed on another client!`,

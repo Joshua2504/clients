@@ -99,6 +99,12 @@ describe("lockGuard", () => {
     return {
       router: testBed.inject(Router),
       messagingService,
+      authService,
+      accountService,
+      vaultTimeoutSettingsService,
+      keyService,
+      deviceTrustService,
+      userVerificationService,
     };
   };
 
@@ -212,5 +218,119 @@ describe("lockGuard", () => {
 
     await router.navigate(["lock"]);
     expect(router.url).toBe("/confirm-key-connector-domain");
+  });
+
+  describe("with a userId query param", () => {
+    const activeUserId = "test-id" as UserId;
+    const otherUserId = "other-id" as UserId;
+
+    /** The active account has `authStatus`; the other account is known and has `otherStatus`. */
+    const setupAccounts = (
+      authStatus: AuthenticationStatus,
+      otherStatus: AuthenticationStatus,
+      setupParams: Omit<SetupParams, "authStatus"> = {},
+    ) => {
+      const mocks = setup({ ...setupParams, authStatus });
+      mocks.accountService.accounts$ = of({
+        [activeUserId]: mockAccountInfoWith({ email: "test@email.com" }),
+        [otherUserId]: mockAccountInfoWith({ email: "other@email.com" }),
+      });
+      mocks.authService.authStatusFor$.mockImplementation((userId) =>
+        of(userId === otherUserId ? otherStatus : authStatus),
+      );
+      mocks.deviceTrustService.supportsDeviceTrustByUserId$.mockReturnValue(
+        of(setupParams.supportsDeviceTrust ?? false),
+      );
+      return mocks;
+    };
+
+    it("allows the lock route for a locked account that is not the active one", async () => {
+      const { router, vaultTimeoutSettingsService, keyService } = setupAccounts(
+        AuthenticationStatus.Unlocked,
+        AuthenticationStatus.Locked,
+      );
+
+      await router.navigate(["lock"], { queryParams: { userId: otherUserId } });
+
+      expect(router.url).toBe(`/lock?userId=${otherUserId}`);
+      expect(vaultTimeoutSettingsService.canLock).toHaveBeenCalledWith(otherUserId);
+      expect(keyService.everHadUserKey$).toHaveBeenCalledWith(otherUserId);
+      expect(keyConnectorService.requiresDomainConfirmation$).toHaveBeenCalledWith(otherUserId);
+    });
+
+    it.each([AuthenticationStatus.Unlocked, AuthenticationStatus.LoggedOut])(
+      "redirects to the root route when that account has status %s, whatever the active account's",
+      async (otherStatus) => {
+        const { router } = setupAccounts(AuthenticationStatus.Locked, otherStatus);
+
+        await router.navigate(["lock"], { queryParams: { userId: otherUserId } });
+
+        expect(router.url).toBe("/");
+      },
+    );
+
+    it("redirects to the root route for an account the client does not hold", async () => {
+      const { router, authService } = setupAccounts(
+        AuthenticationStatus.Locked,
+        AuthenticationStatus.Locked,
+      );
+
+      await router.navigate(["lock"], { queryParams: { userId: "unknown-id" } });
+
+      expect(router.url).toBe("/");
+      expect(authService.authStatusFor$).not.toHaveBeenCalled();
+    });
+
+    it("rejects the navigation when that account cannot lock", async () => {
+      const { router, vaultTimeoutSettingsService } = setupAccounts(
+        AuthenticationStatus.Unlocked,
+        AuthenticationStatus.Locked,
+      );
+      vaultTimeoutSettingsService.canLock.mockImplementation(
+        async (userId) => userId !== otherUserId,
+      );
+
+      await router.navigate(["lock"], { queryParams: { userId: otherUserId } });
+
+      expect(router.url).toBe("/");
+    });
+
+    it("rejects the navigation instead of opening the active account's key connector confirmation", async () => {
+      const { router } = setupAccounts(AuthenticationStatus.Unlocked, AuthenticationStatus.Locked);
+      keyConnectorService.requiresDomainConfirmation$.mockReturnValue(
+        of({ keyConnectorUrl: "https://example.com" } as KeyConnectorDomainConfirmation),
+      );
+
+      await router.navigate(["lock"], { queryParams: { userId: otherUserId } });
+
+      expect(router.url).toBe("/");
+    });
+
+    it("applies the TDE rule to that account", async () => {
+      const { router, deviceTrustService, keyService } = setupAccounts(
+        AuthenticationStatus.Unlocked,
+        AuthenticationStatus.Locked,
+        { supportsDeviceTrust: false },
+      );
+      deviceTrustService.supportsDeviceTrustByUserId$.mockReturnValue(of(true));
+      keyService.everHadUserKey$.mockReturnValue(of(false));
+
+      await router.navigate(["lock"], { queryParams: { userId: otherUserId } });
+
+      expect(router.url).toBe("/");
+      expect(deviceTrustService.supportsDeviceTrustByUserId$).toHaveBeenCalledWith(otherUserId);
+    });
+
+    it("leaves the active account's lock route as it is", async () => {
+      const { router, vaultTimeoutSettingsService } = setupAccounts(
+        AuthenticationStatus.Locked,
+        AuthenticationStatus.Unlocked,
+      );
+
+      await router.navigate(["lock"]);
+
+      expect(router.url).toBe("/lock");
+      expect(vaultTimeoutSettingsService.canLock).toHaveBeenCalledWith(activeUserId);
+    });
   });
 });
